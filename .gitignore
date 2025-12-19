@@ -1,0 +1,12 @@
+.idea/**
+.vscode/**
+checkpoints/**
+data/grab
+data/YCB_Video
+data/proprocessed
+data/mano_v1_2
+force_labels/grab/grab*
+lightning_logs/**
+logs/**
+tmp/**
+__pycache__

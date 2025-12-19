@@ -1,0 +1,31 @@
+defaults:
+  - msdf: base
+  - data: grab
+  - _self_
+
+training_stage: "generator"
+
+model:
+  n_comps: 26
+
+train:
+  batch_size: 64
+
+val:
+  batch_size: 64
+
+test:
+  n_processes: 16
+  n_samples: 64
+  batch_size: ${test.n_samples}
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null
+  job_logging:
+    disable_existing_loggers: false
+  hydra_logging:
+    disable_existing_loggers: false

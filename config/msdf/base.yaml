@@ -1,0 +1,3 @@
+num_grids: 1024
+kernel_size: 16
+scale: 0.01
