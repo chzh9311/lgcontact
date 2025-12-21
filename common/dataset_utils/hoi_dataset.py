@@ -50,7 +50,7 @@ class BaseHOIDataset(Dataset):
                 self.hand_sides = self.sample_frames(self.hand_sides)
                 self.lh_data = self.sample_frames(self.lh_data)
 
-        if self.split == 'test':
+        if self.split == 'test' and not self.test_gt:
             self.num_samples = cfg.test_samples
 
         ## Calculate partitions

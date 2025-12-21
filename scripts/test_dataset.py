@@ -52,7 +52,7 @@ def vis_msdf_data_sample(cfg):
 
 @hydra.main(config_path="../config", config_name="mlcontact_vqvae")
 def vis_local_grid_interact(cfg):
-    dm = LocalGridDataModule(cfg, split='val')
+    dm = LocalGridDataModule(cfg)
     dm.prepare_data()
 
 

@@ -4,6 +4,7 @@ dataset_path: data/grab
 hand_cse_path: data/misc/hand_cse.pt
 preprocessed_dir: data/preprocessed
 MSDF_dir: data/preprocessed/grab_msdf
+test_gt: true
 augmentation:
   enable: true
   n_rot: 10
