@@ -616,8 +616,10 @@ def cp_match(pts1: torch.Tensor, pts2: torch.Tensor, weight: torch.Tensor=None):
     W = torch.sum((pts2.unsqueeze(-1) @ pts1.unsqueeze(-2)) * weight.unsqueeze(-1), dim=1)
     U, S, Vh = torch.linalg.svd(W)
     R = U @ Vh
-    I = torch.eye(3, device=pts1.device).view(1, 3, 3).repeat(pts1.shape[0], 1, 1).float()
-    I[:, 2, 2] = torch.det(R)
+    I = torch.eye(3, device=pts1.device, dtype=pts1.dtype).view(1, 3, 3).repeat(pts1.shape[0], 1, 1)
+    # Cast to float32 for determinant computation if needed (fp16 not supported)
+    R_compute = R.float() if R.dtype == torch.float16 else R
+    I[:, 2, 2] = torch.det(R_compute).to(I.dtype)
     R = U @ I @ Vh
     t = (mean2.transpose(-1, -2) - R @ mean1.transpose(-1, -2)).view(-1, 3)
     return R, t
@@ -793,3 +795,4 @@ def compute_point_bps(hand_verts, half_size=0.5, resolution=64):
     point_bps = 1 / (min_dists / bin_width + 1e-8)
     point_bps = torch.clamp(point_bps, max=1.0)
     return point_bps, nearest_indices, grid_pts
+

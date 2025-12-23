@@ -7,7 +7,6 @@ import trimesh
 from pysdf import SDF
 from skimage.measure import marching_cubes
 
-
 def get_grid(kernel_size, device='cpu') -> torch.Tensor:
     """
     Get the cubic interpolant for the given kernel size in range [-1, 1].
@@ -188,3 +187,150 @@ def reconstruct_from_sdf(sdf, resolution):
     verts, faces, _, _ = marching_cubes(grid_sdf, level=0.0)
     mesh = trimesh.Trimesh(vertices=verts, faces=faces)
     return mesh
+
+
+def calculate_contact_mask(point_cloud, hand_verts, grid_scale, device):
+    """
+    Calculate contact mask for a given point cloud.
+
+    Args:
+        point_cloud: torch tensor of shape (B, N, 3)
+        hand_verts: torch tensor of shape (B, H, 3)
+        grid_scale: float, scale of half the grid
+        device: torch device to use
+    Returns:
+        mask: torch tensor of shape (B, N) indicating contact points
+    """
+    # Convert inputs to torch tensors on device if needed
+    if not isinstance(point_cloud, torch.Tensor):
+        point_cloud = torch.from_numpy(point_cloud).float().to(device)
+    else:
+        point_cloud = point_cloud.to(device)
+
+    if not isinstance(hand_verts, torch.Tensor):
+        hand_verts = torch.from_numpy(hand_verts).float().to(device)
+    else:
+        hand_verts = hand_verts.to(device)
+
+    ## Determine grid contact using Chebyshev distance
+    # point_cloud: (B, N, 3), hand_verts: (B, H, 3)
+    cbdist = torch.max(torch.abs(point_cloud[:, :, None, :] - hand_verts[:, None, :, :]), dim=-1)[0]  # (B, N, H)
+    mask = torch.min(cbdist, dim=-1)[0] < grid_scale  # (B, N)
+
+    return mask
+
+
+def calc_local_grid_batch(contact_points, normalized_coords, obj_mesh, kernel_size, grid_scale, hand_verts, hand_cse, device):
+    M = contact_points.shape[0]
+
+    if M == 0:
+        # No contact points for this sample
+        local_grids = torch.empty(0, kernel_size, kernel_size, kernel_size,
+                                                2 + hand_cse.shape[-1], device=device)
+
+    else:
+        # Scale and translate to world coordinates for each contact point
+        # contact_points: (M, 3), normalized_coords: (kernel_size^3, 3)
+        # Result: (M, kernel_size^3, 3)
+        grid_points_flat = (contact_points[:, None, :] + normalized_coords[None, :, :] * grid_scale).reshape(-1, 3)
+
+        # Calculate SDF values if obj_mesh is provided
+        if obj_mesh is not None:
+            objSDF = SDF(obj_mesh.vertices, obj_mesh.faces)
+            grid_sdfs_np = objSDF(grid_points_flat.cpu().numpy())
+            grid_sdfs = torch.from_numpy(grid_sdfs_np).float().to(device).reshape(M, kernel_size, kernel_size, kernel_size, 1)
+
+        # Calculate distance to nearest hand vertex for this sample
+        dist_mat = torch.norm(hand_verts[None, :, :] - grid_points_flat[:, None, :], dim=-1)  # (M*kernel_size^3, H)
+        nn_dist, nn_idx = torch.min(dist_mat, dim=1)  # (M * kernel_size^3)
+
+        grid_distance = nn_dist.reshape(M, kernel_size, kernel_size, kernel_size, 1)
+        grid_hand_cse = hand_cse[nn_idx].reshape(M, kernel_size, kernel_size, kernel_size, -1)
+
+        # Concatenate features based on whether obj_mesh is provided
+        if obj_mesh is not None:
+            local_grids = torch.cat([grid_sdfs, grid_distance, grid_hand_cse], dim=-1)  # (M, kernel_size, kernel_size, kernel_size, 1 + 1 + cse_dim)
+        else:
+            local_grids = torch.cat([grid_distance, grid_hand_cse], dim=-1)  # (M, kernel_size, kernel_size, kernel_size, 1 + cse_dim)
+
+    return local_grids
+
+
+def calc_local_grid(contact_point, normalized_coords, obj_mesh, kernel_size, grid_scale, hand_verts, hand_cse):
+    """
+    Calculate local grid for a single contact point using numpy on CPU.
+
+    Args:
+        contact_point: numpy array of shape (3,), single contact point
+        normalized_coords: numpy array of shape (kernel_size^3, 3), normalized grid coordinates
+        obj_mesh: trimesh.Trimesh, object mesh
+        kernel_size: int, size of the cubic grid
+        grid_scale: float, scale of the grid
+        hand_verts: numpy array of shape (778, 3), hand vertices
+        hand_cse: numpy array of shape (778, cse_dim), hand contact surface embeddings
+
+    Returns:
+        local_grid: numpy array of shape (kernel_size, kernel_size, kernel_size, 2 + cse_dim)
+    """
+    # Scale and translate to world coordinates
+    # contact_point: (3,), normalized_coords: (kernel_size^3, 3)
+    # Result: (kernel_size^3, 3)
+    grid_points_flat = contact_point[None, :] + normalized_coords * grid_scale
+
+    # Calculate SDF values
+    objSDF = SDF(obj_mesh.vertices, obj_mesh.faces)
+    grid_sdfs_np = objSDF(grid_points_flat)
+    grid_sdfs = grid_sdfs_np.reshape(kernel_size, kernel_size, kernel_size, 1)
+
+    # Calculate distance to nearest hand vertex
+    # grid_points_flat: (kernel_size^3, 3), hand_verts: (778, 3)
+    dist_mat = np.linalg.norm(grid_points_flat[:, None, :] - hand_verts[None, :, :], axis=-1)  # (kernel_size^3, 778)
+    nn_idx = np.argmin(dist_mat, axis=1)  # (kernel_size^3,)
+    nn_dist = np.min(dist_mat, axis=1)  # (kernel_size^3,)
+
+    grid_distance = nn_dist.reshape(kernel_size, kernel_size, kernel_size, 1)
+    grid_hand_cse = hand_cse[nn_idx].reshape(kernel_size, kernel_size, kernel_size, -1)
+
+    local_grid = np.concatenate([grid_sdfs, grid_distance, grid_hand_cse], axis=-1)  # (kernel_size, kernel_size, kernel_size, 2 + cse_dim)
+
+    return local_grid
+
+
+def msdf2mlcontact(obj_msdf, hand_verts, hand_cse, kernel_size, grid_scale):
+    """
+    calculate MLcontact from MSDF and hand vertices.
+
+    obj_msdf: torch.Tensor, (B, N, R^3 + 3), the MSDF volume.
+    hand_verts: torch.Tensor, (B, H, 3), the hand vertices.
+    hand_cse: torch.Tensor, (H, C), the hand contact surface embeddings.
+    """
+    centers = obj_msdf[:, :, kernel_size**3:]  # B, N, 3
+    contact_mask = calculate_contact_mask(centers, hand_verts, grid_scale=grid_scale, device=obj_msdf.device)
+    normalized_coords = get_grid(kernel_size=kernel_size, device=obj_msdf.device).reshape(-1, 3).float()
+    # all_pts = centers[:, :, None, :] + normalized_coords[None, None, :, :] * grid_scale  # B, N, K^3, 3
+    local_grid_dist = torch.zeros(
+        obj_msdf.shape[0], obj_msdf.shape[1],
+        kernel_size, kernel_size, kernel_size,
+        device=obj_msdf.device
+    )  # B, N, K, K, K, 1 + cse_dim
+    local_grid_cse = torch.zeros(
+        obj_msdf.shape[0], obj_msdf.shape[1],
+        kernel_size, kernel_size, kernel_size, hand_cse.shape[-1], dtype=torch.float32,
+        device=obj_msdf.device
+    )  # B, N, K, K, K, 1 + cse_dim
+
+    for b in range(obj_msdf.shape[0]):
+        local_grid = calc_local_grid_batch(
+            contact_points=centers[b][contact_mask[b]],
+            normalized_coords=normalized_coords,
+            obj_mesh=None,  # not needed here
+            kernel_size=kernel_size,
+            grid_scale=grid_scale,
+            hand_verts=hand_verts[b],
+            hand_cse=hand_cse,
+            device=obj_msdf.device
+        )  # M, K, K, K, 1 + cse_dim
+        local_grid_dist[b][contact_mask[b]] = local_grid[..., 0].float()
+        local_grid_cse[b][contact_mask[b]] = local_grid[..., 1:].float()
+    
+    return local_grid_dist, local_grid_cse, contact_mask, normalized_coords

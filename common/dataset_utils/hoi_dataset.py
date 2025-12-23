@@ -1,21 +1,11 @@
-import os
-import os.path as osp
-import pickle
-import importlib
 import numpy as np
 from copy import deepcopy
 import trimesh
 import torch
 from torch.utils.data import Dataset
-from pytorch3d.transforms import axis_angle_to_matrix
-from scipy.spatial.transform import Rotation as R
-from lightning import LightningDataModule
-from torch.utils.data import DataLoader
 
-from common.manopth.manopth.manolayer import ManoLayer
 from common.utils.geometry import transform_obj
 from common.utils.vis import o3dmesh_from_trimesh, o3dmesh
-from common.msdf.mesh2msdf import mesh2msdf
 
 def get_kine_parent(idx):
     if idx in [1, 4, 7, 10, 13]:
@@ -83,16 +73,17 @@ class BaseHOIDataset(Dataset):
             fname_path = self.frame_names[idx].split('/')
             sbj_id = fname_path[2]
             obj_name = fname_path[3].split('_')[0]
-            obj_sample_pts = self.obj_info[obj_name]['samples'] # n_sample x 3
-            obj_sample_normals = self.obj_info[obj_name]['sample_normals'] # n_sample x 3
+            # obj_sample_pts = self.obj_info[obj_name]['samples'] # n_sample x 3
+            # obj_sample_normals = self.obj_info[obj_name]['sample_normals'] # n_sample x 3
+            obj_msdf = self.obj_info[obj_name]['msdf']
             obj_rot = self.object_data['global_orient'][idx]
             obj_trans = self.object_data['transl'][idx]
 
             ## Transform the vertices:
-            objR = axis_angle_to_matrix(obj_rot).detach().cpu().numpy()
-            objt = obj_trans.detach().cpu().numpy()
-            obj_sample_pts = obj_sample_pts @ objR + objt
-            obj_sample_normals = obj_sample_normals @ objR
+            # objR = axis_angle_to_matrix(obj_rot).detach().cpu().numpy()
+            # objt = obj_trans.detach().cpu().numpy()
+            # obj_sample_pts = obj_sample_pts @ objR + objt
+            # obj_sample_normals = obj_sample_normals @ objR
 
             samples = {}
             if self.hand_sides is not None:
@@ -113,10 +104,11 @@ class BaseHOIDataset(Dataset):
                 'frameName': '/'.join(fname_path[2:]),
                 'objName': obj_name,
                 'sbjId': sbj_id,
-                'objSamplePts': obj_sample_pts,
-                'objSampleNormals': obj_sample_normals,
+                # 'objSamplePts': obj_sample_pts,
+                # 'objSampleNormals': obj_sample_normals,
                 'objTrans': obj_trans,
                 'objRot': obj_rot,
+                'objMsdf': obj_msdf,
                 'handSide': hand_side,
             }
 
@@ -171,68 +163,6 @@ class BaseHOIDataset(Dataset):
             obj_hull[i].vertices = transform_obj(h.vertices, obj_rot.cpu().numpy(), obj_trans.cpu().numpy())
 
         return obj_hull
-
-
-class HOIDatasetModule(LightningDataModule):
-    def __init__(self, cfg):
-        super().__init__()
-        self.cfg = cfg.data
-        self.data_dir = cfg.data.dataset_path
-        self.preprocessed_dir = cfg.data.get('preprocessed_dir', 'data/preprocessed')
-        self.train_batch_size = cfg.train.batch_size
-        self.val_batch_size = cfg.val.batch_size
-        self.test_batch_size = cfg.test.batch_size
-        module = importlib.import_module(f'common.dataset_utils.{cfg.data.dataset_name}_dataset')
-        self.dataset_class = getattr(module, cfg.data.dataset_name.upper() + 'Dataset')
-
-    def prepare_data(self):
-        """
-        Dump precalculated variables, mainly M-SDF
-        """
-        obj_info = self.dataset_class.load_mesh_info(self.data_dir)
-        for k, v in obj_info.items():
-            mesh = trimesh.Trimesh(v['verts'], v['faces'], process=False)
-            msdf_path = osp.join(self.preprocessed_dir, f'{self.cfg.dataset_name}_msdf', f'{k}.npz')
-            if not osp.exists(osp.dirname(msdf_path)):
-                os.makedirs(osp.dirname(msdf_path))
-            if not osp.exists(msdf_path):
-                print(f'Preprocessing M-SDF for {k}...')
-                msdf = mesh2msdf(mesh, num_grids=self.cfg.msdf.num_grids, kernel_size=self.cfg.msdf.kernel_size)
-                                 
-                np.savez_compressed(msdf_path, msdf=msdf)
-    
-        # Simplified object meshes
-        # simp_obj_mesh_path = osp.join('data', 'preprocessed', 'simplified_obj_mesh.pkl')
-        # if not osp.exists(simp_obj_mesh_path):
-        #     simp_obj_mesh = {}
-        #     obj_info = np.load(osp.join(self.data_dir, 'obj_info.npy'), allow_pickle=True).item()
-        #     for k, v in obj_info.items():
-        #         simp_obj_mesh[k] = {'verts': [], 'faces': []}
-        #         mesh = o3dmesh(v['verts'], v['faces'])
-        #         mesh = mesh.simplify_quadric_decimation(target_number_of_triangles=self.cfg.n_simp_faces)
-        #         # mesh = trimesh.Trimesh(vertices=np.asarray(mesh.vertices), faces=np.asarray(mesh.triangles))
-        #         simp_obj_mesh[k] = {'verts': np.asarray(mesh.vertices), 'faces': np.asarray(mesh.triangles)}
-        #     with open(simp_obj_mesh_path, 'wb') as f:
-        #         pickle.dump(simp_obj_mesh, f)
-
-
-    def setup(self, stage: str):
-        if stage == 'fit':
-            self.train_set = self.data_class(self.cfg, 'train')
-            self.val_set = self.data_class(self.cfg, 'val')
-        elif stage == 'validate':
-            self.val_set = self.data_class(self.cfg, 'val')
-        elif stage == 'test':
-            self.test_set = self.data_class(self.cfg, 'test')
-
-    def train_dataloader(self):
-        return DataLoader(self.train_set, batch_size=self.train_batch_size, shuffle=True, num_workers=self.cfg.num_workers)
-
-    def val_dataloader(self):
-        return DataLoader(self.val_set, batch_size=self.val_batch_size, shuffle=False, num_workers=self.cfg.num_workers)
-
-    def test_dataloader(self):
-        return DataLoader(self.test_set, batch_size=self.test_batch_size, shuffle=False, num_workers=self.cfg.num_workers)
 
 
 def canonical_hand_parts(mano_layer, num_samples, batch_size, betas=None, device='cpu'):

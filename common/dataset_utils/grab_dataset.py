@@ -15,11 +15,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 import torch.nn.functional as F
 from lightning import LightningDataModule
-from pysdf import SDF
-import smplx
 # from mesh_to_sdf import mesh_to_sdf
-from alive_progress import alive_bar
-from copy import copy
 import open3d as o3d
 from multiprocessing.pool import Pool
 from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
@@ -30,8 +26,6 @@ from easydict import EasyDict as edict
 from common.manopth.manopth.manolayer import ManoLayer
 from .hoi_dataset import BaseHOIDataset, get_kine_parent, canonical_hand_parts
 from .local_grid_dataset import LocalGridDataset
-from common.utils.geometry import sample_sdf_level_set_parallel, sphere_contact, sample_sdf_parallel, sample_from_sdf_grid
-from common.utils.vis import o3dmesh, o3dmesh_from_trimesh
 
 jointsMapManoToSimple = [0,
                          13, 14, 15, 16,
@@ -203,5 +197,37 @@ class GRABLocalGridDataset(LocalGridDataset):
     """
     A dataset class for loading local grid data for hand-object interactions.
     """
-    def __init__(self, cfg):
-        super().__init__(cfg)
+    def __init__(self, cfg, split):
+        super().__init__(cfg, split)
+        self.obj_info = GRABDataset.load_mesh_info(cfg.dataset_path, msdf_path=None)
+        with open(osp.join('data', 'preprocessed', 'simplified_obj_mesh.pkl'), 'rb') as of:
+            self.simp_obj_mesh = pickle.load(of)
+        
+        self.ds = np.load(osp.join(self.dataset_path, self.split, f'grabnet_{self.split}.npz'), allow_pickle=True)
+        rh_root_rotmat = torch.as_tensor(self.ds['global_orient_rhand_rotmat'], dtype=torch.float32)
+        rh_root_rot = matrix_to_axis_angle(rh_root_rotmat.squeeze(1))
+        rh_pose_rotmat = torch.as_tensor(self.ds['fpose_rhand_rotmat'], dtype=torch.float32)
+        rh_pose = matrix_to_axis_angle(rh_pose_rotmat.squeeze(1)).view(-1, 45)
+        self.rh_data = {
+            "global_orient": rh_root_rot,
+            "fullpose": rh_pose,
+            "transl": torch.as_tensor(self.ds['trans_rhand'], dtype=torch.float32)
+        }
+        obj_rotmat = torch.as_tensor(self.ds['root_orient_obj_rotmat'], dtype=torch.float32)
+        obj_orient = matrix_to_axis_angle(obj_rotmat.squeeze(1))
+        self.object_data = {
+            "global_orient": obj_orient,
+            "transl": torch.as_tensor(self.ds['trans_obj'], dtype=torch.float32)
+        }
+
+        sbj_info = np.load(osp.join(self.dataset_path, 'sbj_info.npy'), allow_pickle=True).item()
+        self.rh_models = {}
+        frame_names = np.load(osp.join(self.dataset_path, self.split, 'frame_names.npz'))['frame_names']
+        self.frame_names = np.array(frame_names, dtype=np.dtypes.StringDType())
+        for sbj_id in sbj_info.keys():
+            self.rh_models[sbj_id] = ManoLayer(mano_root=self.mano_root,
+                                               side='right',
+                                               th_v_template=sbj_info[sbj_id]['rh_vtemp'],
+                                               flat_hand_mean=True,
+                                               use_pca=False,
+                                               ncomps=45)
