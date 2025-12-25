@@ -2,6 +2,7 @@ dataset_name: grab
 mano_root: /home/zxc417/data/mano_v1_2/models
 dataset_path: data/grab
 hand_cse_path: common/model/hand_cse/hand_cse.pt
+hand_cse_dim: 16
 preprocessed_dir: data/preprocessed
 MSDF_dir: data/preprocessed/grab_msdf
 test_gt: true
@@ -9,6 +10,11 @@ augmentation:
   enable: true
   n_rot: 10
   seed: 42
+
+downsample_rate: 
+  train: 16
+  val: 16
+  test: 64
 
 msdf:
   num_grids: ${msdf.num_grids}
@@ -18,4 +24,4 @@ msdf:
 pick_every_n_frames: 1
 object_sample: 1024
 
-num_workers: 8
+num_workers: 16

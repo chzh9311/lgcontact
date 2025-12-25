@@ -5,6 +5,33 @@ import torch.nn.functional as F
 import numpy as np
 
 
+class Conv3D(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0):
+        super(Conv3D, self).__init__()
+        self.conv = nn.Sequential(
+            nn.Conv3d(in_channels, out_channels, kernel_size, stride, padding),
+            nn.BatchNorm3d(out_channels),
+            nn.LeakyReLU(0.2),
+            nn.MaxPool3d(2)
+        )
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class Deconv3D(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0):
+        super(Deconv3D, self).__init__()
+        self.conv = nn.Sequential(
+            nn.ConvTranspose3d(in_channels, out_channels, kernel_size, stride, padding),
+            nn.BatchNorm3d(out_channels),
+            nn.LeakyReLU(0.2),
+            nn.Upsample(scale_factor=2, mode='nearest')
+        )
+
+    def forward(self, x):
+        return self.conv(x)
+
 class ResidualLayer(nn.Module):
     """
     One residual layer inputs:
@@ -42,7 +69,7 @@ class ResidualStack(nn.Module):
         super(ResidualStack, self).__init__()
         self.n_res_layers = n_res_layers
         self.stack = nn.ModuleList(
-            [ResidualLayer(in_dim, h_dim, res_h_dim)]*n_res_layers)
+            [ResidualLayer(in_dim, h_dim, res_h_dim) for _ in range(n_res_layers)])
 
     def forward(self, x):
         for layer in self.stack:
@@ -53,13 +80,13 @@ class ResidualStack(nn.Module):
 
 if __name__ == "__main__":
     # random data
-    x = np.random.random_sample((3, 40, 40, 200))
+    x = np.random.random_sample((3, 64, 2, 2, 2))
     x = torch.tensor(x).float()
     # test Residual Layer
-    res = ResidualLayer(40, 40, 20)
+    res = ResidualLayer(64, 64, 128)
     res_out = res(x)
     print('Res Layer out shape:', res_out.shape)
     # test res stack
-    res_stack = ResidualStack(40, 40, 20, 3)
+    res_stack = ResidualStack(64, 64, 128, 3)
     res_stack_out = res_stack(x)
     print('Res Stack out shape:', res_stack_out.shape)

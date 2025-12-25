@@ -28,21 +28,29 @@ class VectorQuantizer(nn.Module):
 
     def forward(self, z):
         """
-        Inputs the output of the encoder network z and maps it to a discrete 
+        Inputs the output of the encoder network z and maps it to a discrete
         one-hot vector that is the index of the closest embedding vector e_j
 
         z (continuous) -> z_q (discrete)
 
-        z.shape = (batch, channel, height, width)
+        z.shape = (batch, channel, height, width) for 2D
+                  (batch, channel, height, width, depth) for 3D
 
         quantization pipeline:
 
-            1. get encoder input (B,C,H,W)
-            2. flatten input to (B*H*W,C)
+            1. get encoder input (B,C,H,W) or (B,C,H,W,D)
+            2. flatten input to (B*H*W,C) or (B*H*W*D,C)
 
         """
-        # reshape z -> (batch, height, width, channel) and flatten
-        z = z.permute(0, 2, 3, 1).contiguous()
+        # Check if input is 3D or 2D
+        is_3d = (z.dim() == 5)  # B, C, H, W, D
+
+        # reshape z -> (batch, height, width, [depth,] channel) and flatten
+        if is_3d:
+            z = z.permute(0, 2, 3, 4, 1).contiguous()  # B, H, W, D, C
+        else:
+            z = z.permute(0, 2, 3, 1).contiguous()  # B, H, W, C
+
         z_flattened = z.view(-1, self.e_dim)
         # distances from z to embeddings e_j (z - e)^2 = z^2 + e^2 - 2 e * z
 
@@ -53,7 +61,7 @@ class VectorQuantizer(nn.Module):
         # find closest encodings
         min_encoding_indices = torch.argmin(d, dim=1).unsqueeze(1)
         min_encodings = torch.zeros(
-            min_encoding_indices.shape[0], self.n_e).to(device)
+            min_encoding_indices.shape[0], self.n_e).to(z.device)
         min_encodings.scatter_(1, min_encoding_indices, 1)
 
         # get quantized latent vectors
@@ -71,6 +79,9 @@ class VectorQuantizer(nn.Module):
         perplexity = torch.exp(-torch.sum(e_mean * torch.log(e_mean + 1e-10)))
 
         # reshape back to match original input shape
-        z_q = z_q.permute(0, 3, 1, 2).contiguous()
+        if is_3d:
+            z_q = z_q.permute(0, 4, 1, 2, 3).contiguous()  # B, C, H, W, D
+        else:
+            z_q = z_q.permute(0, 3, 1, 2).contiguous()  # B, C, H, W
 
         return loss, z_q, perplexity, min_encodings, min_encoding_indices

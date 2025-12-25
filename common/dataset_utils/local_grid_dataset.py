@@ -37,6 +37,8 @@ class LocalGridDataset(Dataset):
         self.obj_info = {}
         all_samples = np.stack(np.meshgrid(np.arange(self.masks.shape[0]), np.arange(self.masks.shape[1]), indexing='ij'), axis=-1)
         self.idx2sample = all_samples[self.masks, :].reshape(-1, 2)
+        ## Downsample data
+        self.idx2sample = self.idx2sample[::cfg.downsample_rate[split], :]
         coords = torch.tensor([(i, j, k) for i in range(self.kernel_size)
                                     for j in range(self.kernel_size)
                                     for k in range(self.kernel_size)], dtype=torch.float32) 
@@ -72,18 +74,19 @@ class LocalGridDataset(Dataset):
         handV, handJ, part_T = self.rh_models[sbj_id](
             th_pose_coeffs=torch.cat([hdata['global_orient'][sample_idx], hdata['fullpose'][sample_idx].view(45)], dim=0)[None, :],
             th_trans=hdata['transl'][sample_idx][None, :])
-        grid_data = calc_local_grid(obj_sample_pt, self.normalized_coords.numpy(), obj_mesh, self.kernel_size, self.grid_scale,
-                                    handV[0].detach().cpu().numpy(), self.hand_cse)
+        nhandV = handV[0].detach().cpu().numpy() - obj_sample_pt[np.newaxis, :]
+        grid_data = calc_local_grid(np.zeros_like(obj_sample_pt), self.normalized_coords.numpy(), obj_mesh, self.kernel_size, self.grid_scale,
+                                    nhandV, self.hand_cse)
         ## contact data
         grid_data = torch.from_numpy(grid_data).float()
         grid_data[:, :, :, 1] = sdf_to_contact(grid_data[:, :, :, 1] / 0.001, None, method=0)
 
         sample = {'localGrid': grid_data,
-                  'obj_sample_pt': obj_sample_pt,
-                  'obj_sample_normal': obj_sample_normal,
+                  'objSamplePt': obj_sample_pt,
+                  'objSampleNormal': obj_sample_normal,
                   'objRot': obj_rot,
                   'objTrans': obj_trans,
-                  'handVerts': handV[0].detach().cpu().numpy(),
+                  'nHandVerts': nhandV,
                   'obj_name': obj_name,
                 }
 

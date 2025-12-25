@@ -288,7 +288,8 @@ def vis_nn_bps(hand_mesh, bps, nn_idx):
                                      height=768)
 
 
-def visualize_local_grid_with_hand(local_grid, contact_point, obj_mesh, hand_verts, hand_faces, hand_cse, kernel_size, grid_scale):
+def visualize_local_grid_with_hand(local_grid, hand_verts, hand_faces, hand_cse, kernel_size, grid_scale,
+                                            contact_point=None, obj_mesh=None):
     """
     Visualize local grid with object mesh, hand mesh, and grid points.
 
@@ -296,12 +297,15 @@ def visualize_local_grid_with_hand(local_grid, contact_point, obj_mesh, hand_ver
         local_grid: numpy array of shape (kernel_size, kernel_size, kernel_size, C)
                    where C >= 18 (SDF, contact, CSE[16])
         contact_point: numpy array of shape (3,), the center of the grid
-        obj_mesh: trimesh mesh of the object
+        obj_mesh: trimesh mesh of the object, or None to skip object mesh visualization
         hand_verts: numpy array of shape (778, 3), hand vertices
         hand_faces: numpy array of shape (N, 3), hand face indices
         hand_cse: numpy array of shape (778, 16), hand contact surface embeddings
         kernel_size: int, size of the cubic grid
         grid_scale: float, scale of the grid
+
+    Returns:
+        list: List of open3d geometries to be visualized
     """
     # Generate normalized grid coordinates
     indices = np.array([(i, j, k) for i in range(kernel_size)
@@ -313,6 +317,8 @@ def visualize_local_grid_with_hand(local_grid, contact_point, obj_mesh, hand_ver
     coords = coords / (kernel_size - 1)
 
     # Scale and translate to world coordinates
+    if contact_point is None:
+        contact_point = np.array([0.0, 0.0, 0.0])
     grid_points = contact_point[None, :] + coords * grid_scale
 
     # Extract SDF values (first channel)
@@ -363,8 +369,10 @@ def visualize_local_grid_with_hand(local_grid, contact_point, obj_mesh, hand_ver
     line_set.lines = o3d.utility.Vector2iVector(bbox_lines)
     line_set.colors = o3d.utility.Vector3dVector([[0, 1, 0] for _ in bbox_lines])  # Green bbox
 
-    # Convert object mesh to open3d
-    obj_o3d_mesh = o3dmesh_from_trimesh(obj_mesh)
+    # Convert object mesh to open3d (if provided)
+    obj_o3d_mesh = None
+    if obj_mesh is not None:
+        obj_o3d_mesh = o3dmesh_from_trimesh(obj_mesh)
 
     # Create hand mesh
     hand_mesh = o3d.geometry.TriangleMesh()
@@ -375,8 +383,14 @@ def visualize_local_grid_with_hand(local_grid, contact_point, obj_mesh, hand_ver
 
     # ==================== DUPLICATE GEOMETRIES WITH OFFSET ====================
     # Calculate offset along x-axis (make it large enough to separate the scenes)
-    bbox = obj_mesh.bounds
-    offset_distance = (bbox[1][0] - bbox[0][0]) * 2  # 2x the object width
+    if obj_mesh is not None:
+        bbox = obj_mesh.bounds
+        offset_distance = (bbox[1][0] - bbox[0][0]) * 2  # 2x the object width
+    else:
+        # Use hand bounding box to calculate offset if no object mesh
+        hand_bbox_min = hand_verts.min(axis=0)
+        hand_bbox_max = hand_verts.max(axis=0)
+        offset_distance = (hand_bbox_max[0] - hand_bbox_min[0]) * 2
     offset = np.array([offset_distance, 0, 0])
 
     # Duplicate and offset grid points
@@ -407,9 +421,11 @@ def visualize_local_grid_with_hand(local_grid, contact_point, obj_mesh, hand_ver
     line_set_offset.lines = o3d.utility.Vector2iVector(bbox_lines)
     line_set_offset.colors = o3d.utility.Vector3dVector([[0, 1, 0] for _ in bbox_lines])
 
-    # Duplicate object mesh
-    obj_o3d_mesh_offset = o3dmesh_from_trimesh(obj_mesh)
-    obj_o3d_mesh_offset.translate(offset)
+    # Duplicate object mesh (if provided)
+    obj_o3d_mesh_offset = None
+    if obj_mesh is not None:
+        obj_o3d_mesh_offset = o3dmesh_from_trimesh(obj_mesh)
+        obj_o3d_mesh_offset.translate(offset)
 
     # Duplicate hand mesh
     hand_mesh_offset = o3d.geometry.TriangleMesh()
@@ -476,22 +492,30 @@ def visualize_local_grid_with_hand(local_grid, contact_point, obj_mesh, hand_ver
     print(f"  Inferno colormap: Blue (no contact) → Red (high contact)")
     print(f"  Green lines: Correspondence to nearest hand vertex (CSE-based)")
 
-    # Visualize all geometries
+    # Collect all geometries
     geometries = [
         # Original scene
-        obj_o3d_mesh, pcd, contact_pcd, line_set, hand_mesh,
-        # Offset scene with contact likelihood
-        obj_o3d_mesh_offset, pcd_offset, contact_pcd_offset, line_set_offset, hand_mesh_offset
+        pcd, contact_pcd, line_set, hand_mesh,
     ]
+
+    # Add object mesh if provided
+    if obj_o3d_mesh is not None:
+        geometries.insert(0, obj_o3d_mesh)
+
+    # Add offset scene with contact likelihood
+    geometries.extend([
+        pcd_offset, contact_pcd_offset, line_set_offset, hand_mesh_offset
+    ])
+
+    # Add offset object mesh if provided
+    if obj_o3d_mesh_offset is not None:
+        geometries.insert(5 if obj_o3d_mesh is not None else 4, obj_o3d_mesh_offset)
 
     # Add correspondence lines if any exist
     if len(line_points) > 0:
         geometries.append(correspondence_lines)
 
-    o3d.visualization.draw_geometries(
-        geometries,
-        window_name="Local Grid with Hand and Object - Dual View"
-    )
+    return geometries
 
 
 def visualize_local_grid(msdf, kernel_size, point_idx, obj_mesh):
