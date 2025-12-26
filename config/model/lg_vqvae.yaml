@@ -1,9 +1,14 @@
 name: LGVQVAE
 in_dim: ${add:1,${data.hand_cse_dim}}
-h_dim: 512
+h_dims: 
+  - 32
+  - 128
+  - 256
+  - 512
 res_h_dim: 1024
 n_res_layers: 4
-n_embeddings: 1024
-embedding_dim: 2048
+n_embeddings: 128
+embedding_dim: 1024
 beta: 0.25
 out_dim: ${add:1,${data.hand_cse_dim}}
+obj_in_dim: 1

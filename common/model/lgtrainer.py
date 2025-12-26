@@ -42,17 +42,17 @@ class LGTrainer(L.LightningModule):
     
     def train_val_step(self, batch, batch_idx, stage):
         grid_sdf, gt_grid_contact = batch['localGrid'][..., 0], batch['localGrid'][..., 1:]
-        loss, recon_grid_contact, perplexity = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3))
+        loss, recon_grid_contact, perplexity = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
         recon_loss = F.mse_loss(recon_grid_contact, gt_grid_contact.permute(0, 4, 1, 2, 3))
         loss_dict = {f'{stage}/embedding_loss': loss, f'{stage}/recon_loss': recon_loss, f'{stage}/perplexity': perplexity}
         # total_loss = sum(loss_dict.values())
         total_loss = loss + self.recon_weight * recon_loss
-        self.log_dict(loss_dict, prog_bar=True)
+        self.log_dict(loss_dict, prog_bar=True, sync_dist=True)
         return total_loss
     
     def test_step(self, batch, batch_idx):
         grid_sdf, gt_grid_contact = batch['localGrid'][..., 0], batch['localGrid'][..., 1:]
-        loss, recon_grid_contact, perplexity = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3))
+        loss, recon_grid_contact, perplexity = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
         recon_grid_contact = recon_grid_contact.permute(0, 2, 3, 4, 1)
         batch_size = grid_sdf.shape[0]
         def rec_error(pred, gt, mask):

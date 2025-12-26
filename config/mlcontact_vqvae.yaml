@@ -26,10 +26,11 @@ trainer: ## For instantiating pytorch-lightning Trainer
   check_val_every_n_epoch: 2
   log_every_n_steps: 100
   accelerator: gpu
-  devices: 1
+  devices: 2
   precision: 32
-  enable_progress_bar: true
+  # enable_progress_bar: true
   enable_model_summary: true
+  strategy: ddp_find_unused_parameters_true
 
 run_phase: test
 ckpt_path: logs/wandb_logs/LG3DContact/0xsqdi25/checkpoints/epoch=5-step=538074.ckpt

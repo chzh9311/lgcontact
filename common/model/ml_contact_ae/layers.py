@@ -4,6 +4,23 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
+class MaxPool3D(nn.Module):
+    def __init__(self, kernel_size, stride=None, padding=0):
+        super(MaxPool3D, self).__init__()
+        self.pool = nn.MaxPool3d(kernel_size, stride, padding)
+
+    def forward(self, x):
+        return self.pool(x)
+
+
+class UpSample3D(nn.Module):
+    def __init__(self, scale_factor, mode='nearest'):
+        super(UpSample3D, self).__init__()
+        self.upscale = nn.Upsample(scale_factor=scale_factor, mode=mode)
+
+    def forward(self, x):
+        return self.upscale(x)
+
 
 class Conv3D(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0):
@@ -12,7 +29,6 @@ class Conv3D(nn.Module):
             nn.Conv3d(in_channels, out_channels, kernel_size, stride, padding),
             nn.BatchNorm3d(out_channels),
             nn.LeakyReLU(0.2),
-            nn.MaxPool3d(2)
         )
 
     def forward(self, x):
@@ -26,7 +42,6 @@ class Deconv3D(nn.Module):
             nn.ConvTranspose3d(in_channels, out_channels, kernel_size, stride, padding),
             nn.BatchNorm3d(out_channels),
             nn.LeakyReLU(0.2),
-            nn.Upsample(scale_factor=2, mode='nearest')
         )
 
     def forward(self, x):
@@ -74,7 +89,7 @@ class ResidualStack(nn.Module):
     def forward(self, x):
         for layer in self.stack:
             x = layer(x)
-        x = F.relu(x)
+        x = F.leaky_relu(x, 0.2)
         return x
 
 

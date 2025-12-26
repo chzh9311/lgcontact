@@ -34,16 +34,18 @@ def main(cfg):
     model = MLContactVQVAE(**cfg.model)
     # input = torch.randn(3, cfg.model.in_dim, 8, 8, 8)
     # embedding_loss, recon, perplexity = model(input, verbose=True)
+    data_module = LocalGridDataModule(cfg)
     if cfg.run_phase == 'train':
         pl_trainer = LGTrainer(model, cfg)
+        trainer = L.Trainer(**cfg.trainer, logger=logger)
+        trainer.fit(pl_trainer, datamodule=data_module)
     else:
         pl_trainer = LGTrainer.load_from_checkpoint(cfg.ckpt_path, model=model, cfg=cfg)
-    trainer = L.Trainer(**cfg.trainer, logger=logger)
-    data_module = LocalGridDataModule(cfg)
+        trainer = L.Trainer(**cfg.trainer, logger=logger)
+        trainer.test(pl_trainer, datamodule=data_module)
     
     # Start training
     # trainer.fit(pl_trainer, datamodule=data_module)
-    trainer.test(pl_trainer, datamodule=data_module)
 
 
 if __name__ == '__main__':
