@@ -271,11 +271,15 @@ def calc_local_grid(contact_point, normalized_coords, obj_mesh, kernel_size, gri
 
     Returns:
         local_grid: numpy array of shape (kernel_size, kernel_size, kernel_size, 2 + cse_dim)
+        verts_mask: numpy array of shape (n_verts), boolean mask indicating valid vertices
     """
     # Scale and translate to world coordinates
     # contact_point: (3,), normalized_coords: (kernel_size^3, 3)
     # Result: (kernel_size^3, 3)
     grid_points_flat = contact_point[None, :] + normalized_coords * grid_scale
+
+    ## Determine mask using Chebyshev distance
+    verts_mask = np.max(np.abs(hand_verts[:, :]), axis=-1) < grid_scale
 
     # Calculate SDF values
     objSDF = SDF(obj_mesh.vertices, obj_mesh.faces)
@@ -293,7 +297,7 @@ def calc_local_grid(contact_point, normalized_coords, obj_mesh, kernel_size, gri
 
     local_grid = np.concatenate([grid_sdfs, grid_distance, grid_hand_cse], axis=-1)  # (kernel_size, kernel_size, kernel_size, 2 + cse_dim)
 
-    return local_grid
+    return local_grid, verts_mask
 
 
 def msdf2mlcontact(obj_msdf, hand_verts, hand_cse, kernel_size, grid_scale):

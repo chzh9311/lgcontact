@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from common.model.ml_contact_ae.layers import ResidualStack, Deconv3D, UpSample3D, Conv3D
+from common.model.gridvqvae.layers import ResidualStack, Deconv3D, UpSample3D, Conv3D
 
 
 class Decoder(nn.Module):

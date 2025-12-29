@@ -1,6 +1,7 @@
 import os
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import lightning as L
 import trimesh
 import open3d as o3d
@@ -12,7 +13,7 @@ from common.model.handobject import HandObject
 from common.model.hand_cse.hand_cse import HandCSE
 from common.utils.vis import o3dmesh_from_trimesh
 
-class MLCTrainer(L.LightningModule):
+class GridAETrainer(L.LightningModule):
     def __init__(self, model, cfg):
         super().__init__()
         self.model = model

@@ -1,12 +1,13 @@
 import torch
 import torch.nn as nn
-from .encoder import Encoder, ObjectGridEncoder
-from .decoder import Decoder
-from .quantizer import VectorQuantizer
+from .encoder import PointNetEncoder, LatentEncoder
+from .decoder import PointNetDecoder
+from ..gridae.encoder import GridEncoder3D
+from ..gridae.decoder import GridDecoder3D
 
-class MLContactVQVAE(nn.Module):
+class MLCVAE(nn.Module):
     """
-    MSDF-based 3D contact VQVAE of one local 3D patch
+    MSDF-based 3D contact VQVAE of all local patches
     The input contact representation is expected to be kernel_size^3 x (1 + 16); 1 refers to contact likelihood, 16 refers to Hand CSE.
     Also, the object local patch is represented as kernel_size^3 SDF values.
     TODO 1: how to integrate scale? Fix the scale to a constant value like 0.01 (1cm);
@@ -16,19 +17,16 @@ class MLContactVQVAE(nn.Module):
     We can try add this as part of the input to the encoder & decoder.
     """
     def __init__(self, in_dim, h_dims, res_h_dim, n_res_layers,
-                 obj_in_dim, n_embeddings, embedding_dim, beta, out_dim=17, **kwargs):
-        super(MLContactVQVAE, self).__init__()
+                 obj_in_dim, feat_dim, latent_dim, beta, N, out_dim=17, **kwargs):
+        super(MLCVAE, self).__init__()
         # encode image into continuous latent space
         # self.obj_encoder = Encoder(obj_in_dim, h_dims, obj_n_res_layers, obj_res_h_dim, condition=False)
-        self.obj_encoder = ObjectGridEncoder(obj_in_dim, h_dims)
-        self.encoder = Encoder(in_dim, h_dims, n_res_layers, res_h_dim)
-        self.pre_quantization_conv = nn.Conv3d(
-            h_dims[-1], embedding_dim, kernel_size=1, stride=1)
-        # pass continuous latent vector through discretization bottleneck
-        self.vector_quantization = VectorQuantizer(n_embeddings, embedding_dim, beta)
-        # decode the discrete latent representation
-        # self.obj_decoder = Decoder(h_dims[-1], h_dims[::-1], obj_in_dim, obj_n_res_layers, obj_res_h_dim, condition=True, final_layer=False)
-        self.decoder = Decoder(embedding_dim, h_dims[::-1], out_dim, n_res_layers, res_h_dim, condition=True)
+        self.objgridencoder = GridEncoder3D(obj_in_dim, h_dims, res_h_dim, n_res_layers, feat_dim, N=N, condition=False)
+        self.encoder = PointNetEncoder(in_channel=feat_dim+3, out_channel=latent_dim)
+        self.latent_encoder = LatentEncoder(latent_dim, latent_dim, latent_dim)
+        # self.encoder = Encoder(in_dim, h_dims, n_res_layers, res_h_dim)
+        self.objgriddecoder = GridDecoder3D(latent_dim, h_dims[::-1], out_dim, n_res_layers, res_h_dim, condition=True)
+        self.decoder = PointNetDecoder(in_dim=latent_dim+3, hidden_dim=latent_dim, out_dim=out_dim)
 
         # if save_img_embedding_map:
         #     self.img_to_embedding_map = {i: [] for i in range(n_embeddings)}

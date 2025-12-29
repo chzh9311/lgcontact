@@ -4,9 +4,10 @@ import hydra
 from omegaconf import OmegaConf
 import torch
 import datetime
+import importlib
 from common.dataset_utils.datamodules import LocalGridDataModule
 from common.model.lgtrainer import LGTrainer
-from common.model.ml_contact_ae.mlcvqvae import MLContactVQVAE
+# from common.model.gridvqvae.gridvqvae import GRIDVQVAE
 
 # Register OmegaConf resolvers for arithmetic operations
 OmegaConf.register_new_resolver("add", lambda x, y: x + y, replace=True)
@@ -14,7 +15,7 @@ OmegaConf.register_new_resolver("sub", lambda x, y: x - y, replace=True)
 OmegaConf.register_new_resolver("mul", lambda x, y: x * y, replace=True)
 OmegaConf.register_new_resolver("div", lambda x, y: x / y, replace=True)
 
-@hydra.main(config_path="../config", config_name="mlcontact_vqvae")
+@hydra.main(config_path="../config", config_name="gridae")
 def main(cfg):
     print("Configuration:")
     print(OmegaConf.to_yaml(cfg))
@@ -31,7 +32,10 @@ def main(cfg):
                                     log_model=True, save_dir='logs/wandb_logs')
     
     # Initialize the model, data module, and trainer
-    model = MLContactVQVAE(**cfg.model)
+    model_name = cfg.model.name.upper()
+    model_module = importlib.import_module(f"common.model.{model_name.lower()}.{model_name.lower()}")
+    model_class = getattr(model_module, model_name)
+    model = model_class(cfg.model)
     # input = torch.randn(3, cfg.model.in_dim, 8, 8, 8)
     # embedding_loss, recon, perplexity = model(input, verbose=True)
     data_module = LocalGridDataModule(cfg)

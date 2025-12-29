@@ -1,20 +1,27 @@
 defaults:
   - msdf: base
   - data: grab_local_grid
-  - model: lg_vqvae
+  - model: gridae
   - _self_
 
-training_stage: "vqvae"
+training_stage: "ae"
 
 debug: true
 
 train:
-  lr: 0.0001
-  batch_size: 64
-  recon_weight: 8
+  lr: 0.001
+  batch_size: 128
+  loss_weights:
+    w_contact: 1.0
+    w_cse: 0.5
+    w_kl: 0.001
+    w_rec: 1.0
+  rec_loss_start_epoch: 5
+  vis_every_n_batches: 1000
 
 val:
-  batch_size: 64
+  batch_size: 128
+  vis_every_n_batches: 500
 
 test:
   n_processes: 16
@@ -23,8 +30,8 @@ test:
 
 trainer: ## For instantiating pytorch-lightning Trainer
   max_epochs: 10
-  check_val_every_n_epoch: 2
-  log_every_n_steps: 100
+  check_val_every_n_epoch: 1
+  log_every_n_steps: 200
   accelerator: gpu
   devices: 2
   precision: 32
@@ -32,8 +39,8 @@ trainer: ## For instantiating pytorch-lightning Trainer
   enable_model_summary: true
   strategy: ddp_find_unused_parameters_true
 
-run_phase: test
-ckpt_path: logs/wandb_logs/LG3DContact/0xsqdi25/checkpoints/epoch=5-step=538074.ckpt
+run_phase: train
+ckpt_path: null
 
 hydra:
   job:

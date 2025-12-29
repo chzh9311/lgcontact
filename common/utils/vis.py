@@ -119,9 +119,10 @@ def geom_to_img(vis_geoms, w, h):
     import matplotlib
     matplotlib.use('Agg')  # Use non-interactive backend
 
-    # Collect all meshes
+    # Collect all meshes and point clouds
     all_vertices = []
     mesh_data = []
+    pointcloud_data = []
 
     for geom in vis_geoms:
         if type(geom) is dict:
@@ -145,17 +146,32 @@ def geom_to_img(vis_geoms, w, h):
             all_vertices.append(vertices)
             mesh_data.append({'vertices': vertices, 'faces': faces, 'colors': colors})
 
+        elif isinstance(o3d_geom, o3d.geometry.PointCloud):
+            points = np.asarray(o3d_geom.points)
+
+            if len(points) == 0:
+                continue
+
+            # Get point colors if available
+            if o3d_geom.has_colors():
+                colors = np.asarray(o3d_geom.colors)
+            else:
+                colors = np.ones((len(points), 3)) * 0.5  # Default gray
+
+            all_vertices.append(points)
+            pointcloud_data.append({'points': points, 'colors': colors})
+
     if len(all_vertices) == 0:
         print("Warning: No valid geometries to render")
         return np.ones((h, w * 4, 3))
 
     # Compute scene bounds
     all_vertices = np.vstack(all_vertices)
-    center = np.mean(all_vertices, axis=0)
+    center = np.array([0.0, 0.0, 0.0])  # Center on origin instead of mean
     extent = np.ptp(all_vertices, axis=0)
     # Tight framing for 80% coverage - use smaller multiplier
     max_extent = np.max(extent)
-    half_range = max_extent * 0.7  # Even tighter for better zoom
+    half_range = max_extent * 0.07  # Even tighter for better zoom
 
     result_imgs = []
     for i in range(4):
@@ -165,8 +181,8 @@ def geom_to_img(vis_geoms, w, h):
         ax = fig.add_subplot(111, projection='3d')
 
         # Set camera position for each view
-        angle = np.pi * i / 2
-        elev = 10  # Slight elevation for better 3D view
+        angle = np.pi * i / 2 + np.pi / 6  # 30-degree offset for better view
+        elev = 30  # Slight elevation for better 3D view
         azim = np.degrees(angle)
         ax.view_init(elev=elev, azim=azim)
 
@@ -189,10 +205,18 @@ def geom_to_img(vis_geoms, w, h):
                 all_face_colors.append(face_colors[face_idx])
 
         # Create single polygon collection with all faces for proper depth sorting
-        collection = Poly3DCollection(all_faces, facecolors=all_face_colors,
-                                     edgecolors='none', alpha=0.95, linewidths=0,
-                                     zsort='average')  # Enable depth sorting
-        ax.add_collection3d(collection)
+        if len(all_faces) > 0:
+            collection = Poly3DCollection(all_faces, facecolors=all_face_colors,
+                                         edgecolors='none', alpha=0.95, linewidths=0,
+                                         zsort='average')  # Enable depth sorting
+            ax.add_collection3d(collection)
+
+        # Render all point clouds
+        for pc in pointcloud_data:
+            points = pc['points']
+            colors = pc['colors']
+            ax.scatter(points[:, 0], points[:, 1], points[:, 2],
+                      c=colors, s=5, alpha=0.8, depthshade=True)
 
         # Set tight limits around the object
         ax.set_xlim(center[0] - half_range, center[0] + half_range)
@@ -206,7 +230,6 @@ def geom_to_img(vis_geoms, w, h):
         ax.set_axis_off()
 
         # Additional zoom control - set camera distance
-        ax.dist = 1  # Lower value = closer camera (default is 10)
 
         # Render to array
         fig.canvas.draw()

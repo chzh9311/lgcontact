@@ -33,7 +33,7 @@ class LocalGridDataset(Dataset):
         if not osp.exists(mask_file):
             raise FileNotFoundError(f"Mask file not found: {mask_file}. Please run LocalGridDataModule.prepare_data() first.")
         self.masks = np.load(mask_file)
-        self.hand_cse = torch.load(cfg.get('hand_cse_path', 'data/misc/hand_cse.pt')).detach().cpu().numpy()
+        self.hand_cse = torch.load(cfg.get('hand_cse_path', 'data/misc/hand_cse.ckpt'))['state_dict']['embedding_tensor'].detach().cpu().numpy()
         self.obj_info = {}
         all_samples = np.stack(np.meshgrid(np.arange(self.masks.shape[0]), np.arange(self.masks.shape[1]), indexing='ij'), axis=-1)
         self.idx2sample = all_samples[self.masks, :].reshape(-1, 2)
@@ -75,7 +75,7 @@ class LocalGridDataset(Dataset):
             th_pose_coeffs=torch.cat([hdata['global_orient'][sample_idx], hdata['fullpose'][sample_idx].view(45)], dim=0)[None, :],
             th_trans=hdata['transl'][sample_idx][None, :])
         nhandV = handV[0].detach().cpu().numpy() - obj_sample_pt[np.newaxis, :]
-        grid_data = calc_local_grid(np.zeros_like(obj_sample_pt), self.normalized_coords.numpy(), obj_mesh, self.kernel_size, self.grid_scale,
+        grid_data, verts_mask = calc_local_grid(np.zeros_like(obj_sample_pt), self.normalized_coords.numpy(), obj_mesh, self.kernel_size, self.grid_scale,
                                     nhandV, self.hand_cse)
         ## contact data
         grid_data = torch.from_numpy(grid_data).float()
@@ -87,6 +87,7 @@ class LocalGridDataset(Dataset):
                   'objRot': obj_rot,
                   'objTrans': obj_trans,
                   'nHandVerts': nhandV,
+                  'handVertMask': verts_mask,
                   'obj_name': obj_name,
                 }
 

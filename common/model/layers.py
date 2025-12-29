@@ -47,27 +47,32 @@ class Deconv3D(nn.Module):
     def forward(self, x):
         return self.conv(x)
 
-class ResidualLayer(nn.Module):
+class Bottleneck(nn.Module):
     """
     One residual layer inputs:
     - in_dim : the input dimension
     - h_dim : the hidden layer dimension
     - res_h_dim : the hidden dimension of the residual block
+    Actually a bottleneck architecture
     """
 
-    def __init__(self, in_dim, h_dim, res_h_dim):
-        super(ResidualLayer, self).__init__()
+    def __init__(self, in_dim, res_h_dim):
+        super(Bottleneck, self).__init__()
+        self.relu = nn.ReLU(True)
         self.res_block = nn.Sequential(
+            nn.Conv3d(in_dim, res_h_dim, kernel_size=1,
+                      stride=1, bias=False),
             nn.ReLU(True),
-            nn.Conv3d(in_dim, res_h_dim, kernel_size=3,
+            nn.Conv3d(res_h_dim, res_h_dim, kernel_size=3,
                       stride=1, padding=1, bias=False),
             nn.ReLU(True),
-            nn.Conv3d(res_h_dim, h_dim, kernel_size=1,
+            nn.Conv3d(res_h_dim, in_dim, kernel_size=1,
                       stride=1, bias=False)
         )
 
     def forward(self, x):
         x = x + self.res_block(x)
+        x = self.relu(x)
         return x
 
 
@@ -80,17 +85,59 @@ class ResidualStack(nn.Module):
     - n_res_layers : number of layers to stack
     """
 
-    def __init__(self, in_dim, h_dim, res_h_dim, n_res_layers):
+    def __init__(self, in_dim, res_h_dim, n_res_layers):
         super(ResidualStack, self).__init__()
         self.n_res_layers = n_res_layers
         self.stack = nn.ModuleList(
-            [ResidualLayer(in_dim, h_dim, res_h_dim) for _ in range(n_res_layers)])
+            [Bottleneck(in_dim, res_h_dim) for _ in range(n_res_layers)])
 
     def forward(self, x):
         for layer in self.stack:
             x = layer(x)
-        x = F.leaky_relu(x, 0.2)
         return x
+
+
+class ResnetBlockFC(nn.Module):
+    ''' Fully connected ResNet Block class.
+    Args:
+        size_in (int): input dimension
+        size_out (int): output dimension
+        size_h (int): hidden dimension
+    '''
+
+    def __init__(self, size_in, size_out=None, size_h=None):
+        super().__init__()
+        if size_out is None:
+            size_out = size_in
+
+        if size_h is None:
+            size_h = min(size_in, size_out)
+
+        self.size_in = size_in
+        self.size_h = size_h
+        self.size_out = size_out
+
+        self.fc_0 = nn.Linear(size_in, size_h)
+        self.fc_1 = nn.Linear(size_h, size_out)
+        self.actvn = nn.ReLU()
+
+        if size_in == size_out:
+            self.shortcut = None
+        else:
+            self.shortcut = nn.Linear(size_in, size_out, bias=False)
+        nn.init.zeros_(self.fc_1.weight)
+
+    def forward(self, x, final_nl=False):
+        net = self.fc_0(self.actvn(x))
+        dx = self.fc_1(self.actvn(net))
+        if self.shortcut is not None:
+            x_s = self.shortcut(x)
+        else:
+            x_s = x
+        x_out = x_s + dx
+        if final_nl:
+            return F.leaky_relu(x_out, negative_slope=0.2)
+        return x_out
 
 
 if __name__ == "__main__":

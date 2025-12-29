@@ -1,4 +1,3 @@
-import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,29 +7,36 @@ import open3d as o3d
 import numpy as np
 
 from common.manopth.manopth.manolayer import ManoLayer
+from common.model.losses import kl_div_normal, masked_rec_loss
+from common.model.handobject import recover_hand_verts_from_contact
 from common.model.pose_optimizer import optimize_pose_wrt_local_grids
-from common.model.handobject import HandObject
+from common.model.handobject import HandObject, recover_hand_verts_from_contact
 from common.model.hand_cse.hand_cse import HandCSE
 from common.utils.vis import o3dmesh_from_trimesh, visualize_local_grid_with_hand, geom_to_img
+from common.model.losses import masked_rec_loss
 from common.msdf.utils.msdf import get_grid
 
+
 class LGTrainer(L.LightningModule):
+    """
+    The Lightning trainer interface to train Local-grid based contact autoencoder.
+    """
     def __init__(self, model, cfg):
         super().__init__()
         self.model = model
         self.cfg = cfg
+        self.loss_weights = cfg.train.loss_weights
         self.lr = cfg.train.lr
-        self.recon_weight = cfg.train.get('recon_weight', 100)
         self.mano_layer = ManoLayer(mano_root=cfg.data.mano_root, side='right',
                                     use_pca=False, ncomps=45, flat_hand_mean=True)
-        cse_mat = torch.load(cfg.data.hand_cse_path)
+        cse_ckpt = torch.load(cfg.data.hand_cse_path)
 
         handF = self.mano_layer.th_faces
         # Initialize model and load state
-        self.handcse = HandCSE(n_verts=778, emb_dim=cse_mat.shape[1], cano_faces=handF.cpu().numpy()).to(self.device)
-        self.handcse.load_state_dict({'embedding_tensor': cse_mat.to(self.device),
-                                      'cano_faces': handF.long().to(self.device)})
+        self.handcse = HandCSE(n_verts=778, emb_dim=cse_ckpt['emb_dim'], cano_faces=handF.cpu().numpy()).to(self.device)
+        self.handcse.load_state_dict(cse_ckpt['state_dict'])
         self.handcse.eval()
+        self.grid_coords = get_grid(self.cfg.msdf.kernel_size) * self.cfg.msdf.scale  # (K^3, 3)
 
     def training_step(self, batch, batch_idx):
         total_loss = self.train_val_step(batch, batch_idx, stage='train')
@@ -41,30 +47,69 @@ class LGTrainer(L.LightningModule):
         return total_loss
     
     def train_val_step(self, batch, batch_idx, stage):
+        self.grid_coords = self.grid_coords.to(self.device)
         grid_sdf, gt_grid_contact = batch['localGrid'][..., 0], batch['localGrid'][..., 1:]
-        loss, recon_grid_contact, perplexity = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
-        recon_loss = F.mse_loss(recon_grid_contact, gt_grid_contact.permute(0, 4, 1, 2, 3))
-        loss_dict = {f'{stage}/embedding_loss': loss, f'{stage}/recon_loss': recon_loss, f'{stage}/perplexity': perplexity}
+        recon_cgrid, latent = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
+        recon_cgrid = recon_cgrid.permute(0, 2, 3, 4, 1)
+        contact, contact_hat = gt_grid_contact[..., 0], recon_cgrid[..., 0]
+        cse, cse_hat = gt_grid_contact[..., 1:], recon_cgrid[..., 1:]
+
+        batch_size = grid_sdf.shape[0]
+        pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
+            self.handcse,
+            contact_hat.reshape(batch_size, -1),
+            cse_hat.reshape(batch_size, -1, cse.shape[-1]),
+            grid_coords=self.grid_coords.view(-1, 3),
+            mask_th = 0.01
+        )
+        loss_dict = self.loss_net(gt_grid_contact, recon_cgrid,
+                                  latent, pred_hand_verts, batch['nHandVerts'], batch['handVertMask'])
+        # recon_loss = F.mse_loss(recon_grid_contact, gt_grid_contact.permute(0, 4, 1, 2, 3))
+        # loss_dict = {f'{stage}/embedding_loss': loss, f'{stage}/recon_loss': recon_loss, f'{stage}/perplexity': perplexity}
         # total_loss = sum(loss_dict.values())
-        total_loss = loss + self.recon_weight * recon_loss
+        # total_loss = loss + self.recon_weight * recon_loss
+        if batch_idx % self.cfg[stage].vis_every_n_batches == 0:
+            pred_grid_contact = recon_cgrid
+            vis_geoms = self.visualize_grid_and_hand(
+                grid_coords=self.grid_coords.view(-1, 3),
+                grid_contact=pred_grid_contact[..., 0].reshape(batch_size, -1),
+                pred_hand_verts=pred_hand_verts,
+                hand_faces=self.mano_layer.th_faces,
+                pred_mask=pred_verts_mask,
+                gt_hand_verts=batch['nHandVerts'],
+                gt_mask=batch['handVertMask'],
+                batch_idx=0
+            )
+            img = geom_to_img(vis_geoms, w=400, h=400)
+            # Log image - works for both WandbLogger and TensorBoardLogger
+            if hasattr(self.logger, 'experiment'):
+                if hasattr(self.logger.experiment, 'add_image'):
+                    # TensorBoardLogger
+                    global_step = self.current_epoch * len(eval(f'self.trainer.datamodule.{stage}_dataloader()')) + batch_idx
+                    self.logger.experiment.add_image(f'{stage}/local_grid', img, global_step, dataformats='HWC')
+                elif hasattr(self.logger.experiment, 'log'):
+                    # WandbLogger
+                    import wandb
+                    self.logger.experiment.log({f'{stage}/local_grid': wandb.Image(img)},
+                                              step=self.global_step)
         self.log_dict(loss_dict, prog_bar=True, sync_dist=True)
-        return total_loss
+        return loss_dict['total_loss']
     
     def test_step(self, batch, batch_idx):
+        self.grid_coords = self.grid_coords.to(self.device)
         grid_sdf, gt_grid_contact = batch['localGrid'][..., 0], batch['localGrid'][..., 1:]
         loss, recon_grid_contact, perplexity = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
         recon_grid_contact = recon_grid_contact.permute(0, 2, 3, 4, 1)
         batch_size = grid_sdf.shape[0]
-        def rec_error(pred, gt, mask):
-            return torch.mean((torch.norm(pred - gt, dim=-1)) / mask.sum(dim=1, keepdim=True)) * 1000 # in mm
 
-        grid_coords = get_grid(self.cfg.msdf.kernel_size, device=grid_sdf.device) * self.cfg.msdf.scale  # (K^3, 3)
-        gt_rec_hand_verts, gt_rec_verts_mask = self.recover_hand_verts_from_contact(
+        gt_rec_hand_verts, gt_rec_verts_mask = recover_hand_verts_from_contact(
+            self.handcse,
             gt_grid_contact[..., 0].view(batch_size, -1), gt_grid_contact[..., 1:].view(batch_size, -1, gt_grid_contact.shape[-1]-1),
-            grid_coords=grid_coords.view(-1, 3)
+            grid_coords=self.grid_coords.view(-1, 3),
+            mask_th = 0.01
         )
         gt_geoms = self.visualize_grid_and_hand(
-            grid_coords=grid_coords.view(-1, 3),
+            grid_coords=self.grid_coords.view(-1, 3),
             grid_contact=gt_grid_contact[..., 0].view(batch_size, -1),
             pred_hand_verts=gt_rec_hand_verts,
             hand_faces=self.mano_layer.th_faces,
@@ -74,15 +119,15 @@ class LGTrainer(L.LightningModule):
             batch_idx=0
         )
 
-        gt_rec_error = rec_error(gt_rec_hand_verts, batch['nHandVerts'], gt_rec_verts_mask)
-
-        pred_hand_verts, pred_verts_mask = self.recover_hand_verts_from_contact(
+        gt_rec_error = masked_rec_loss(gt_rec_hand_verts, batch['nHandVerts'], gt_rec_verts_mask)
+        pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
+            self.handcse,
             recon_grid_contact[..., 0].reshape(batch_size, -1),
             recon_grid_contact[..., 1:].reshape(batch_size, -1, gt_grid_contact.shape[-1] - 1),
-            grid_coords=grid_coords.view(-1, 3)
+            grid_coords=self.grid_coords.view(-1, 3)
         )
         pred_geoms = self.visualize_grid_and_hand(
-            grid_coords=grid_coords.view(-1, 3),
+            grid_coords=self.grid_coords.view(-1, 3),
             grid_contact=recon_grid_contact[..., 0].view(batch_size, -1),
             pred_hand_verts=pred_hand_verts,
             hand_faces=self.mano_layer.th_faces,
@@ -94,7 +139,7 @@ class LGTrainer(L.LightningModule):
         all_geoms = gt_geoms + [g.translate((self.cfg.msdf.scale * 3, 0, 0)) for g in pred_geoms]
         o3d.visualization.draw_geometries(all_geoms, window_name='GT and Pred Local Grid Visualization')
 
-        pred_rec_error = rec_error(pred_hand_verts, batch['nHandVerts'], pred_verts_mask)
+        pred_rec_error = masked_rec_loss(pred_hand_verts, batch['nHandVerts'], pred_verts_mask)
         loss_dict = {'test/gt_rec_error': gt_rec_error,
                      'test/pred_rec_error': pred_rec_error}
         self.log_dict(loss_dict, prog_bar=True)
@@ -112,6 +157,33 @@ class LGTrainer(L.LightningModule):
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr)
         return optimizer
+    
+    def loss_net(self, x, x_hat, z_e, pred_hand_verts, gt_hand_verts, gt_verts_mask):
+        """
+        Compute the loss for training the GRIDAE
+        1. Reconstruction loss between x and x_hat
+        2. Regularization loss on z_e (KL-divergence)
+        """
+        contact, contact_hat = x[..., 0], x_hat[..., 0]
+        cse, cse_hat = x[..., 1:], x_hat[..., 1:]
+        contact_diff = contact - contact_hat
+        cse_diff = (cse - cse_hat) * contact[..., None] # weighing by contact likelihood
+        contact_loss = F.mse_loss(contact_diff, torch.zeros_like(contact_diff))
+        cse_loss = F.mse_loss(cse_diff, torch.zeros_like(cse_diff))
+        kl_loss = kl_div_normal(z_e)
+        rec_loss = masked_rec_loss(pred_hand_verts, gt_hand_verts, gt_verts_mask)
+        w_rec = self.loss_weights.w_rec if self.current_epoch >= self.cfg.train.rec_loss_start_epoch else 0.0
+
+        loss_dict = {
+            'contact_loss': contact_loss,
+            'cse_loss': cse_loss,
+            'kl_loss': kl_loss,
+            'rec_loss': rec_loss,
+            'total_loss': self.loss_weights.w_contact * contact_loss + self.loss_weights.w_cse * cse_loss\
+                + self.loss_weights.w_kl * kl_loss + w_rec * rec_loss
+        }
+        return loss_dict
+    
     
     @staticmethod
     def visualize_grid_and_hand(grid_coords, grid_contact, pred_hand_verts, hand_faces, pred_mask,
@@ -134,27 +206,27 @@ class LGTrainer(L.LightningModule):
         """
         # Convert tensors to numpy if needed
         if isinstance(grid_coords, torch.Tensor):
-            grid_coords_np = grid_coords.cpu().numpy()
+            grid_coords_np = grid_coords.detach().cpu().numpy()
         else:
             grid_coords_np = grid_coords
 
         if isinstance(grid_contact, torch.Tensor):
-            grid_contact_np = grid_contact[batch_idx].cpu().numpy()
+            grid_contact_np = grid_contact[batch_idx].detach().cpu().numpy()
         else:
             grid_contact_np = grid_contact[batch_idx]
 
         if isinstance(pred_hand_verts, torch.Tensor):
-            pred_hand_verts_np = pred_hand_verts[batch_idx].cpu().numpy()
+            pred_hand_verts_np = pred_hand_verts[batch_idx].detach().cpu().numpy()
         else:
             pred_hand_verts_np = pred_hand_verts[batch_idx]
 
         if isinstance(hand_faces, torch.Tensor):
-            hand_faces_np = hand_faces.cpu().numpy()
+            hand_faces_np = hand_faces.detach().cpu().numpy()
         else:
             hand_faces_np = hand_faces
 
         if isinstance(pred_mask, torch.Tensor):
-            pred_mask_np = pred_mask[batch_idx].cpu().numpy()
+            pred_mask_np = pred_mask[batch_idx].detach().cpu().numpy()
         else:
             pred_mask_np = pred_mask[batch_idx]
 
@@ -201,12 +273,12 @@ class LGTrainer(L.LightningModule):
         if gt_hand_verts is not None and gt_mask is not None:
             # Convert GT tensors to numpy
             if isinstance(gt_hand_verts, torch.Tensor):
-                gt_hand_verts_np = gt_hand_verts[batch_idx].cpu().numpy()
+                gt_hand_verts_np = gt_hand_verts[batch_idx].detach().cpu().numpy()
             else:
                 gt_hand_verts_np = gt_hand_verts[batch_idx]
 
             if isinstance(gt_mask, torch.Tensor):
-                gt_mask_np = gt_mask[batch_idx].cpu().numpy()
+                gt_mask_np = gt_mask[batch_idx].detach().cpu().numpy()
             else:
                 gt_mask_np = gt_mask[batch_idx]
 
@@ -266,17 +338,3 @@ class LGTrainer(L.LightningModule):
 
         # Visualize
         o3d.visualization.draw_geometries([hand_mesh, obj_mesh, pcd])
-    
-    def recover_hand_verts_from_contact(self, grid_contact, grid_cse, grid_coords):
-        """
-        :param grid_contact: (B, K^3) contact values
-        :param grid_cse: (B, K^3, D) contact signature embeddings
-        :param grid_coords: (K^3, 3)
-        """
-        targetWverts = self.handcse.emb2Wvert(grid_cse)
-        # verts_mask = torch.sum(targetWverts, dim=1) > 0.01  # (B, 778)
-        weight = (targetWverts * grid_contact.unsqueeze(-1)).transpose(-1, -2)  # (B, 778, K^3)
-        verts_mask = torch.sum(weight, dim=-1) > 0.01  # (B, 778)
-        weight[verts_mask] = weight[verts_mask] / torch.sum(weight[verts_mask], dim=-1, keepdim=True)
-        pred_verts = weight @ grid_coords.unsqueeze(0)  # (B, 778, 3)
-        return pred_verts, verts_mask

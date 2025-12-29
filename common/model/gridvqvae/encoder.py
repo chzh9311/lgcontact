@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from common.model.ml_contact_ae.layers import ResidualStack, Conv3D, MaxPool3D
+from common.model.layers import ResidualStack, Conv3D, MaxPool3D
 
 
 class Encoder(nn.Module):
@@ -31,7 +31,7 @@ class Encoder(nn.Module):
         self.conv2 = Conv3D(h_dims[1] * (1+condition), h_dims[2], kernel_size=3, stride=1, padding=1)
         self.pool2 = MaxPool3D(kernel_size=2)
         self.conv3 = Conv3D(h_dims[2] * (1+condition), h_dims[3], kernel_size=3, stride=1, padding=1)
-        self.res_stack = ResidualStack(h_dims[3], h_dims[3], res_h_dim, n_res_layers)
+        self.res_stack = ResidualStack(h_dims[3], res_h_dim, n_res_layers)
 
         # self.conv_stack = nn.Sequential(
         #     nn.Conv3d(in_dim, h_dim // 2, kernel_size=kernel,
