@@ -1,7 +1,7 @@
 defaults:
   - msdf: base
   - data: grab_local_grid
-  - model: lg_vqvae
+  - ae: lg_vqvae
   - _self_
 
 training_stage: "vqvae"

@@ -1,13 +1,13 @@
 defaults:
   - msdf: base
   - data: grab
-  - model: gridae_128latent
+  - ae: gridae_128latent
   - generator: pointnet_vae
   - _self_
 
 training_stage: "generator"
 
-model:
+ae:
   n_comps: 26
 
 train:
