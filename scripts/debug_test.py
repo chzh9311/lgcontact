@@ -1,3 +1,4 @@
+import torch
 import trimesh
 import hydra
 import open3d as o3d    
@@ -5,7 +6,11 @@ from common.manopth.manopth.manolayer import ManoLayer
 from common.dataset_utils.grab_dataset import GRABDataset
 from common.dataset_utils.datamodules import HOIDatasetModule, LocalGridDataModule
 from common.utils.vis import visualize_local_grid, visualize_local_grid_with_hand
+from common.model.vae.point_vae import MLCVAE
 import numpy as np
+from omegaconf import OmegaConf
+
+OmegaConf.register_new_resolver("add", lambda x, y: x + y, replace=True)
 
 @hydra.main(config_path="../config", config_name="mlcontact_gen")
 def vis_msdf_data_sample(cfg):
@@ -106,7 +111,17 @@ def test_obj():
     visualize_local_grid(msdf, kernel_size, point_idx=0, obj_mesh=obj_mesh)
 
 
+@hydra.main(config_path="../config", config_name="mlcontact_gen")
+def test_pointvae(cfg):
+    dummy_contact = torch.randn(4, 256, 5, 8, 8, 8)
+    dummy_obj_msdf = torch.randn(4, 256, 1, 8, 8, 8)
+    dummy_msdf_center = torch.randn(4, 256, 3)
+    model = MLCVAE(cfg)
+    recon, mu, logvar = model(dummy_contact, dummy_obj_msdf, dummy_msdf_center)
+
+
 if __name__ == "__main__":
-    vis_msdf_data_sample()
+    # vis_msdf_data_sample()
     # test_obj()
     # vis_local_grid_interact()
+    test_pointvae()

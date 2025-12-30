@@ -1,7 +1,8 @@
 defaults:
   - msdf: base
   - data: grab
-  - pose_optimizer: base
+  - model: gridae_128latent
+  - generator: pointnet_vae
   - _self_
 
 training_stage: "generator"
@@ -21,8 +22,8 @@ test:
   batch_size: ${test.n_samples}
 
 trainer: ## For instantiating pytorch-lightning Trainer
-  max_epochs: 300
-  check_val_every_n_epoch: 5
+  max_epochs: 100
+  check_val_every_n_epoch: 2
   log_every_n_steps: 100
   accelerator: gpu
   devices: 1

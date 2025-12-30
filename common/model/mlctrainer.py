@@ -17,7 +17,7 @@ from common.model.losses import masked_rec_loss
 from common.msdf.utils.msdf import get_grid
 
 
-class LGTrainer(L.LightningModule):
+class MLCTrainer(L.LightningModule):
     """
     The Lightning trainer interface to train Local-grid based contact autoencoder.
     """
@@ -338,3 +338,14 @@ class LGTrainer(L.LightningModule):
 
         # Visualize
         o3d.visualization.draw_geometries([hand_mesh, obj_mesh, pcd])
+
+
+class DummyModel(nn.Module):
+    def __init__(self):
+        super(DummyModel, self).__init__()
+
+    def forward(self, x, sdf):
+        batch_size = x.shape[0]
+        recon_x = x.clone()
+        latent = torch.randn(batch_size, 1, 1, 1)
+        return recon_x, latent, None

@@ -18,7 +18,7 @@ class GRIDAE(nn.Module):
     TODO 2: how to enable conditional input, i.e., predict the contact given the object local geometry? 
     We can try add this as part of the input to the encoder & decoder.
     """
-    def __init__(self, cfg):
+    def __init__(self, cfg, obj_1d_feat=False):
         super(GRIDAE, self).__init__()
         # encode image into continuous latent space
         # self.obj_encoder = Encoder(obj_in_dim, h_dims, obj_n_res_layers, obj_res_h_dim, condition=False)
@@ -27,10 +27,10 @@ class GRIDAE(nn.Module):
                                          h_dims=cfg.h_dims,
                                          res_h_dim=cfg.res_h_dim,
                                          n_res_layers=cfg.n_res_layers,
-                                         feat_dim=cfg.feat_dim,
+                                         feat_dim=cfg.obj_feat_dim,
                                          N=cfg.kernel_size,
                                          condition=False,
-                                         has_final_layer=False)
+                                         has_final_layer=obj_1d_feat)
         self.encoder = GridEncoder3D(in_dim=cfg.in_dim,
                                      h_dims=cfg.h_dims,
                                      res_h_dim=cfg.res_h_dim,
@@ -55,7 +55,7 @@ class GRIDAE(nn.Module):
 
     def forward(self, x, obj_msdf):
 
-        _, obj_cond = self.obj_encoder(obj_msdf)
+        obj_feat, obj_cond = self.obj_encoder(obj_msdf)
         z_e, _ = self.encoder(x, cond=obj_cond)
 
         ## Adding skip connections for object decoder
@@ -64,5 +64,11 @@ class GRIDAE(nn.Module):
         c_hat, cse_hat, _ = self.decoder(z_e, cond=obj_cond[::-1])
         x_hat = torch.cat([c_hat, cse_hat], dim=1)
 
-        return x_hat, z_e
+        return x_hat, z_e, obj_feat
+    
+    def inference(self, z_e, obj_msdf):
+        _, obj_cond = self.obj_encoder(obj_msdf)
+        c_hat, cse_hat, _ = self.decoder(z_e, cond=obj_cond[::-1])
+        x_hat = torch.cat([c_hat, cse_hat], dim=1)
+        return x_hat
     

@@ -1,11 +1,11 @@
 import torch
 import torch.nn as nn
-from .encoder import PointNetEncoder, LatentEncoder
-from .decoder import PointNetDecoder
-from ..gridae.encoder import GridEncoder3D
-from ..gridae.decoder import GridDecoder3D
+from .pointnet_module import PointNet2cls, LatentEncoder, PointNet2seg
+# from ..gridae.encoder import GridEncoder3D
+# from ..gridae.decoder import GridDecoder3D
+from ..gridae.gridae import GRIDAE
 
-class MLCVAE(nn.Module):
+class POINT_VAE(nn.Module):
     """
     MSDF-based 3D contact VQVAE of all local patches
     The input contact representation is expected to be kernel_size^3 x (1 + 16); 1 refers to contact likelihood, 16 refers to Hand CSE.
@@ -16,40 +16,78 @@ class MLCVAE(nn.Module):
     TODO 2: how to enable conditional input, i.e., predict the contact given the object local geometry? 
     We can try add this as part of the input to the encoder & decoder.
     """
-    def __init__(self, in_dim, h_dims, res_h_dim, n_res_layers,
-                 obj_in_dim, feat_dim, latent_dim, beta, N, out_dim=17, **kwargs):
-        super(MLCVAE, self).__init__()
+    def __init__(self, cfg):
+        super(POINT_VAE, self).__init__()
         # encode image into continuous latent space
         # self.obj_encoder = Encoder(obj_in_dim, h_dims, obj_n_res_layers, obj_res_h_dim, condition=False)
-        self.objgridencoder = GridEncoder3D(obj_in_dim, h_dims, res_h_dim, n_res_layers, feat_dim, N=N, condition=False)
-        self.encoder = PointNetEncoder(in_channel=feat_dim+3, out_channel=latent_dim)
-        self.latent_encoder = LatentEncoder(latent_dim, latent_dim, latent_dim)
+        self.grid_ae = GRIDAE(cfg=cfg.model, obj_1d_feat=True)
+        self.cfg = cfg.generator
+        self.latent_dim = cfg.generator.latent.dim
+        self.out_dim = cfg.model.out_dim
+        self.msdf_k = cfg.msdf.kernel_size
+        # self.objgridencoder = GridEncoder3D(obj_in_dim, h_dims, res_h_dim, n_res_layers, feat_dim, N=N, condition=False)
+        self.encoder = PointNet2cls(in_channel=cfg.model.feat_dim + cfg.generator.glob_obj_feat_dim + 3, out_channel=cfg.generator.glob_feat_dim)
+        self.obj_encoder = PointNet2seg(in_dim=cfg.model.obj_feat_dim+3, hidden_dim=cfg.generator.encoder.hd, out_dim=cfg.generator.glob_obj_feat_dim)
+        self.latent_encoder = LatentEncoder(cfg.generator.glob_feat_dim, cfg.generator.latent.hd, self.latent_dim)
         # self.encoder = Encoder(in_dim, h_dims, n_res_layers, res_h_dim)
-        self.objgriddecoder = GridDecoder3D(latent_dim, h_dims[::-1], out_dim, n_res_layers, res_h_dim, condition=True)
-        self.decoder = PointNetDecoder(in_dim=latent_dim+3, hidden_dim=latent_dim, out_dim=out_dim)
+        # self.objgriddecoder = GridDecoder3D(latent_dim, h_dims[::-1], out_dim, n_res_layers, res_h_dim, condition=True)
+        self.decoder = PointNet2seg(in_dim=self.latent_dim + cfg.generator.glob_obj_feat_dim, hidden_dim=cfg.generator.decoder.hd, out_dim=cfg.model.feat_dim)
 
         # if save_img_embedding_map:
         #     self.img_to_embedding_map = {i: [] for i in range(n_embeddings)}
         # else:
         #     self.img_to_embedding_map = None
 
-    def forward(self, x, obj_msdf, verbose=False):
+    def forward(self, x, obj_msdf, msdf_center):
+        ### x: B x N x (C x k x k x k)
 
-        obj_cond = self.obj_encoder(obj_msdf)
-        z_e, _ = self.encoder(x, cond=obj_cond)
+        batch_size, num_points = x.shape[:2]
+        ## First process all grids separately using GRIDAE
+        x = x.view(batch_size * num_points, -1, self.msdf_k, self.msdf_k, self.msdf_k)
+        obj_msdf = obj_msdf.view(batch_size * num_points, 1, self.msdf_k, self.msdf_k, self.msdf_k)
+        obj_feat, local_obj_feat = self.grid_ae.obj_encoder(obj_msdf)
+        grid_feat, _ = self.grid_ae.encoder(x, cond=local_obj_feat)
 
-        z_e = self.pre_quantization_conv(z_e)
-        embedding_loss, z_q, perplexity, _, _ = self.vector_quantization(
-            z_e)
-        ## Adding skip connections for object decoder
-        # dec_obj_cond = self.obj_decoder(obj_feat, cond=enc_obj_cond[::-1])
+        ## Reshape back to (B, N, ...)
+        obj_feat = obj_feat.view(batch_size, num_points, -1).permute(0, 2, 1)
+        grid_feat = grid_feat.view(batch_size, num_points, -1).permute(0, 2, 1)
+        global_obj_feat = self.obj_encoder(torch.cat([msdf_center.permute(0, 2, 1), obj_feat], dim=1))  # B x (3 + obj_feat_dim) x N
+        x = torch.cat([msdf_center.permute(0, 2, 1), grid_feat, global_obj_feat], dim=1)  # B x (3 + grid_feat_dim + obj_feat_dim) x N
 
-        x_hat, _ = self.decoder(z_q, cond=obj_cond[::-1])
+        z_e, _ = self.encoder(x)
 
-        if verbose:
-            print('original data shape:', x.shape)
-            print('encoded data shape:', z_e.shape)
-            print('recon data shape:', x_hat.shape)
-            assert False
+        mean, logvar = self.latent_encoder(z_e)
+        z_dist = torch.distributions.normal.Normal(mean, torch.exp(logvar))
+        z_sample = z_dist.rsample()
+        x = torch.cat([z_sample[:, :, None].repeat(1, 1, num_points), global_obj_feat], dim=1)
+        x = self.decoder(x)
 
-        return embedding_loss, x_hat, perplexity
+        x = x.view(batch_size * num_points, -1).contiguous()
+        c_hat, cse_hat, _ = self.grid_ae.decoder(x, cond=local_obj_feat[::-1])
+        x_hat = torch.cat([c_hat, cse_hat], dim=1)
+        x_hat = x_hat.view(batch_size, num_points, self.msdf_k, self.msdf_k, self.msdf_k, self.out_dim).contiguous()    
+
+        return x_hat, mean, logvar
+    
+    def sample(self, obj_msdf, msdf_center):
+        ## Random noise
+        z_dist = torch.distributions.normal.Normal(0, 1)
+        z_sample = z_dist.rsample()
+
+        batch_size, num_points = obj_msdf.shape[:2]
+        obj_feat, local_obj_feat = self.grid_ae.obj_encoder(obj_msdf)
+        grid_feat, _ = self.grid_ae.encoder(x, cond=local_obj_feat)
+
+        obj_feat = obj_feat.view(batch_size, num_points, -1).permute(0, 2, 1)
+        grid_feat = grid_feat.view(batch_size, num_points, -1).permute(0, 2, 1)
+        global_obj_feat = self.obj_encoder(torch.cat([msdf_center.permute(0, 2, 1), obj_feat], dim=1))  # B x (3 + obj_feat_dim) x N
+
+        x = torch.cat([z_sample, global_obj_feat], dim=1)
+        x = self.decoder(x)
+
+        x = x.view(batch_size * num_points, -1).contiguous()
+        c_sample, cse_sample, _ = self.grid_ae.decoder(x, cond=local_obj_feat[::-1])
+        x_sample = torch.cat([c_sample, cse_sample], dim=1)
+        x_sample = x_sample.view(batch_size, num_points, self.msdf_k, self.msdf_k, self.msdf_k, self.out_dim).contiguous()    
+
+        return x_sample
