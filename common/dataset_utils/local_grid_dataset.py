@@ -80,6 +80,7 @@ class LocalGridDataset(Dataset):
         ## contact data
         grid_data = torch.from_numpy(grid_data).float()
         grid_data[:, :, :, 1] = sdf_to_contact(grid_data[:, :, :, 1] / 0.001, None, method=0)
+        grid_data[:, :, :, 0] = grid_data[:, :, :, 0] / self.grid_scale / np.sqrt(3)  # Normalize SDF
 
         sample = {'localGrid': grid_data,
                   'objSamplePt': obj_sample_pt,

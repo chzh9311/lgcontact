@@ -117,7 +117,7 @@ class GRABDataset(BaseHOIDataset):
     def __init__(self, cfg: edict, split: str, load_msdf: bool = False):
         # self.part_samples = cfg.hand_part_samples
         self.obj_dir = cfg.dataset_path
-        super().__init__(cfg, split)
+        super().__init__(cfg, split, load_msdf=load_msdf)
     
     @staticmethod
     def load_mesh_info(data_dir, msdf_path=None):
@@ -142,7 +142,7 @@ class GRABDataset(BaseHOIDataset):
         return obj_info
 
     def _load_data(self):
-        self.obj_info = self.load_mesh_info(self.data_dir, msdf_path=osp.join(self.preprocessed_dir, 'grab_msdf'))
+        self.obj_info = self.load_mesh_info(self.data_dir, msdf_path=self.msdf_path)
 
         self.ds = np.load(osp.join(self.data_dir, self.split, f'grabnet_{self.split}.npz'), allow_pickle=True)
         frame_names = np.load(osp.join(self.data_dir, self.split, 'frame_names.npz'))['frame_names']
@@ -164,7 +164,7 @@ class GRABDataset(BaseHOIDataset):
         self.frame_names = np.array(frame_names, dtype=np.dtypes.StringDType())
         self.test_objects = test_objects
 
-        with open(osp.join('data', 'preprocessed', 'simplified_obj_mesh.pkl'), 'rb') as of:
+        with open(osp.join('data', 'preprocessed', 'grab', 'simplified_obj_mesh.pkl'), 'rb') as of:
             self.simp_obj_mesh = pickle.load(of)
 
         ## Object hulls for simulation.
@@ -200,7 +200,7 @@ class GRABLocalGridDataset(LocalGridDataset):
     def __init__(self, cfg, split):
         super().__init__(cfg, split)
         self.obj_info = GRABDataset.load_mesh_info(cfg.dataset_path, msdf_path=None)
-        with open(osp.join('data', 'preprocessed', 'simplified_obj_mesh.pkl'), 'rb') as of:
+        with open(osp.join('data', 'preprocessed', 'grab', 'simplified_obj_mesh.pkl'), 'rb') as of:
             self.simp_obj_mesh = pickle.load(of)
         
         self.ds = np.load(osp.join(self.dataset_path, self.split, f'grabnet_{self.split}.npz'), allow_pickle=True)

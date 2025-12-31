@@ -51,8 +51,19 @@ class LocalGridDataModule(LightningDataModule):
                     # result_grid, mask = calculate_local_grid(sample['objSamplePts'], obj_mesh, self.cfg.msdf.scale, self.cfg.msdf.kernel_size,
                     #                                 hand_verts, self.hand_cse, device='cuda:0')
                     # result_grid = result_grid.detach().cpu().numpy()
-                    mask = calculate_contact_mask(sample['objSamplePts'], hand_verts, self.cfg.msdf.scale, device='cuda:0')
+                    mask, _ = calculate_contact_mask(sample['objSamplePts'], hand_verts, self.cfg.msdf.scale, device='cuda:0')
                     mask = mask.detach().cpu().numpy()
+
+                    ## Also add samples from non-contact regions
+                    contact_indices = np.where(mask)
+                    non_contact_indices = np.where(~mask)
+                    n_contact_samples = len(contact_indices[0])
+                    n_non_contact_samples = int(n_contact_samples * self.cfg.non_contact_rate)
+                    if n_non_contact_samples > 0 and len(non_contact_indices[0]) > 0:
+                        n_non_contact_samples = min(n_non_contact_samples, len(non_contact_indices[0]))
+                        selected_idx = np.random.choice(len(non_contact_indices[0]), n_non_contact_samples, replace=False)
+                        selected_non_contact = tuple(idx[selected_idx] for idx in non_contact_indices)
+                        mask[selected_non_contact] = True
 
                     # Clear GPU cache to prevent memory leaks
                     torch.cuda.empty_cache()
@@ -110,14 +121,18 @@ class HOIDatasetModule(LightningDataModule):
         obj_info = self.dataset_class.load_mesh_info(self.data_dir)
         for k, v in obj_info.items():
             mesh = trimesh.Trimesh(v['verts'], v['faces'], process=False)
-            msdf_path = osp.join(self.preprocessed_dir, f'{self.cfg.dataset_name}_msdf', f'{k}.npz')
+            msdf_path = osp.join(self.preprocessed_dir, self.cfg.dataset_name,
+                                 f'msdf_{self.cfg.msdf.num_grids}_{self.cfg.msdf.kernel_size}_{int(self.cfg.msdf.scale*1000):02d}mm',
+                                 f'{k}.npz')
             if not osp.exists(osp.dirname(msdf_path)):
                 os.makedirs(osp.dirname(msdf_path))
             if not osp.exists(msdf_path):
                 print(f'Preprocessing M-SDF for {k}...')
+                ## M-SDF: K^3 + 3
                 msdf = mesh2msdf(mesh, n_samples=self.cfg.msdf.num_grids, kernel_size=self.cfg.msdf.kernel_size, scale=self.cfg.msdf.scale)
                                  
                 np.savez_compressed(msdf_path, msdf=msdf)
+                print('result saved to ', msdf_path)
     
         # Simplified object meshes
         # simp_obj_mesh_path = osp.join('data', 'preprocessed', 'simplified_obj_mesh.pkl')

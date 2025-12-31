@@ -78,6 +78,8 @@ class GridEncoder3D(nn.Module):
         super(GridEncoder3D, self).__init__()
         self.num_layers = len(h_dims)
         self.conv_layers = nn.ModuleList()
+        self.actvn = nn.ModuleList()
+        self.bn = nn.ModuleList()
         self.pool_layers = nn.ModuleList()
 
         self.has_final_layer = has_final_layer
@@ -88,6 +90,8 @@ class GridEncoder3D(nn.Module):
             # Second conv: 3x3 to process features
             conv2 = Conv3D(h_dims[i] * (1+condition), h_dims[i], kernel_size=3, stride=1, padding=1)
             self.conv_layers.append(nn.ModuleList([conv1, conv2]))
+            self.actvn.append(nn.ModuleList([nn.ReLU(), nn.ReLU()]))
+            self.bn.append(nn.ModuleList([nn.BatchNorm3d(h_dims[i]), nn.BatchNorm3d(h_dims[i])]))
 
             # Pool layer (not used after the last layer group)
             if i < self.num_layers - 1:
@@ -106,10 +110,12 @@ class GridEncoder3D(nn.Module):
 
         for i in range(self.num_layers):
             x = self.conv_layers[i][0](x)
+            x = self.actvn[i][0](self.bn[i][0](x))
             if cond is not None:
                 x = self.conv_layers[i][1](torch.cat([x, cond[i]], dim=1))
             else:
                 x = self.conv_layers[i][1](x)
+            x = self.actvn[i][1](self.bn[i][1](x))
             outputs.append(x)
 
             # Apply pooling if not the last layer

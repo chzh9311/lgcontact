@@ -2,10 +2,12 @@ import numpy as np
 from copy import deepcopy
 import trimesh
 import torch
+import os.path as osp
 from torch.utils.data import Dataset
 
 from common.utils.geometry import transform_obj
 from common.utils.vis import o3dmesh_from_trimesh, o3dmesh
+from pytorch3d.transforms import axis_angle_to_matrix
 
 def get_kine_parent(idx):
     if idx in [1, 4, 7, 10, 13]:
@@ -18,17 +20,23 @@ kinetree = {'Index': [0, 1, 2, 3, 17], 'Middle': [0, 4, 5, 6, 18], 'Little': [0,
     
 
 class BaseHOIDataset(Dataset):
-    def __init__(self, cfg, split):
+    def __init__(self, cfg, split, load_msdf=False):
         super(BaseHOIDataset, self).__init__()
         self.data_dir = cfg.dataset_path
         self.preprocessed_dir = cfg.get('preprocessed_dir', 'data/preprocessed')
         self.pick_every_n_frames = cfg.pick_every_n_frames
         self.split = split
-        self.n_obj_samples = cfg.object_sample
+        # self.n_obj_samples = cfg.object_sample
         self.mano_root = cfg.mano_root
         self.test_gt = cfg.get('test_gt', False)
+        self.msdf_scale = cfg.msdf.scale
         self.hand_sides = None
         self.lh_data = None
+        if load_msdf:
+            self.msdf_path = osp.join(self.preprocessed_dir, cfg.dataset_name,
+                                    f'msdf_{cfg.msdf.num_grids}_{cfg.msdf.kernel_size}_{int(cfg.msdf.scale*1000):02d}mm')
+        else:
+            self.msdf_path = None
 
         self._load_data()
 
@@ -73,16 +81,15 @@ class BaseHOIDataset(Dataset):
             fname_path = self.frame_names[idx].split('/')
             sbj_id = fname_path[2]
             obj_name = fname_path[3].split('_')[0]
-            # obj_sample_pts = self.obj_info[obj_name]['samples'] # n_sample x 3
+            obj_sample_pts = self.obj_info[obj_name]['samples'] # n_sample x 3
             # obj_sample_normals = self.obj_info[obj_name]['sample_normals'] # n_sample x 3
-            obj_msdf = self.obj_info[obj_name]['msdf']
             obj_rot = self.object_data['global_orient'][idx]
             obj_trans = self.object_data['transl'][idx]
 
             ## Transform the vertices:
-            # objR = axis_angle_to_matrix(obj_rot).detach().cpu().numpy()
-            # objt = obj_trans.detach().cpu().numpy()
-            # obj_sample_pts = obj_sample_pts @ objR + objt
+            objR = axis_angle_to_matrix(obj_rot).detach().cpu().numpy()
+            objt = obj_trans.detach().cpu().numpy()
+            obj_sample_pts = obj_sample_pts @ objR + objt
             # obj_sample_normals = obj_sample_normals @ objR
 
             samples = {}
@@ -104,13 +111,17 @@ class BaseHOIDataset(Dataset):
                 'frameName': '/'.join(fname_path[2:]),
                 'objName': obj_name,
                 'sbjId': sbj_id,
-                # 'objSamplePts': obj_sample_pts,
+                'objSamplePts': obj_sample_pts,
                 # 'objSampleNormals': obj_sample_normals,
                 'objTrans': obj_trans,
                 'objRot': obj_rot,
-                'objMsdf': obj_msdf,
                 'handSide': hand_side,
             }
+
+            if self.msdf_path is not None:
+                obj_msdf = self.obj_info[obj_name]['msdf'].copy() ## K^3 + 3
+                obj_msdf[:, :-3] = obj_msdf[:, :-3] / self.msdf_scale / np.sqrt(3) # Normalize SDF
+                sample['objMSDF'] = obj_msdf
 
             # hand_out = hmodels[sbj_id](
             #     global_orient=hdata['global_orient'][idx:idx+1],

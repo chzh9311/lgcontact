@@ -15,9 +15,14 @@ class GridDecoder3D(nn.Module):
         self.h_dim0 = h_dims[0]
         self.num_layers = len(h_dims)
         self.init_N = N // 2**(self.num_layers-1)
-        self.init_layer = nn.Linear(latent_dim, h_dims[0]*(self.init_N)**3)
+        self.init_layer = nn.Sequential(
+            nn.Linear(latent_dim, h_dims[0]*(self.init_N)**3),
+            nn.ReLU()
+        )
         self.residual_layer = ResidualStack(h_dims[0], res_h_dim=res_h_dim, n_res_layers=n_res_layers)
         self.deconv_layers = nn.ModuleList()
+        self.actvn = nn.ModuleList()
+        self.bn = nn.ModuleList()
         self.upsample_layers = nn.ModuleList()
 
         for i in range(self.num_layers):
@@ -28,6 +33,8 @@ class GridDecoder3D(nn.Module):
             deconv2 = Conv3D(h_dims[i] * (1+condition), out_channels, kernel_size=1, stride=1, padding=0)
 
             self.deconv_layers.append(nn.ModuleList([deconv1, deconv2]))
+            self.actvn.append(nn.ModuleList([nn.ReLU(), nn.ReLU()]))
+            self.bn.append(nn.ModuleList([nn.BatchNorm3d(h_dims[i]), nn.BatchNorm3d(out_channels)]))
 
             # Pool layer (not used after the last layer group)
             if i < self.num_layers - 1:
@@ -49,10 +56,12 @@ class GridDecoder3D(nn.Module):
 
         for i in range(self.num_layers):
             x = self.deconv_layers[i][0](x)
+            x = self.actvn[i][0](self.bn[i][0](x))
             if cond is not None:
                 x = self.deconv_layers[i][1](torch.cat([x, cond[i]], dim=1))
             else:
                 x = self.deconv_layers[i][1](x)
+            x = self.actvn[i][1](self.bn[i][1](x))
             outputs.append(x)
 
             # Apply pooling if not the last layer

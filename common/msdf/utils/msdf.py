@@ -215,9 +215,10 @@ def calculate_contact_mask(point_cloud, hand_verts, grid_scale, device):
     ## Determine grid contact using Chebyshev distance
     # point_cloud: (B, N, 3), hand_verts: (B, H, 3)
     cbdist = torch.max(torch.abs(point_cloud[:, :, None, :] - hand_verts[:, None, :, :]), dim=-1)[0]  # (B, N, H)
-    mask = torch.min(cbdist, dim=-1)[0] < grid_scale  # (B, N)
+    obj_pt_mask = torch.min(cbdist, dim=-1)[0] < grid_scale  # (B, N)
+    hand_vert_mask = torch.min(cbdist, dim=1)[0] < grid_scale  # (B, H)
 
-    return mask
+    return obj_pt_mask, hand_vert_mask
 
 
 def calc_local_grid_batch(contact_points, normalized_coords, obj_mesh, kernel_size, grid_scale, hand_verts, hand_cse, device):
@@ -309,7 +310,7 @@ def msdf2mlcontact(obj_msdf, hand_verts, hand_cse, kernel_size, grid_scale):
     hand_cse: torch.Tensor, (H, C), the hand contact surface embeddings.
     """
     centers = obj_msdf[:, :, kernel_size**3:]  # B, N, 3
-    contact_mask = calculate_contact_mask(centers, hand_verts, grid_scale=grid_scale, device=obj_msdf.device)
+    obj_pt_mask, hand_vert_mask = calculate_contact_mask(centers, hand_verts, grid_scale=grid_scale, device=obj_msdf.device)
     normalized_coords = get_grid(kernel_size=kernel_size, device=obj_msdf.device).reshape(-1, 3).float()
     # all_pts = centers[:, :, None, :] + normalized_coords[None, None, :, :] * grid_scale  # B, N, K^3, 3
     local_grid_dist = torch.zeros(
@@ -325,7 +326,7 @@ def msdf2mlcontact(obj_msdf, hand_verts, hand_cse, kernel_size, grid_scale):
 
     for b in range(obj_msdf.shape[0]):
         local_grid = calc_local_grid_batch(
-            contact_points=centers[b][contact_mask[b]],
+            contact_points=centers[b][obj_pt_mask[b]],
             normalized_coords=normalized_coords,
             obj_mesh=None,  # not needed here
             kernel_size=kernel_size,
@@ -334,7 +335,7 @@ def msdf2mlcontact(obj_msdf, hand_verts, hand_cse, kernel_size, grid_scale):
             hand_cse=hand_cse,
             device=obj_msdf.device
         )  # M, K, K, K, 1 + cse_dim
-        local_grid_dist[b][contact_mask[b]] = local_grid[..., 0].float()
-        local_grid_cse[b][contact_mask[b]] = local_grid[..., 1:].float()
+        local_grid_dist[b][obj_pt_mask[b]] = local_grid[..., 0].float()
+        local_grid_cse[b][obj_pt_mask[b]] = local_grid[..., 1:].float()
     
-    return local_grid_dist, local_grid_cse, contact_mask, normalized_coords
+    return local_grid_dist, local_grid_cse, obj_pt_mask, hand_vert_mask, normalized_coords

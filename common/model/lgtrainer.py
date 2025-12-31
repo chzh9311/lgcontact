@@ -9,10 +9,9 @@ import numpy as np
 from common.manopth.manopth.manolayer import ManoLayer
 from common.model.losses import kl_div_normal, masked_rec_loss
 from common.model.handobject import recover_hand_verts_from_contact
-from common.model.pose_optimizer import optimize_pose_wrt_local_grids
 from common.model.handobject import HandObject, recover_hand_verts_from_contact
 from common.model.hand_cse.hand_cse import HandCSE
-from common.utils.vis import o3dmesh_from_trimesh, visualize_local_grid_with_hand, geom_to_img
+from common.utils.vis import o3dmesh_from_trimesh, visualize_local_grid_with_hand, geom_to_img, extract_masked_mesh_components
 from common.model.losses import masked_rec_loss
 from common.msdf.utils.msdf import get_grid
 
@@ -49,6 +48,7 @@ class LGTrainer(L.LightningModule):
     def train_val_step(self, batch, batch_idx, stage):
         self.grid_coords = self.grid_coords.to(self.device)
         grid_sdf, gt_grid_contact = batch['localGrid'][..., 0], batch['localGrid'][..., 1:]
+
         recon_cgrid, latent, obj_feat = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
         recon_cgrid = recon_cgrid.permute(0, 2, 3, 4, 1)
         contact, contact_hat = gt_grid_contact[..., 0], recon_cgrid[..., 0]
@@ -59,8 +59,8 @@ class LGTrainer(L.LightningModule):
             self.handcse,
             contact_hat.reshape(batch_size, -1),
             cse_hat.reshape(batch_size, -1, cse.shape[-1]),
-            grid_coords=self.grid_coords.view(-1, 3),
-            mask_th = 0.01
+            grid_coords=self.grid_coords.view(1, -1, 3).repeat(batch_size, 1, 1),
+            mask_th = 0.02
         )
         loss_dict = self.loss_net(gt_grid_contact, recon_cgrid,
                                   latent, pred_hand_verts, batch['nHandVerts'], batch['handVertMask'])
@@ -105,11 +105,11 @@ class LGTrainer(L.LightningModule):
         gt_rec_hand_verts, gt_rec_verts_mask = recover_hand_verts_from_contact(
             self.handcse,
             gt_grid_contact[..., 0].view(batch_size, -1), gt_grid_contact[..., 1:].view(batch_size, -1, gt_grid_contact.shape[-1]-1),
-            grid_coords=self.grid_coords.view(-1, 3),
+            grid_coords=self.grid_coords.view(1, -1, 3).repeat(batch_size, 1, 1),
             mask_th = 0.01
         )
         gt_geoms = self.visualize_grid_and_hand(
-            grid_coords=self.grid_coords.view(-1, 3),
+            grid_coords=self.grid_coords.view(1, -1, 3).repeat(batch_size, 1, 1),
             grid_contact=gt_grid_contact[..., 0].view(batch_size, -1),
             pred_hand_verts=gt_rec_hand_verts,
             hand_faces=self.mano_layer.th_faces,
@@ -124,7 +124,7 @@ class LGTrainer(L.LightningModule):
             self.handcse,
             recon_grid_contact[..., 0].reshape(batch_size, -1),
             recon_grid_contact[..., 1:].reshape(batch_size, -1, gt_grid_contact.shape[-1] - 1),
-            grid_coords=self.grid_coords.view(-1, 3)
+            grid_coords=self.grid_coords.view(1, -1, 3).repeat(batch_size, 1, 1)
         )
         pred_geoms = self.visualize_grid_and_hand(
             grid_coords=self.grid_coords.view(-1, 3),
@@ -243,31 +243,14 @@ class LGTrainer(L.LightningModule):
         grid_pcd.colors = o3d.utility.Vector3dVector(grid_colors)
         geometries.append(grid_pcd)
 
-        # 2. Create predicted masked hand mesh
-        # Find faces where all vertices are masked
-        face_mask = pred_mask_np[hand_faces_np].all(axis=1)  # (F,) boolean array
-        masked_faces = hand_faces_np[face_mask]
-
-        if len(masked_faces) > 0:
-            # Create mesh with only masked faces
-            pred_hand_mesh = o3d.geometry.TriangleMesh()
-            pred_hand_mesh.vertices = o3d.utility.Vector3dVector(pred_hand_verts_np)
-            pred_hand_mesh.triangles = o3d.utility.Vector3iVector(masked_faces)
-            pred_hand_mesh.paint_uniform_color([0.8, 0.6, 0.4])  # Skin color for prediction
-            pred_hand_mesh.compute_vertex_normals()
-            geometries.append(pred_hand_mesh)
-
-        # 3. Find isolated vertices (masked but not in any face) for prediction
-        vertices_in_faces = np.unique(masked_faces.flatten()) if len(masked_faces) > 0 else np.array([])
-        masked_vert_indices = np.where(pred_mask_np)[0]
-        isolated_vert_indices = np.setdiff1d(masked_vert_indices, vertices_in_faces)
-
-        if len(isolated_vert_indices) > 0:
-            # Visualize isolated vertices as points
-            isolated_pcd = o3d.geometry.PointCloud()
-            isolated_pcd.points = o3d.utility.Vector3dVector(pred_hand_verts_np[isolated_vert_indices])
-            isolated_pcd.paint_uniform_color([1.0, 0.0, 0.0])  # Red for isolated points
-            geometries.append(isolated_pcd)
+        # 2. Create predicted masked hand mesh and isolated vertices
+        pred_geometries = extract_masked_mesh_components(
+            pred_hand_verts_np, hand_faces_np, pred_mask_np,
+            create_geometries=True,
+            mesh_color=[0.8, 0.6, 0.4],  # Skin color for prediction
+            isolated_color=[1.0, 0.0, 0.0]  # Red for isolated points
+        )
+        geometries.extend(pred_geometries)
 
         # 4. Visualize GT hand if provided
         if gt_hand_verts is not None and gt_mask is not None:
@@ -282,30 +265,14 @@ class LGTrainer(L.LightningModule):
             else:
                 gt_mask_np = gt_mask[batch_idx]
 
-            # Find faces where all vertices are masked for GT
-            gt_face_mask = gt_mask_np[hand_faces_np].all(axis=1)
-            gt_masked_faces = hand_faces_np[gt_face_mask]
-
-            if len(gt_masked_faces) > 0:
-                # Create GT mesh with only masked faces
-                gt_hand_mesh = o3d.geometry.TriangleMesh()
-                gt_hand_mesh.vertices = o3d.utility.Vector3dVector(gt_hand_verts_np)
-                gt_hand_mesh.triangles = o3d.utility.Vector3iVector(gt_masked_faces)
-                gt_hand_mesh.paint_uniform_color([0.4, 0.8, 0.4])  # Green color for GT
-                gt_hand_mesh.compute_vertex_normals()
-                geometries.append(gt_hand_mesh)
-
-            # Find isolated vertices for GT
-            gt_vertices_in_faces = np.unique(gt_masked_faces.flatten()) if len(gt_masked_faces) > 0 else np.array([])
-            gt_masked_vert_indices = np.where(gt_mask_np)[0]
-            gt_isolated_vert_indices = np.setdiff1d(gt_masked_vert_indices, gt_vertices_in_faces)
-
-            if len(gt_isolated_vert_indices) > 0:
-                # Visualize isolated GT vertices as points
-                gt_isolated_pcd = o3d.geometry.PointCloud()
-                gt_isolated_pcd.points = o3d.utility.Vector3dVector(gt_hand_verts_np[gt_isolated_vert_indices])
-                gt_isolated_pcd.paint_uniform_color([0.0, 1.0, 0.0])  # Green for isolated GT points
-                geometries.append(gt_isolated_pcd)
+            # Create GT masked hand mesh and isolated vertices
+            gt_geometries = extract_masked_mesh_components(
+                gt_hand_verts_np, hand_faces_np, gt_mask_np,
+                create_geometries=True,
+                mesh_color=[0.4, 0.8, 0.4],  # Green color for GT
+                isolated_color=[0.0, 1.0, 0.0]  # Green for isolated GT points
+            )
+            geometries.extend(gt_geometries)
 
         return geometries
 

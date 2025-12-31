@@ -25,5 +25,13 @@ def kl_div_normal(output, target_mean=0.0, target_std=1.0):
     return kl_mean
 
 
+def kl_div_normal_muvar(mu, logvar):
+    """
+    Compute the KL divergence between the output distribution and a standard normal distribution using mean and log-variance.
+    """
+    kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+    return kl
+
+
 def masked_rec_loss(pred, gt, mask):
-    return torch.sum((torch.norm(pred[mask] - gt[mask], dim=-1)) / (mask.sum()) + 1e-4) # in m
+    return torch.sum(torch.norm((pred - gt)[mask], dim=-1)) / (mask.sum() + 1e-6) # in m

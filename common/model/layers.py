@@ -28,7 +28,7 @@ class Conv3D(nn.Module):
         self.conv = nn.Sequential(
             nn.Conv3d(in_channels, out_channels, kernel_size, stride, padding),
             nn.BatchNorm3d(out_channels),
-            nn.LeakyReLU(0.2),
+            nn.ReLU(True),
         )
 
     def forward(self, x):
@@ -41,7 +41,7 @@ class Deconv3D(nn.Module):
         self.conv = nn.Sequential(
             nn.ConvTranspose3d(in_channels, out_channels, kernel_size, stride, padding),
             nn.BatchNorm3d(out_channels),
-            nn.LeakyReLU(0.2),
+            nn.ReLU(True),
         )
 
     def forward(self, x):

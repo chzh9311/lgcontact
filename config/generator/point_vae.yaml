@@ -1,5 +1,5 @@
 model_type: vae
-model_name: pointnet_vae
+model_name: point_vae
 feat_dim: ${model.feat_dim}
 glob_feat_dim: 512
 glob_obj_feat_dim: 1024
@@ -8,7 +8,10 @@ latent:
   dim: 256
 
 encoder:
-  hd: 256
+  hd: 512
+
+obj_encoder:
+  hd: 128
 
 decoder:
-  hd: 256
+  hd: 512

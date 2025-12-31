@@ -9,7 +9,7 @@ import open3d.visualization as vis
 from matplotlib import pyplot as plt
 
 from common.manopth.manopth.manolayer import ManoLayer
-from common.utils.vis import o3dmesh_from_trimesh, o3d_arrow, geom_to_img
+from common.utils.vis import o3dmesh_from_trimesh, o3d_arrow, geom_to_img, extract_masked_mesh_components
 from common.utils.geometry import (
         flip_x_axis,
         transform_mesh,
@@ -28,7 +28,7 @@ class HandObject:
             self.mano_layer = mano_layer
 
         self.hand_faces = np.load("data/misc/closed_mano_r_faces.npy")
-        self.hand_cse = torch.load(cfg.get('hand_cse_path', 'data/misc/hand_cse.pt')).detach().to(self.device)
+        self.hand_cse = torch.load(cfg.get('hand_cse_path', 'data/misc/hand_cse.ckpt'))['state_dict']['embedding_tensor'].detach().to(self.device)
         self.hand_part_ids = torch.argmax(self.mano_layer.th_weights, dim=-1).detach().cpu().numpy()
         self.hand_verts = None
         self.hand_pose = None
@@ -89,7 +89,7 @@ class HandObject:
         self.hand_verts = batch['handVerts'].clone().to(self.device).float()
         self.hand_normals = batch['handNormals'].clone().to(self.device).float()
         self.hand_joints = batch['handJoints'].clone().to(self.device).float()
-        batch_size = self.obj_rot.shape[0]
+        self.batch_size = self.obj_rot.shape[0]
         # handV, handJ = batch['handVerts'].clone().cpu().numpy(), batch['handJoints'][:, :16].clone().cpu().numpy()
         # self.hand_models = [trimesh.Trimesh(handV[i], self.hand_faces.copy()) for i in range(handV.shape[0])]
 
@@ -102,7 +102,7 @@ class HandObject:
         # hand_frames = batch['handPartT'].clone()
 
         # Do transformations
-        objT = torch.eye(4).to(self.device).unsqueeze(0).repeat(batch_size, 1, 1)
+        objT = torch.eye(4).to(self.device).unsqueeze(0).repeat(self.batch_size, 1, 1)
         objR = axis_angle_to_matrix(self.obj_rot)
         objT[:, :3, :3] = objR.transpose(-1, -2) if self.inv_obj_rot else objR
         objT[:, :3, 3] = self.obj_trans
@@ -110,14 +110,14 @@ class HandObject:
         # Load object templates
         if obj_templates is not None:
             self.obj_models = []
-            for b in range(batch_size):
+            for b in range(self.batch_size):
                 obj_mesh = copy(obj_templates[b])
                 self.obj_models.append(obj_mesh)
 
         # Load object hulls
         if obj_hulls is not None:
             self.obj_hulls = []
-            for b in range(batch_size):
+            for b in range(self.batch_size):
                 ohs = []
                 for h in obj_hulls[b]:
                     h0 = copy(h)
@@ -127,7 +127,7 @@ class HandObject:
         if self.normalize:
             # Apply inverse transformation objT^-1 to hand related attributes
             # Compute inverse transformation
-            objT_inv = torch.eye(4).to(self.device).unsqueeze(0).repeat(batch_size, 1, 1)
+            objT_inv = torch.eye(4).to(self.device).unsqueeze(0).repeat(self.batch_size, 1, 1)
             objT_inv[:, :3, :3] = objT[:, :3, :3].transpose(-1, -2)  # R^T
             objT_inv[:, :3, 3] = -(objT_inv[:, :3, :3] @ objT[:, :3, 3:4]).squeeze(-1)  # -R^T * t
 
@@ -183,13 +183,15 @@ class HandObject:
                     for j in range(len(self.obj_hulls[i])):
                         self.obj_hulls[i][j] = transform_mesh(self.obj_hulls[i][j], objT_np)
 
-        ml_dist, ml_cse, mask, normalized_coords = msdf2mlcontact(self.obj_msdf, self.hand_verts, self.hand_cse, self.cfg.msdf.kernel_size, self.cfg.msdf.scale)
+        ## Compute Local grid contact representation
+        ml_dist, ml_cse, mask, hand_vert_mask, normalized_coords = msdf2mlcontact(self.obj_msdf, self.hand_verts, self.hand_cse, self.cfg.msdf.kernel_size, self.cfg.msdf.scale)
         ml_dist[mask] = sdf_to_contact(ml_dist[mask] / (self.cfg.msdf.scale / self.cfg.msdf.kernel_size), None, method=0)
         # ml_contact[mask, :, :, :, 0] = sdf_to_contact(ml_contact[mask, :, :, :, 0] / (self.cfg.msdf.scale / self.cfg.msdf.num_grids), None, method=0)
         # self.contact_map = obj_cmap.to(self.device).squeeze(-1)
         self.ml_contact = torch.cat([ml_dist.unsqueeze(-1), ml_cse], dim=-1)
         self.normalized_coords = normalized_coords
         self.obj_pt_mask = mask
+        self.hand_vert_mask = hand_vert_mask
 
     def _load_templates(self, idx, obj_template, obj_hull=None):
         if self.hand_verts is not None:
@@ -284,6 +286,26 @@ class HandObject:
     def vis_frame(self, idx=0, **kwargs):
         vis_geoms = self.get_vis_geoms(idx, **kwargs)
         o3d.visualization.draw(vis_geoms, show_skybox=False, lookat=[0, 1, 0], eye=[0, -1, 0], up=[0, 0, 1])
+    
+    def get_masked_recon_hand_meshes(self, recon_hand_verts, vis_idx=0):
+        """
+        get o3d meshes of reconstructed hand vertices. Only masked vertices are shown.
+        :param recon_hand_verts: (B, 778, 3) reconstructed hand vertices
+        :param vis_idx: int, index of the hand to visualize
+        """
+        hand_verts = recon_hand_verts[vis_idx].detach().cpu().numpy()
+        hand_mask = self.hand_vert_mask[vis_idx].detach().cpu().numpy()
+        geometries = extract_masked_mesh_components(hand_verts, self.hand_faces, hand_mask,
+                                                    create_geometries=True)
+        return geometries
+    
+
+    def vis_recon_hand_with_object(self, recon_hand_verts, vis_idx=0, w=800, h=600):
+        hand_geoms = self.get_masked_recon_hand_meshes(recon_hand_verts, vis_idx=vis_idx)
+        obj_geom = o3dmesh_from_trimesh(self.obj_models[vis_idx], (0.5, 0.5, 0.5))
+        img = geom_to_img(hand_geoms + [obj_geom], w=w, h=h, scale=0.6)
+        return img
+
 
     def get_ho_features(self, rot_dim=3):
         """
@@ -327,14 +349,14 @@ class HandObject:
 
 def recover_hand_verts_from_contact(handcse, grid_contact, grid_cse, grid_coords, mask_th=0.01):
     """
-    :param grid_contact: (B, K^3) contact values
-    :param grid_cse: (B, K^3, D) contact signature embeddings
-    :param grid_coords: (K^3, 3)
+    :param grid_contact: (B, N) contact values
+    :param grid_cse: (B, N, D) contact signature embeddings
+    :param grid_coords: (B, N, 3)
     """
     targetWverts = handcse.emb2Wvert(grid_cse)
     # verts_mask = torch.sum(targetWverts, dim=1) > 0.01  # (B, 778)
     weight = (targetWverts * grid_contact.unsqueeze(-1)).transpose(-1, -2)  # (B, 778, K^3)
     verts_mask = torch.sum(weight, dim=-1) > mask_th  # (B, 778)
     weight[verts_mask] = weight[verts_mask] / torch.sum(weight[verts_mask], dim=-1, keepdim=True)
-    pred_verts = weight @ grid_coords.unsqueeze(0)  # (B, 778, 3)
+    pred_verts = weight @ grid_coords  # (B, 778, 3)
     return pred_verts, verts_mask

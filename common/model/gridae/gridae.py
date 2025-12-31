@@ -4,7 +4,6 @@ import torch.nn.functional as F
 
 from .encoder import GridEncoder3D
 from .decoder import GridDecoder3D
-from .quantizer import VectorQuantizer
 from common.msdf.utils.msdf import get_grid
 
 class GRIDAE(nn.Module):

@@ -114,7 +114,72 @@ def o3d_point(pos, radius, color=None):
     return pt
 
 
-def geom_to_img(vis_geoms, w, h):
+def extract_masked_mesh_components(hand_verts, hand_faces, vertex_mask,
+                                   create_geometries=True, mesh_color=None, isolated_color=None):
+    """
+    Extract masked faces and isolated vertices from a hand mesh based on a vertex mask.
+    Optionally create Open3D geometries for visualization.
+
+    Args:
+        hand_verts: numpy array of shape (N, 3), hand vertex positions
+        hand_faces: numpy array of shape (F, 3), hand face indices
+        vertex_mask: numpy array of shape (N,), boolean mask indicating which vertices are active
+        create_geometries: bool, if True, create Open3D geometries for the mesh and isolated points
+        mesh_color: list/array of [R, G, B], color for the mesh (default: [0.8, 0.6, 0.4] skin color)
+        isolated_color: list/array of [R, G, B], color for isolated points (default: [1.0, 0.0, 0.0] red)
+
+    Returns:
+        If create_geometries is False:
+            masked_faces: numpy array of shape (F', 3), faces where all vertices are masked
+            vertices_in_faces: numpy array of vertex indices that are part of masked faces
+            isolated_vert_indices: numpy array of vertex indices that are masked but not in any face
+
+        If create_geometries is True:
+            geometries: list of Open3D geometries (mesh and/or point cloud)
+    """
+    # Find faces where all vertices are masked
+    face_mask = vertex_mask[hand_faces].all(axis=1)  # (F,) boolean array
+    masked_faces = hand_faces[face_mask]
+
+    # Find vertices that are part of masked faces
+    vertices_in_faces = np.unique(masked_faces.flatten()) if len(masked_faces) > 0 else np.array([])
+
+    # Find isolated vertices (masked but not in any face)
+    masked_vert_indices = np.where(vertex_mask)[0]
+    isolated_vert_indices = np.setdiff1d(masked_vert_indices, vertices_in_faces)
+
+    if not create_geometries:
+        return masked_faces, vertices_in_faces, isolated_vert_indices
+
+    # Create Open3D geometries
+    geometries = []
+
+    # Default colors
+    if mesh_color is None:
+        mesh_color = [0.8, 0.6, 0.4]  # Skin color
+    if isolated_color is None:
+        isolated_color = [1.0, 0.0, 0.0]  # Red
+
+    # Create mesh with only masked faces
+    if len(masked_faces) > 0:
+        hand_mesh = o3d.geometry.TriangleMesh()
+        hand_mesh.vertices = o3d.utility.Vector3dVector(hand_verts)
+        hand_mesh.triangles = o3d.utility.Vector3iVector(masked_faces)
+        hand_mesh.paint_uniform_color(mesh_color)
+        hand_mesh.compute_vertex_normals()
+        geometries.append(hand_mesh)
+
+    # Create point cloud for isolated vertices
+    if len(isolated_vert_indices) > 0:
+        isolated_pcd = o3d.geometry.PointCloud()
+        isolated_pcd.points = o3d.utility.Vector3dVector(hand_verts[isolated_vert_indices])
+        isolated_pcd.paint_uniform_color(isolated_color)
+        geometries.append(isolated_pcd)
+
+    return geometries
+
+
+def geom_to_img(vis_geoms, w, h, scale=0.07):
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
     import matplotlib
     matplotlib.use('Agg')  # Use non-interactive backend
@@ -171,7 +236,7 @@ def geom_to_img(vis_geoms, w, h):
     extent = np.ptp(all_vertices, axis=0)
     # Tight framing for 80% coverage - use smaller multiplier
     max_extent = np.max(extent)
-    half_range = max_extent * 0.07  # Even tighter for better zoom
+    half_range = max_extent * scale  # Even tighter for better zoom
 
     result_imgs = []
     for i in range(4):
