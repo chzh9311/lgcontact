@@ -111,6 +111,7 @@ class HOIDatasetModule(LightningDataModule):
         self.train_batch_size = cfg.train.batch_size
         self.val_batch_size = cfg.val.batch_size
         self.test_batch_size = cfg.test.batch_size
+        self.test_gt = cfg.generator.get('model_type', 'gt') == 'gt'
         module = importlib.import_module(f'common.dataset_utils.{cfg.data.dataset_name}_dataset')
         self.dataset_class = getattr(module, cfg.data.dataset_name.upper() + 'Dataset')
 
@@ -151,12 +152,12 @@ class HOIDatasetModule(LightningDataModule):
 
     def setup(self, stage: str):
         if stage == 'fit':
-            self.train_set = self.dataset_class(self.cfg, 'train')
-            self.val_set = self.dataset_class(self.cfg, 'val')
+            self.train_set = self.dataset_class(self.cfg, 'train', load_msdf=True)
+            self.val_set = self.dataset_class(self.cfg, 'val', load_msdf=True)
         elif stage == 'validate':
-            self.val_set = self.dataset_class(self.cfg, 'val')
+            self.val_set = self.dataset_class(self.cfg, 'val', load_msdf=True)
         elif stage == 'test':
-            self.test_set = self.dataset_class(self.cfg, 'test')
+            self.test_set = self.dataset_class(self.cfg, 'test', load_msdf=True, test_gt=self.test_gt)
 
     def train_dataloader(self):
         return DataLoader(self.train_set, batch_size=self.train_batch_size, shuffle=True, num_workers=self.cfg.num_workers)

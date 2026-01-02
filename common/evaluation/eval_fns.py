@@ -18,7 +18,7 @@ import pybullet
 import pybullet_utils.bullet_client as bc
 from common.utils.vis import o3dmesh_from_trimesh
 
-from evaluation.bullet_simulation import run_simulation
+from .bullet_simulation import run_simulation
 from common.utils.converter import transform_to_canonical, convert_joints
 
 
@@ -62,15 +62,15 @@ def diversity(params_list, cls_num=20):
 def parallel_calculate_metrics(params:dict):
     metrics = params['metrics']
     result = {}
-    if "PyBullet SimuDisp" in metrics:
+    if "Simulation Displacement" in metrics:
         ## decomposition
         if "obj_hulls" not in params:
             mesh = coacd.Mesh(params['obj_model'].vertices, params['obj_model'].faces)
             params['obj_hulls'] = coacd.run_coacd(mesh)
         pb_disp = pybullet_parallel_interface(params) * 100 # to cm
-        result["PyBullet SimuDisp"] = pb_disp
-        if "Pybullet Stable Rate" in metrics:
-            result["Pybullet Stable Rate"] = pb_disp < 2
+        result["Simulation Displacement"] = pb_disp
+        if "Stable Rate @ 2cm" in metrics:
+            result["Stable Rate @ 2cm"] = pb_disp < 2
     if "Intersection Volume" in metrics:
         int_vol = intersect_vox(params['obj_model'], params['hand_model'], pitch=0.005) * 1000000 # turn to cm3
         result["Intersection Volume"] = int_vol

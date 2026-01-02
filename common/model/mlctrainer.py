@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import lightning as L
 import open3d as o3d
 import trimesh
+from copy import copy
 import numpy as np
 from multiprocessing import Pool
 import wandb
@@ -34,9 +35,13 @@ class MLCTrainer(L.LightningModule):
         self.loss_weights = cfg.train.loss_weights
         self.msdf_k = cfg.msdf.kernel_size
         self.lr = cfg.train.lr
+
+        # KL annealing configuration
+        self.kl_anneal_enabled = cfg.train.loss_weights.get('kl_anneal', True)
+        self.kl_warmup_epochs = cfg.train.loss_weights.get('kl_warmup_epochs', 5)
         self.mano_layer = ManoLayer(mano_root=cfg.data.mano_root, side='right',
-                                    use_pca=False, ncomps=45, flat_hand_mean=True)
-        self.closed_mano_faces = np.load(osp.join())
+                                    use_pca=True, ncomps=cfg.pose_optimizer.ncomps, flat_hand_mean=True)
+        self.closed_mano_faces = np.load(osp.join('data', 'misc', 'closed_mano_r_faces.npy'))
         cse_ckpt = torch.load(cfg.data.hand_cse_path)
 
         handF = self.mano_layer.th_faces
@@ -86,7 +91,6 @@ class MLCTrainer(L.LightningModule):
                                   pred_hand_verts, handobject.hand_verts,
                                   handobject.hand_vert_mask)
                                 #   pred_verts_mask)
-        print(loss_dict)
                                   
         # recon_loss = F.mse_loss(recon_grid_contact, gt_grid_contact.permute(0, 4, 1, 2, 3))
         # loss_dict = {f'{stage}/embedding_loss': loss, f'{stage}/recon_loss': recon_loss, f'{stage}/perplexity': perplexity}
@@ -111,8 +115,8 @@ class MLCTrainer(L.LightningModule):
                                         msdf_center=obj_msdf_center[vis_idx].detach().cpu().numpy(),
                                         grid_scale=self.cfg.msdf.scale,
                                         h=400, w=400)
-            vis_geoms = pred_geoms + [g.translate((0, 0.25, 0)) for g in gt_geoms]
-            o3d.visualization.draw_geometries(vis_geoms, window_name='GT Hand-Object')
+            # vis_geoms = pred_geoms + [g.translate((0, 0.25, 0)) for g in gt_geoms]
+            # o3d.visualization.draw_geometries(vis_geoms, window_name='GT Hand-Object')
             img = np.concatenate([gt_img, pred_img], axis=0)
             if hasattr(self.logger, 'experiment'):
                 if hasattr(self.logger.experiment, 'add_image'):
@@ -137,7 +141,24 @@ class MLCTrainer(L.LightningModule):
         if not self.debug:
             for metric in self.cfg.test.criteria:
                 wandb.define_metric(metric, summary='mean')
-    
+
+    def on_train_epoch_start(self):
+        """
+        Called at the start of each training epoch.
+        Handles unfreezing pretrained weights at the specified epoch.
+        """
+        # Check if model has unfreeze capability and if we've reached the unfreeze epoch
+        if hasattr(self.model, 'unfreeze_pretrained_weights') and hasattr(self.cfg.generator, 'ae_freeze_until_epoch'):
+            if self.current_epoch == self.cfg.generator.ae_freeze_until_epoch:
+                print(f"\n{'='*60}")
+                print(f"Epoch {self.current_epoch}: Unfreezing pretrained autoencoder weights")
+                print(f"{'='*60}\n")
+                self.model.unfreeze_pretrained_weights()
+
+                # Recreate optimizer to include newly unfrozen parameters
+                self._recreate_optimizer()
+                print("Optimizer recreated with newly unfrozen parameters\n")
+
     def test_step(self, batch, batch_idx):
         self.grid_coords = self.grid_coords.to(self.device)
         handobject = HandObject(self.cfg.data, self.device, mano_layer=self.mano_layer)
@@ -151,61 +172,100 @@ class MLCTrainer(L.LightningModule):
 
         if self.cfg.generator.model_type == 'gt':
             ## Test using gt contact grids.
-            handobject.load_from_batch(batch, obj_templates=obj_meshes, obj_hulls=obj_hulls)
+            handobject.load_from_batch(batch)
+            obj_msdf_center = handobject.obj_msdf[:, :, self.msdf_k**3:]
             recon_lg_contact = handobject.ml_contact
         else:
-            handobject.load_from_batch_object_only(batch, obj_templates=obj_meshes, obj_hulls=obj_hulls)
-            obj_msdf = handobject.obj_msdf[:, :self.msdf_k**3].view(-1, self.msdf_k, self.msdf_k, self.msdf_k)
-            obj_msdf_center = handobject.obj_msdf[:, self.msdf_k**3:]
-            recon_lg_contact = self.model.sample(obj_msdf, obj_msdf_center)
-        pred_grid_contact = recon_lg_contact[..., 0]
-        grid_coords = obj_msdf_center[:, :, None, :] + self.grid_coords[None, None, :, :]  # B x N x K^3 x 3
-        pred_grid_cse = pred_grid_contact[..., 1:].permute(0, 2, 3, 4, 5, 1).view(batch_size, -1, self.cse_dim)
-        pred_targetWverts = self.hand_cse.emb2Wverts(pred_grid_cse)
-        batch_size = handobject.batch_size
+            handobject.load_from_batch_object_only(batch)
+            obj_msdf = handobject.obj_msdf[:, :, :self.msdf_k**3].view(-1, self.msdf_k, self.msdf_k, self.msdf_k)
+            recon_lg_contact = self.model.sample(obj_msdf, obj_msdf_center).permute(0, 1, 3, 4, 5, 2)
+        batch_size, n_pts = recon_lg_contact.shape[:2]
+        pred_grid_contact = recon_lg_contact[..., 0].view(batch_size, -1)  # B x N x K^3
+        grid_coords = obj_msdf_center[:, :, None, :] + self.grid_coords.view(-1, 3)[None, None, :, :]  # B x N x K^3 x 3
+        pred_grid_cse = recon_lg_contact[..., 1:].view(batch_size, -1, self.cse_dim)
+        pred_targetWverts = self.handcse.emb2Wvert(pred_grid_cse.view(batch_size, -1, self.cse_dim))
 
-        global_pose, mano_pose, mano_shape, mano_trans = optimize_pose_wrt_local_grids(
-                    self.mano_layer, target_pts=grid_coords.view(batch_size, -1, 3),
-                    target_W_verts=pred_targetWverts, mask=None,
-                    n_iter=self.cfg.pose_optimizer.opt_iter, lr=self.cfg.pose_optimizer.opt_lr)
+        with torch.enable_grad():
+            global_pose, mano_pose, mano_shape, mano_trans = optimize_pose_wrt_local_grids(
+                        self.mano_layer, target_pts=grid_coords.view(batch_size, -1, 3),
+                        target_W_verts=pred_targetWverts, weights=pred_grid_contact,
+                        n_iter=self.cfg.pose_optimizer.n_opt_iter, lr=self.cfg.pose_optimizer.opt_lr)
         
         handV, handJ, _ = self.mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
 
         handV, handJ = handV.detach().cpu().numpy(), handJ.detach().cpu().numpy()
 
         param_list = [{'dataset_name': 'grab', 'frame_name': f"{obj_names[i]}_{i}", 'hand_model': trimesh.Trimesh(handV[i], self.closed_mano_faces),
-                       'obj_name': obj_names[i], 'hand_joints': handJ[i], 'obj_model': handobject.obj_models[i], 'obj_hulls': handobject.obj_hulls[i],
+                       'obj_name': obj_names[i], 'hand_joints': handJ[i], 'obj_model': obj_meshes[i], 'obj_hulls': obj_hulls[i],
                        'idx': i} for i in range(handV.shape[0])]
             
         result = calculate_metrics(param_list, metrics=self.cfg.test.criteria, pool=self.pool, reduction='none')
+        ## MPJPE:
+        if self.cfg.generator.model_type == 'gt':
+            mpjpe = np.linalg.norm(handobject.hand_joints.cpu().numpy() - handJ, axis=-1).mean(axis=1) * 1000  # B,
+            mpvpe = np.linalg.norm(handobject.hand_verts.cpu().numpy() - handV, axis=-1).mean(axis=1) * 1000  # B,
+            result.update({'MPJPE': mpjpe, 'MPVPE': mpvpe})
+
+        # print(result)
         self.all_results.append(result)
         self.sample_joints.append(handJ)
 
+        # Log raw per-sample metrics to wandb
+        if not self.debug:
+            # Option 1: Log each sample as individual rows (creates distributions in wandb)
+            for i in range(len(next(iter(result.values())))):
+                sample_metrics = {f"sample/{metric_name}": float(metric_values[i])
+                                 for metric_name, metric_values in result.items()}
+                wandb.log(sample_metrics)
+
+            # Option 2 (alternative): Use wandb Table for structured logging
+            # table_data = [[obj_names[i]] + [float(result[m][i]) for m in result.keys()]
+            #               for i in range(batch_size)]
+            # table = wandb.Table(data=table_data, columns=["object"] + list(result.keys()))
+            # wandb.log({f"test_metrics_batch_{batch_idx}": table})
+        ## Visualization
+        # vis_idx = 2
+        # gt_geoms = handobject.get_vis_geoms(idx=vis_idx, obj_templates=obj_meshes)
+        # pred_ho = copy(handobject)
+        # pred_ho.hand_verts = torch.tensor(handV, dtype=torch.float32)
+        # pred_ho.hand_joints = torch.tensor(handJ, dtype=torch.float32)
+        # pred_geoms = pred_ho.get_vis_geoms(idx=vis_idx, obj_templates=obj_meshes)
+        # o3d.visualization.draw(gt_geoms + [g['geometry'].translate((0, 0.25, 0)) if 'geometry' in g else g for g in pred_geoms])
+
+        return result
+
     def on_test_epoch_end(self):
         final_metrics = {}
+
+        # Compute statistics for all metrics from test results
         for m in self.cfg.test.criteria:
             if "Entropy" not in m and "Cluster Size" not in m:
                 all_metrics = np.concatenate([res[m] for res in self.all_results], axis=0)
-                if m in value_metrics:
-                    final_metrics[m] = {'value': np.mean(all_metrics).item()}
-                else:
-                    final_metrics[m] = {
-                        'mean': np.mean(all_metrics).item(),
-                        'std': np.std(all_metrics).item()
-                    }
+                # Log comprehensive statistics for each metric
+                final_metrics[f"{m}/mean"] = np.mean(all_metrics).item()
+                final_metrics[f"{m}/std"] = np.std(all_metrics).item()
+                final_metrics[f"{m}/min"] = np.min(all_metrics).item()
+                final_metrics[f"{m}/max"] = np.max(all_metrics).item()
+                # final_metrics[f"{m}/median"] = np.median(all_metrics).item()
+                # final_metrics[f"{m}/p25"] = np.percentile(all_metrics, 25).item()
+                # final_metrics[f"{m}/p75"] = np.percentile(all_metrics, 75).item()
 
         ## Calculate diversity
         sample_joints = np.concatenate(self.sample_joints, axis=0)
         # run_time = np.concatenate(run_time, axis=0)
         entropy, cluster_size, entropy_2, cluster_size_2 = calc_diversity(sample_joints)
         final_metrics.update({
-            "Entropy": {'value': entropy.item()},
-            "Cluster Size": {'value': cluster_size.item()},
-            "Canonical Entropy": {'value': entropy_2.item()},
-            "Canonical Cluster Size": {'value': cluster_size_2.item()}
+            "Entropy": entropy.item(),
+            "Cluster Size": cluster_size.item(),
+            "Canonical Entropy": entropy_2.item(),
+            "Canonical Cluster Size": cluster_size_2.item()
         })
 
-        return final_metrics
+        # Log final metrics to wandb
+        if not self.debug:
+            wandb.log(final_metrics)
+
+        # return final_metrics
     
         ## GT visualization
         # vis_idx = 0
@@ -218,13 +278,109 @@ class MLCTrainer(L.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr)
-        return optimizer
+
+        # Cosine annealing scheduler with warmup for stable VAE training
+        # Warmup for first 5% of training, then cosine decay
+        max_epochs = self.cfg.trainer.max_epochs
+        warmup_epochs = max(1, int(0.05 * max_epochs))
+
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=max_epochs - warmup_epochs,
+            eta_min=self.lr * 0.01  # Decay to 1% of initial LR
+        )
+
+        # Linear warmup scheduler
+        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+            optimizer,
+            start_factor=0.1,  # Start at 10% of lr
+            end_factor=1.0,    # Reach full lr
+            total_iters=warmup_epochs
+        )
+
+        # Sequential scheduler: warmup -> cosine annealing
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer,
+            schedulers=[warmup_scheduler, scheduler],
+            milestones=[warmup_epochs]
+        )
+
+        return {
+            'optimizer': optimizer,
+            'lr_scheduler': {
+                'scheduler': scheduler,
+                'interval': 'epoch',
+                'frequency': 1
+            }
+        }
+
+    def _recreate_optimizer(self):
+        """
+        Recreate the optimizer and scheduler to include newly unfrozen parameters.
+        This is necessary when parameters are unfrozen after optimizer initialization,
+        as PyTorch optimizers fix their parameter list at creation time.
+        """
+        # Get current optimizer state
+        old_optimizer = self.trainer.optimizers[0]
+
+        # Count trainable parameters before and for logging
+        trainable_params_before = sum(p.numel() for p in old_optimizer.param_groups[0]['params'] if p.requires_grad)
+        trainable_params_after = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+
+        # Create new optimizer with all currently trainable parameters
+        new_optimizer = torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, self.model.parameters()),
+            lr=self.lr
+        )
+
+        # Recreate scheduler for the remaining epochs
+        max_epochs = self.cfg.trainer.max_epochs
+        remaining_epochs = max_epochs - self.current_epoch
+        warmup_epochs = max(1, int(0.05 * remaining_epochs))
+
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            new_optimizer,
+            T_max=remaining_epochs - warmup_epochs,
+            eta_min=self.lr * 0.01
+        )
+
+        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+            new_optimizer,
+            start_factor=0.1,
+            end_factor=1.0,
+            total_iters=warmup_epochs
+        )
+
+        new_scheduler = torch.optim.lr_scheduler.SequentialLR(
+            new_optimizer,
+            schedulers=[warmup_scheduler, scheduler],
+            milestones=[warmup_epochs]
+        )
+
+        # Replace the optimizer and scheduler in Lightning's trainer
+        self.trainer.optimizers = [new_optimizer]
+        self.trainer.lr_scheduler_configs[0].scheduler = new_scheduler
+
+        print(f"Optimizer updated: {trainable_params_before:,} -> {trainable_params_after:,} trainable parameters")
+        print(f"Scheduler recreated for remaining {remaining_epochs} epochs")
     
+    def get_kl_weight(self):
+        """
+        Compute dynamic KL weight with linear warmup annealing.
+        Gradually increases from 0 to target weight over kl_warmup_epochs.
+        """
+        if not self.kl_anneal_enabled or self.kl_warmup_epochs == 0:
+            return self.loss_weights.w_kl
+
+        # Linear warmup: 0 -> w_kl over kl_warmup_epochs
+        warmup_progress = min(1.0, self.current_epoch / self.kl_warmup_epochs)
+        return warmup_progress * self.loss_weights.w_kl
+
     def loss_net(self, pred_lgc, gt_lgc, mu, logvar, pred_hand_verts, gt_hand_verts, contact_verts_mask):
         """
         Compute the loss for training the GRIDAE
         1. Reconstruction loss between x and x_hat
-        2. KL-divergence loss on z_e 
+        2. KL-divergence loss on z_e with dynamic weighting (annealing)
         """
         pred_contact, pred_cse = pred_lgc[..., 0], pred_lgc[..., 1:]
         gt_contact, gt_cse = gt_lgc[..., 0], gt_lgc[..., 1:]
@@ -232,13 +388,18 @@ class MLCTrainer(L.LightningModule):
         cse_loss = F.mse_loss(pred_cse, gt_cse).item()
         kl_loss = kl_div_normal_muvar(mu, logvar).item()
         hand_rec_loss = masked_rec_loss(pred_hand_verts, gt_hand_verts, contact_verts_mask).item()
+
+        # Dynamic KL weight with annealing
+        kl_weight = self.get_kl_weight()
+
         loss_dict = {
             'contact_loss': contact_loss,
             'cse_loss': cse_loss,
             'kl_loss': kl_loss,
             'hand_rec_loss': hand_rec_loss,
+            'kl_weight': kl_weight,  # Log the current KL weight
             'total_loss': self.loss_weights.w_contact * contact_loss + self.loss_weights.w_cse * cse_loss\
-                + self.loss_weights.w_kl * kl_loss + self.loss_weights.w_rec * hand_rec_loss
+                + kl_weight * kl_loss + self.loss_weights.w_rec * hand_rec_loss
         }
 
         return loss_dict
@@ -284,7 +445,7 @@ class MLCTrainer(L.LightningModule):
             bbox_geometries.append(line_set)
 
         vis_geoms = masked_hand_geometries + [obj_o3d_mesh] + bbox_geometries
-        img = geom_to_img(vis_geoms, w=w, h=h, scale=0.7)
+        img = geom_to_img(vis_geoms, w=w, h=h, scale=0.5)
         return img, vis_geoms
     
     @staticmethod

@@ -1,37 +1,48 @@
 defaults:
+  - _self_
   - msdf: base
   - data: grab
   - ae: gridae_128latent
   - generator: point_vae
   - pose_optimizer: base
-  - _self_
 
 training_stage: "generator"
 
 train:
-  lr: 0.0001
-  batch_size: 32
+  lr: 0.001
+  batch_size: 16
   loss_weights:
-    w_contact: 1.0
-    w_cse: 0.5
-    w_kl: 0.001
-    w_rec: 1.0
+    w_contact: 4.0
+    w_cse: 1.0
+    w_kl: 0.05
+    w_rec: 4.0
+    kl_anneal: true  # Enable KL weight annealing
+    kl_warmup_epochs: 5  # Linear warmup from 0 to w_kl over 5 epochs
+  vis_every_n_batches: 200
 
 val:
-  batch_size: 32
+  batch_size: 20
   vis_every_n_batches: 500
 
 test:
   n_processes: 16
   n_samples: 20
   batch_size: ${test.n_samples}
+  base_criteria:
+    - "Simulation Displacement"
+    - "Penetration Depth"
+    - "Intersection Volume"
+    - "Contact Ratio"
+    - "Cluster Size"
+    - "Entropy"
+  criteria: ${test.base_criteria}
 
 trainer: ## For instantiating pytorch-lightning Trainer
-  max_epochs: 100
+  max_epochs: 20
   check_val_every_n_epoch: 2
-  log_every_n_steps: 100
+  log_every_n_steps: 50
   accelerator: gpu
-  devices: 1
+  devices: 2
   precision: 32
   enable_progress_bar: true
   enable_model_summary: true

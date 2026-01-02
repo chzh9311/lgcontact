@@ -1,2 +1,14 @@
 model_type: gt
 model_name: gt_test
+
+# Override test criteria to include GT-specific metrics
+test:
+  criteria:
+    - "Simulation Displacement"
+    - "Penetration Depth"
+    - "Intersection Volume"
+    - "Contact Ratio"
+    - "Cluster Size"
+    - "Entropy"
+    - "MPJPE"
+    - "MPVPE"

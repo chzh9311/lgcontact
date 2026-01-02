@@ -54,7 +54,7 @@ class HandCSE(nn.Module):
         Args:
             emb_features: (B, n_pts, emb_dim) tensor of embedding features
         Returns:
-            W: (B, n_verts) tensor of weights for each vertex
+            W: (B, n_pts, n_verts) tensor of weights for each vertex
         """
         triangle_cse = self.embedding_tensor[self.cano_faces].mean(dim=1)  # (n_faces, emb_dim)
         dists = torch.cdist(emb_features, triangle_cse)  # (B, n_pts, n_faces)

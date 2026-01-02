@@ -20,15 +20,15 @@ kinetree = {'Index': [0, 1, 2, 3, 17], 'Middle': [0, 4, 5, 6, 18], 'Little': [0,
     
 
 class BaseHOIDataset(Dataset):
-    def __init__(self, cfg, split, load_msdf=False):
+    def __init__(self, cfg, split, load_msdf=False, test_gt=False):
         super(BaseHOIDataset, self).__init__()
         self.data_dir = cfg.dataset_path
         self.preprocessed_dir = cfg.get('preprocessed_dir', 'data/preprocessed')
-        self.pick_every_n_frames = cfg.pick_every_n_frames
+        self.downsample_rate = cfg.downsample_rate[split]
         self.split = split
         # self.n_obj_samples = cfg.object_sample
         self.mano_root = cfg.mano_root
-        self.test_gt = cfg.get('test_gt', False)
+        self.test_gt = test_gt
         self.msdf_scale = cfg.msdf.scale
         self.hand_sides = None
         self.lh_data = None
@@ -40,7 +40,7 @@ class BaseHOIDataset(Dataset):
 
         self._load_data()
 
-        if self.pick_every_n_frames > 1:
+        if self.downsample_rate > 1:
             self.rh_data = self.sample_frames(self.rh_data)
             self.object_data = self.sample_frames(self.object_data)
             self.frame_names = self.sample_frames(self.frame_names)
@@ -63,9 +63,9 @@ class BaseHOIDataset(Dataset):
     def sample_frames(self, data):
         if type(data) is dict:
             for k, v in data.items():
-                data[k] = v[::self.pick_every_n_frames]
+                data[k] = v[::self.downsample_rate]
         else:
-            data = data[::self.pick_every_n_frames]
+            data = data[::self.downsample_rate]
 
         return data
 
@@ -121,7 +121,7 @@ class BaseHOIDataset(Dataset):
             if self.msdf_path is not None:
                 obj_msdf = self.obj_info[obj_name]['msdf'].copy() ## K^3 + 3
                 obj_msdf[:, :-3] = obj_msdf[:, :-3] / self.msdf_scale / np.sqrt(3) # Normalize SDF
-                sample['objMSDF'] = obj_msdf
+                sample['objMsdf'] = obj_msdf
 
             # hand_out = hmodels[sbj_id](
             #     global_orient=hdata['global_orient'][idx:idx+1],

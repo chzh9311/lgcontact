@@ -50,7 +50,8 @@ class HandObject:
         self.inv_obj_rot = cfg.dataset_name == 'grab'
 
     def __copy__(self):
-        new_ho = HandObject(cfg=self.cfg, device=self.device, normalize=self.normalize, inv_obj_rot=self.inv_obj_rot)
+        new_ho = HandObject(cfg=self.cfg, device=self.device, normalize=self.normalize)
+        new_ho.inv_obj_rot = self.inv_obj_rot
         new_ho.obj_names = self.obj_names
         new_ho.mano_layer = self.mano_layer
         new_ho.hand_part_ids = copy(self.hand_part_ids)
@@ -193,28 +194,28 @@ class HandObject:
         self.obj_pt_mask = mask
         self.hand_vert_mask = hand_vert_mask
 
-    def _load_templates(self, idx, obj_template, obj_hull=None):
+    def _load_templates(self, idx, obj_templates, obj_hull=None):
         if self.hand_verts is not None:
             hand_mesh = trimesh.Trimesh(self.hand_verts[idx].detach().cpu().numpy(), self.hand_faces.copy())
         else:
             hand_mesh = None
 
-        objR = axis_angle_to_matrix(self.obj_rot[idx]).detach().cpu().numpy()
-        objt = self.obj_trans[idx].detach().cpu().numpy()
-        T = np.eye(4)
-        T[:3, :3] = objR.T if self.inv_obj_rot else objR
-        T[:3, 3] = objt
-        obj_mesh = copy(obj_template)
-        if self.hand_sides[idx] == 'left':
-            flip_x_axis(obj_mesh)
-        obj_mesh.apply_transform(T)
+        # objR = axis_angle_to_matrix(self.obj_rot[idx]).detach().cpu().numpy()
+        # objt = self.obj_trans[idx].detach().cpu().numpy()
+        # T = np.eye(4)
+        # T[:3, :3] = objR.T if self.inv_obj_rot else objR
+        # T[:3, 3] = objt
+        obj_mesh = copy(obj_templates[idx])
+        # if self.hand_sides[idx] == 'left':
+        #     flip_x_axis(obj_mesh)
+        # obj_mesh.apply_transform(T)
         if obj_hull is not None:
             ohs = []
             for h in obj_hull:
                 h0 = copy(h)
-                if self.hand_sides[idx] == 'left':
-                    flip_x_axis(h0)
-                h0.apply_transform(T)
+                # if self.hand_sides[idx] == 'left':
+                #     flip_x_axis(h0)
+                # h0.apply_transform(T)
                 ohs.append(h0)
         else:
             ohs = None
@@ -222,8 +223,8 @@ class HandObject:
         return hand_mesh, obj_mesh, ohs
 
     def get_vis_geoms(self, idx=0, draw_maps=False, draw_hand=True, draw_obj=True, **kwargs):
-        if 'obj_template' in kwargs:
-            hand_mesh, obj_mesh, _ = self._load_templates(idx=idx, obj_template=kwargs['obj_template'])
+        if 'obj_templates' in kwargs:
+            hand_mesh, obj_mesh, _ = self._load_templates(idx=idx, obj_templates=kwargs['obj_templates'])
         else:
             hand_mesh = self.hand_models[idx]
             obj_mesh = self.obj_models[idx]

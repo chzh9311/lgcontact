@@ -5,15 +5,10 @@ hand_cse_dim: 4
 hand_cse_path: common/model/hand_cse/hand_cse_${data.hand_cse_dim}.ckpt
 preprocessed_dir: data/preprocessed
 MSDF_dir: data/preprocessed/grab_msdf
-test_gt: true
-augmentation:
-  enable: true
-  n_rot: 10
-  seed: 42
 
 downsample_rate: 
-  train: 16
-  val: 16
+  train: 5
+  val: 5
   test: 64
 
 msdf:
@@ -21,7 +16,6 @@ msdf:
   kernel_size: ${msdf.kernel_size}
   scale: ${msdf.scale}
 
-pick_every_n_frames: 1
 object_sample: 1024
 
 num_workers: 16
