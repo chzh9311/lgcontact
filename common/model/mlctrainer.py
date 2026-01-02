@@ -1,3 +1,4 @@
+import os.path as osp
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -5,6 +6,8 @@ import lightning as L
 import open3d as o3d
 import trimesh
 import numpy as np
+from multiprocessing import Pool
+import wandb
 
 from common.manopth.manopth.manolayer import ManoLayer
 from common.model.handobject import recover_hand_verts_from_contact
@@ -14,7 +17,9 @@ from common.model.hand_cse.hand_cse import HandCSE
 from common.utils.vis import o3dmesh_from_trimesh, visualize_local_grid_with_hand, geom_to_img, extract_masked_mesh_components
 from common.model.losses import masked_rec_loss, kl_div_normal_muvar
 from common.msdf.utils.msdf import get_grid
+from common.evaluation.eval_fns import calculate_metrics, calc_diversity
 
+value_metrics = ["Contact Ratio", "Success Rate", "Pierce-Free Rate", "Cluster Size", "Entropy", "Canonical Entropy", "Canonical Cluster Size"]
 
 class MLCTrainer(L.LightningModule):
     """
@@ -24,11 +29,14 @@ class MLCTrainer(L.LightningModule):
         super().__init__()
         self.model = model
         self.cfg = cfg
+        self.save_hyperparameters(cfg)
+        self.debug = cfg.get('debug', False)
         self.loss_weights = cfg.train.loss_weights
         self.msdf_k = cfg.msdf.kernel_size
         self.lr = cfg.train.lr
         self.mano_layer = ManoLayer(mano_root=cfg.data.mano_root, side='right',
                                     use_pca=False, ncomps=45, flat_hand_mean=True)
+        self.closed_mano_faces = np.load(osp.join())
         cse_ckpt = torch.load(cfg.data.hand_cse_path)
 
         handF = self.mano_layer.th_faces
@@ -119,15 +127,34 @@ class MLCTrainer(L.LightningModule):
         self.log_dict(loss_dict, prog_bar=True, sync_dist=True)
         return loss_dict['total_loss']
     
+    def on_test_epoch_start(self):
+        self.pool = Pool(min(self.cfg.test.batch_size, 16))
+        self.all_results = []
+        self.sample_joints = []
+
+        ## Testing metrics
+        self.runtime = 0
+        if not self.debug:
+            for metric in self.cfg.test.criteria:
+                wandb.define_metric(metric, summary='mean')
+    
     def test_step(self, batch, batch_idx):
         self.grid_coords = self.grid_coords.to(self.device)
         handobject = HandObject(self.cfg.data, self.device, mano_layer=self.mano_layer)
+        obj_hulls = getattr(self.trainer.datamodule, 'test_set').obj_hulls
+        obj_names = batch['objName']
+        obj_hulls = [obj_hulls[name] for name in obj_names]
+        obj_mesh_dict = getattr(self.trainer.datamodule, 'test_set').simp_obj_mesh
+        obj_meshes = []
+        for name in obj_names:
+            obj_meshes.append(trimesh.Trimesh(obj_mesh_dict[name]['verts'], obj_mesh_dict[name]['faces']))
+
         if self.cfg.generator.model_type == 'gt':
             ## Test using gt contact grids.
-            handobject.load_from_batch(batch)
+            handobject.load_from_batch(batch, obj_templates=obj_meshes, obj_hulls=obj_hulls)
             recon_lg_contact = handobject.ml_contact
         else:
-            handobject.load_from_batch_object_only(batch)
+            handobject.load_from_batch_object_only(batch, obj_templates=obj_meshes, obj_hulls=obj_hulls)
             obj_msdf = handobject.obj_msdf[:, :self.msdf_k**3].view(-1, self.msdf_k, self.msdf_k, self.msdf_k)
             obj_msdf_center = handobject.obj_msdf[:, self.msdf_k**3:]
             recon_lg_contact = self.model.sample(obj_msdf, obj_msdf_center)
@@ -144,6 +171,42 @@ class MLCTrainer(L.LightningModule):
         
         handV, handJ, _ = self.mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
 
+        handV, handJ = handV.detach().cpu().numpy(), handJ.detach().cpu().numpy()
+
+        param_list = [{'dataset_name': 'grab', 'frame_name': f"{obj_names[i]}_{i}", 'hand_model': trimesh.Trimesh(handV[i], self.closed_mano_faces),
+                       'obj_name': obj_names[i], 'hand_joints': handJ[i], 'obj_model': handobject.obj_models[i], 'obj_hulls': handobject.obj_hulls[i],
+                       'idx': i} for i in range(handV.shape[0])]
+            
+        result = calculate_metrics(param_list, metrics=self.cfg.test.criteria, pool=self.pool, reduction='none')
+        self.all_results.append(result)
+        self.sample_joints.append(handJ)
+
+    def on_test_epoch_end(self):
+        final_metrics = {}
+        for m in self.cfg.test.criteria:
+            if "Entropy" not in m and "Cluster Size" not in m:
+                all_metrics = np.concatenate([res[m] for res in self.all_results], axis=0)
+                if m in value_metrics:
+                    final_metrics[m] = {'value': np.mean(all_metrics).item()}
+                else:
+                    final_metrics[m] = {
+                        'mean': np.mean(all_metrics).item(),
+                        'std': np.std(all_metrics).item()
+                    }
+
+        ## Calculate diversity
+        sample_joints = np.concatenate(self.sample_joints, axis=0)
+        # run_time = np.concatenate(run_time, axis=0)
+        entropy, cluster_size, entropy_2, cluster_size_2 = calc_diversity(sample_joints)
+        final_metrics.update({
+            "Entropy": {'value': entropy.item()},
+            "Cluster Size": {'value': cluster_size.item()},
+            "Canonical Entropy": {'value': entropy_2.item()},
+            "Canonical Cluster Size": {'value': cluster_size_2.item()}
+        })
+
+        return final_metrics
+    
         ## GT visualization
         # vis_idx = 0
         # gt_geoms = visualize_local_grid_with_hand(
