@@ -1,28 +1,22 @@
 defaults:
   - _self_
-  - msdf: sparse
-  - data: grab_multi_contact
-  - ae: gridae_64latent
-  - generator: point_vae
+  - data: grab_single_contact
+  - generator: cat_vae
   - pose_optimizer: base
 
 training_stage: "generator"
 
 train:
-  lr: 0.0005
-  batch_size: 12
-  loss_weights:
-    w_contact: 4.0
-    w_cse: 1.0
-    w_kl: 0.01
-    w_rec: 4.0
-    kl_anneal: true  # Enable KL weight annealing
-    kl_warmup_epochs: 5  # Linear warmup from 0 to w_kl over 5 epochs
-  vis_every_n_batches: 200
+  batch_size: 64
+  optimizer: "Adam"
+  lr: 1.0e-3
+  lr_gamma: 0.8
+  scheduler_step: 5
+  vis_every_n_batch: 500
 
 val:
-  batch_size: 20
-  vis_every_n_batches: 500
+  batch_size: 64
+  vis_every_n_batch: 200
 
 test:
   n_processes: 16
@@ -38,7 +32,7 @@ test:
   criteria: ${test.base_criteria}
 
 trainer: ## For instantiating pytorch-lightning Trainer
-  max_epochs: 20
+  max_epochs: 100
   check_val_every_n_epoch: 2
   log_every_n_steps: 50
   accelerator: gpu
@@ -47,7 +41,7 @@ trainer: ## For instantiating pytorch-lightning Trainer
   enable_progress_bar: true
   enable_model_summary: true
 
-run_phase: val
+run_phase: train
 
 debug: true
 

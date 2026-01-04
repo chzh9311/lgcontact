@@ -113,6 +113,8 @@ class ManoLayer(Module):
         parents = list(self.kintree_table[0].tolist())
         self.kintree_parents = parents
 
+        self.part_ids = torch.argmax(self.th_weights, dim=1)
+
     def forward(self,
                 th_pose_coeffs,
                 th_betas=torch.zeros(1),

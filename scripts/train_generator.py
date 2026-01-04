@@ -5,11 +5,12 @@ from lightning.pytorch.strategies import DDPStrategy
 import datetime
 from omegaconf import OmegaConf
 from common.dataset_utils.datamodules import HOIDatasetModule
-from common.model.mlctrainer import MLCTrainer, DummyModel
+# from common.model.mlctrainer import MLCTrainer
+from common.model.vae.dummy import DummyModel
 import importlib
 
 OmegaConf.register_new_resolver("add", lambda x, y: x + y, replace=True)
-@hydra.main(config_path="../config", config_name="mlcontact_gen")
+@hydra.main(config_path="../config", config_name="singlecontact_gen")
 def main(cfg):
     print("Configuration:")
     print(OmegaConf.to_yaml(cfg))
@@ -26,9 +27,9 @@ def main(cfg):
         logger = TensorBoardLogger(save_dir='logs/tb_logs')
     else:
         import wandb
-        logger = WandbLogger(name=cfg.generator.model_name + '-' + cfg.ae.name+'-'+ cfg.run_phase + '-' + t.strftime('%Y%m%d-%H%M%S'),
-                                    project='LG3DContact',
-                                    log_model=True, save_dir='logs/wandb_logs')
+        logger = WandbLogger(name=cfg.generator.model_name + '-' + cfg.run_phase + '-' + t.strftime('%Y%m%d-%H%M%S'),
+                             project='LG3DContact',
+                             log_model=True, save_dir='logs/wandb_logs')
 
     # Only disable inference_mode for testing (needed for pose optimization gradients)
     inference_mode = False if cfg.run_phase == 'test' else True
@@ -43,18 +44,25 @@ def main(cfg):
 
     data_module = HOIDatasetModule(cfg)
 
+    if cfg.generator.model_name == 'grid_vae':
+        from common.model.mlctrainer import MLCTrainer
+        trainer_module = MLCTrainer
+    elif cfg.generator.model_name == 'cat_vae':
+        from common.model.sctrainer import SCTrainer
+        trainer_module = SCTrainer
+
     # Start training
     if cfg.run_phase == 'train':
-        pl_model = MLCTrainer(model, cfg)
+        pl_model = trainer_module(model, cfg)
         trainer.fit(pl_model, datamodule=data_module)
     elif cfg.run_phase == 'val':
-        pl_model = MLCTrainer(model, cfg)
+        pl_model = trainer_module(model, cfg)
         trainer.validate(pl_model, datamodule=data_module)
     elif cfg.generator.model_type == 'gt' and cfg.run_phase == 'test':
-        pl_model = MLCTrainer(model, cfg)
+        pl_model = trainer_module(model, cfg)
         trainer.test(pl_model, datamodule=data_module)
     else:
-        pl_model = MLCTrainer.load_from_checkpoint(cfg.ckpt_path, model=model, cfg=cfg)
+        pl_model = trainer_module.load_from_checkpoint(cfg.ckpt_path, model=model, cfg=cfg)
         trainer.test(pl_model, datamodule=data_module)
 
 

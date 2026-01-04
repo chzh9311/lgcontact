@@ -122,18 +122,30 @@ class HOIDatasetModule(LightningDataModule):
         obj_info = self.dataset_class.load_mesh_info(self.data_dir)
         for k, v in obj_info.items():
             mesh = trimesh.Trimesh(v['verts'], v['faces'], process=False)
-            msdf_path = osp.join(self.preprocessed_dir, self.cfg.dataset_name,
-                                 f'msdf_{self.cfg.msdf.num_grids}_{self.cfg.msdf.kernel_size}_{int(self.cfg.msdf.scale*1000):02d}mm',
-                                 f'{k}.npz')
-            if not osp.exists(osp.dirname(msdf_path)):
-                os.makedirs(osp.dirname(msdf_path))
-            if not osp.exists(msdf_path):
-                print(f'Preprocessing M-SDF for {k}...')
-                ## M-SDF: K^3 + 3
-                msdf = mesh2msdf(mesh, n_samples=self.cfg.msdf.num_grids, kernel_size=self.cfg.msdf.kernel_size, scale=self.cfg.msdf.scale)
-                                 
-                np.savez_compressed(msdf_path, msdf=msdf)
-                print('result saved to ', msdf_path)
+            if 'msdf' in self.cfg:
+                msdf_path = osp.join(self.preprocessed_dir, self.cfg.dataset_name,
+                                    f'msdf_{self.cfg.msdf.num_grids}_{self.cfg.msdf.kernel_size}_{int(self.cfg.msdf.scale*1000):02d}mm',
+                                    f'{k}.npz')
+                if not osp.exists(osp.dirname(msdf_path)):
+                    os.makedirs(osp.dirname(msdf_path))
+                if not osp.exists(msdf_path):
+                    print(f'Preprocessing M-SDF for {k}...')
+                    ## M-SDF: K^3 + 3
+                    msdf = mesh2msdf(mesh, n_samples=self.cfg.msdf.num_grids, kernel_size=self.cfg.msdf.kernel_size, scale=self.cfg.msdf.scale)
+                                    
+                    np.savez_compressed(msdf_path, msdf=msdf)
+                    print('result saved to ', msdf_path)
+                
+            sample_path = osp.join(self.preprocessed_dir, self.cfg.dataset_name,
+                                f'obj_samples_{self.cfg.n_obj_samples}', f'{k}.npz')
+            if not osp.exists(osp.dirname(sample_path)):
+                os.makedirs(osp.dirname(sample_path))
+            if not osp.exists(sample_path):
+                print(f'Preprocessing object surface samples for {k}...')
+                sample_pts, fid = mesh.sample(self.cfg.n_obj_samples, return_index=True)
+                sample_normals = mesh.face_normals[fid]
+                np.savez_compressed(sample_path, samples=sample_pts, sample_normals=sample_normals)
+                print('result saved to ', sample_path)
     
         # Simplified object meshes
         # simp_obj_mesh_path = osp.join('data', 'preprocessed', 'simplified_obj_mesh.pkl')

@@ -5,7 +5,7 @@ from .pointnet_module import PointNet2cls, LatentEncoder, PointNet2seg, Pointnet
 # from ..gridae.decoder import GridDecoder3D
 from ..gridae.gridae import GRIDAE
 
-class POINT_VAE(nn.Module):
+class GRID_VAE(nn.Module):
     """
     MSDF-based 3D contact VQVAE of all local patches
     The input contact representation is expected to be kernel_size^3 x (1 + 16); 1 refers to contact likelihood, 16 refers to Hand CSE.
@@ -17,7 +17,7 @@ class POINT_VAE(nn.Module):
     We can try add this as part of the input to the encoder & decoder.
     """
     def __init__(self, cfg):
-        super(POINT_VAE, self).__init__()
+        super(GRID_VAE, self).__init__()
         # encode image into continuous latent space
         # self.obj_encoder = Encoder(obj_in_dim, h_dims, obj_n_res_layers, obj_res_h_dim, condition=False)
         self.grid_ae = GRIDAE(cfg=cfg.ae, obj_1d_feat=True)

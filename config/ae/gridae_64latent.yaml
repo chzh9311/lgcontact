@@ -11,6 +11,7 @@ res_h_dim: 64
 n_res_layers: 3
 out_dim: ${add:1,${data.hand_cse_dim}}
 obj_in_dim: 1
+pretrained_weight: logs/wandb_logs/LG3DContact/GRIDAE-64v1/checkpoints/last.ckpt
 
 msdf:
   num_grids: ${msdf.num_grids}

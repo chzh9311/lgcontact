@@ -10,10 +10,12 @@ from matplotlib import pyplot as plt
 
 from common.manopth.manopth.manolayer import ManoLayer
 from common.utils.vis import o3dmesh_from_trimesh, o3d_arrow, geom_to_img, extract_masked_mesh_components
+from common.utils.misc import linear_normalize
 from common.utils.geometry import (
         flip_x_axis,
         transform_mesh,
-        sdf_to_contact
+        sdf_to_contact,
+        calculate_contact_capsule
     )
 
 from common.msdf.utils.msdf import msdf2mlcontact
@@ -47,7 +49,9 @@ class HandObject:
         self.obj_rot = None
         self.obj_trans = None
         self.normalize = normalize
+        self.obj_com = None
         self.inv_obj_rot = cfg.dataset_name == 'grab'
+        self.contact_unit = cfg.contact_unit
 
     def __copy__(self):
         new_ho = HandObject(cfg=self.cfg, device=self.device, normalize=self.normalize)
@@ -56,20 +60,22 @@ class HandObject:
         new_ho.mano_layer = self.mano_layer
         new_ho.hand_part_ids = copy(self.hand_part_ids)
         new_ho.hand_sides = copy(self.hand_sides)
-        # new_ho.obj_verts = copy(self.obj_verts)
+        new_ho.obj_verts = copy(self.obj_verts)
         new_ho.hand_verts = copy(self.hand_verts)
         new_ho.hand_root_rot = copy(self.hand_root_rot)
         new_ho.hand_pose = copy(self.hand_pose)
         new_ho.hand_trans = copy(self.hand_trans)
         new_ho.contact_map = copy(self.contact_map)
         new_ho.part_map = copy(self.part_map)
-        # new_ho.obj_normals = copy(self.obj_normals)
+        new_ho.obj_normals = copy(self.obj_normals)
         new_ho.hand_joints = copy(self.hand_joints)
         new_ho.hand_models = deepcopy(self.hand_models)
         new_ho.obj_models = deepcopy(self.obj_models)
         new_ho.obj_hulls = deepcopy(self.obj_hulls)
         new_ho.obj_rot = copy(self.obj_rot)
         new_ho.obj_trans = copy(self.obj_trans)
+        new_ho.obj_com = copy(self.obj_com)
+        new_ho.batch_size = self.batch_size
         return new_ho
 
     def load_from_batch(self, batch, obj_templates=None, obj_hulls=None):
@@ -80,7 +86,6 @@ class HandObject:
         """
         # self.obj_verts = batch['objSamplePts'].clone()
         # self.obj_normals = batch['objSampleNormals'].clone()
-        self.obj_msdf = batch['objMsdf'].clone().to(self.device).float()
         self.obj_rot = batch['objRot'].clone().to(self.device).float()
         self.obj_trans = batch['objTrans'].clone().to(self.device).float()
         self.obj_names = batch['objName']
@@ -90,15 +95,30 @@ class HandObject:
         self.hand_verts = batch['handVerts'].clone().to(self.device).float()
         self.hand_normals = batch['handNormals'].clone().to(self.device).float()
         self.hand_joints = batch['handJoints'].clone().to(self.device).float()
+        self.obj_verts = batch['objSamplePts'].clone().to(self.device).float()
+        self.obj_normals = batch['objSampleNormals'].clone().to(self.device).float()
         self.batch_size = self.obj_rot.shape[0]
         # handV, handJ = batch['handVerts'].clone().cpu().numpy(), batch['handJoints'][:, :16].clone().cpu().numpy()
         # self.hand_models = [trimesh.Trimesh(handV[i], self.hand_faces.copy()) for i in range(handV.shape[0])]
 
+        ## Compute Local grid contact representation
+        if self.contact_unit == 'grid':
+            self.obj_msdf = batch['objMsdf'].clone().to(self.device).float()
+            ml_dist, ml_cse, mask, hand_vert_mask, normalized_coords = msdf2mlcontact(self.obj_msdf, self.hand_verts, self.hand_cse, self.cfg.msdf.kernel_size, self.cfg.msdf.scale)
+            ml_dist[mask] = sdf_to_contact(ml_dist[mask] / (self.cfg.msdf.scale / self.cfg.msdf.kernel_size), None, method=0)
+            # ml_contact[mask, :, :, :, 0] = sdf_to_contact(ml_contact[mask, :, :, :, 0] / (self.cfg.msdf.scale / self.cfg.msdf.num_grids), None, method=0)
+            self.ml_contact = torch.cat([ml_dist.unsqueeze(-1), ml_cse], dim=-1)
+            self.normalized_coords = normalized_coords
+            self.obj_pt_mask = mask
+            self.hand_vert_mask = hand_vert_mask
+
+        elif self.contact_unit == 'point':
         ## Calculate contacts
-        # obj_cmap, _, nn_idx = calculate_contact_capsule(self.hand_verts, self.hand_normals,
-        #                                                   self.obj_verts, self.obj_normals)
-        # self.pmap = torch.as_tensor(self.hand_part_ids).to(self.device)[nn_idx].squeeze(-1)
-        # self.part_map = F.one_hot(self.pmap, 16).float()
+            obj_cmap, _, nn_idx = calculate_contact_capsule(self.hand_verts, self.hand_normals,
+                                                            self.obj_verts, self.obj_normals)
+            self.contact_map = obj_cmap.to(self.device).squeeze(-1)
+            self.pmap = torch.as_tensor(self.hand_part_ids).to(self.device)[nn_idx].squeeze(-1)
+            self.part_map = F.one_hot(self.pmap, 16).float()
 
         # hand_frames = batch['handPartT'].clone()
 
@@ -167,7 +187,6 @@ class HandObject:
             # Transform object normals with inverse transformation
             # self.obj_normals = (objT_inv[:, :3, :3].unsqueeze(1) @ self.obj_normals.unsqueeze(-1)).squeeze(-1)
         else:
-            raise NotImplementedError
             # When normalize=False, object vertices and normals are already transformed
             # Only transform object models and hulls which are loaded from canonical space
 
@@ -183,16 +202,11 @@ class HandObject:
                     objT_np = objT[i].detach().cpu().numpy()
                     for j in range(len(self.obj_hulls[i])):
                         self.obj_hulls[i][j] = transform_mesh(self.obj_hulls[i][j], objT_np)
+            self.obj_com = self.obj_verts.mean(dim=1, keepdim=True)
+            self.obj_verts = self.obj_verts - self.obj_com
+            self.hand_verts = self.hand_verts - self.obj_com
+            self.hand_joints = self.hand_joints - self.obj_com
 
-        ## Compute Local grid contact representation
-        ml_dist, ml_cse, mask, hand_vert_mask, normalized_coords = msdf2mlcontact(self.obj_msdf, self.hand_verts, self.hand_cse, self.cfg.msdf.kernel_size, self.cfg.msdf.scale)
-        ml_dist[mask] = sdf_to_contact(ml_dist[mask] / (self.cfg.msdf.scale / self.cfg.msdf.kernel_size), None, method=0)
-        # ml_contact[mask, :, :, :, 0] = sdf_to_contact(ml_contact[mask, :, :, :, 0] / (self.cfg.msdf.scale / self.cfg.msdf.num_grids), None, method=0)
-        # self.contact_map = obj_cmap.to(self.device).squeeze(-1)
-        self.ml_contact = torch.cat([ml_dist.unsqueeze(-1), ml_cse], dim=-1)
-        self.normalized_coords = normalized_coords
-        self.obj_pt_mask = mask
-        self.hand_vert_mask = hand_vert_mask
 
     def _load_templates(self, idx, obj_templates, obj_hull=None):
         if self.hand_verts is not None:
@@ -200,15 +214,27 @@ class HandObject:
         else:
             hand_mesh = None
 
-        # objR = axis_angle_to_matrix(self.obj_rot[idx]).detach().cpu().numpy()
-        # objt = self.obj_trans[idx].detach().cpu().numpy()
-        # T = np.eye(4)
-        # T[:3, :3] = objR.T if self.inv_obj_rot else objR
-        # T[:3, 3] = objt
-        obj_mesh = copy(obj_templates[idx])
-        # if self.hand_sides[idx] == 'left':
-        #     flip_x_axis(obj_mesh)
-        # obj_mesh.apply_transform(T)
+        self.hand_models = []
+        self.obj_models = []
+        for i in range(self.batch_size):
+            objR = axis_angle_to_matrix(self.obj_rot[i]).detach().cpu().numpy()
+            objt = self.obj_trans[i].detach().cpu().numpy()
+            if not self.normalize:
+                T = np.eye(4)
+                T[:3, :3] = objR.T if self.inv_obj_rot else objR
+                T[:3, 3] = objt
+                obj_mesh = copy(obj_templates[i])
+                # if self.hand_sides[idx] == 'left':
+                #     flip_x_axis(obj_mesh)
+                obj_mesh.apply_transform(T)
+                obj_mesh.apply_translation(-self.obj_com[i, 0].detach().cpu().numpy())  # Move to zero-centered
+                self.obj_models.append(obj_mesh)
+            else:
+                obj_mesh = copy(obj_templates[i])
+                self.obj_models.append(obj_mesh)
+                
+        obj_mesh = self.obj_models[idx]
+
         if obj_hull is not None:
             ohs = []
             for h in obj_hull:
@@ -253,10 +279,10 @@ class HandObject:
             vis_geoms.append({'name': 'hand', 'geometry': hand, 'material': hand_mat})
 
         if draw_obj:
-            vis_geoms.append({'name': 'object_before', 'geometry': obj0, 'material': obj_mat})
+            vis_geoms.append({'name': 'object', 'geometry': obj0, 'material': obj_mat})
 
         if draw_maps:
-            offset = np.array([0.40, 0, 0])
+            offset = np.array([0.0, 0, 0])
             comesh = copy(obj_mesh)
             comesh.apply_translation(offset)
             ## contact upscale
@@ -271,7 +297,7 @@ class HandObject:
             comesh.vertex_colors = o3d.utility.Vector3dVector(vertex_colors)
 
             pomesh = copy(obj_mesh)
-            pomesh.apply_translation(offset*2)
+            pomesh.apply_translation(-offset)
             pomesh = o3dmesh_from_trimesh(pomesh)
             part_confs, part_ids = torch.max(self.part_map, dim=-1)
             up_part_ids = part_ids[idx, nn_idx].detach().cpu().numpy() / 16
@@ -344,7 +370,20 @@ class HandObject:
         returns an image array of h x w x 3
         """
         vis_geoms = self.get_vis_geoms(idx, **kwargs)
-        ret_img = geom_to_img(vis_geoms, w, h)
+
+        # Separate geometries into three groups
+        hand_obj_geoms = [g for g in vis_geoms if g['name'] in ['hand', 'object']]
+        contact_geoms = [g for g in vis_geoms if g['name'] == 'obj_contacts']
+        part_geoms = [g for g in vis_geoms if g['name'] == 'obj_parts']
+
+        # Render each group separately
+        scale = 0.6
+        img_hand_obj = geom_to_img(hand_obj_geoms, w, h, scale=scale)
+        img_contacts = geom_to_img(contact_geoms, w, h, scale=scale)
+        img_parts = geom_to_img(part_geoms, w, h, scale=scale)
+
+        # Concatenate vertically (along y axis)
+        ret_img = np.concatenate([img_hand_obj, img_contacts, img_parts], axis=0)
         return ret_img
 
 

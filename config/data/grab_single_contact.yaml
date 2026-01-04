@@ -1,0 +1,16 @@
+dataset_name: grab
+mano_root: /home/zxc417/data/mano_v1_2/models
+dataset_path: data/grab
+hand_cse_dim: 4
+hand_cse_path: common/model/hand_cse/hand_cse_${data.hand_cse_dim}.ckpt
+preprocessed_dir: data/preprocessed
+MSDF_dir: data/preprocessed/grab_msdf
+n_obj_samples: 2048
+contact_unit: 'point'
+
+downsample_rate: 
+  train: 1
+  val: 5
+  test: 64
+
+num_workers: 16

@@ -6,7 +6,7 @@ from common.manopth.manopth.manolayer import ManoLayer
 from common.dataset_utils.grab_dataset import GRABDataset
 from common.dataset_utils.datamodules import HOIDatasetModule, LocalGridDataModule
 from common.utils.vis import visualize_local_grid, visualize_local_grid_with_hand
-from common.model.vae.point_vae import MLCVAE
+from common.model.vae.grid_vae import MLCVAE
 import numpy as np
 from omegaconf import OmegaConf
 

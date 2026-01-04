@@ -51,9 +51,9 @@ class PointNet2cls(nn.Module):
             self.normal_channel = False
         else:
             self.normal_channel = True
-        self.sa1 = PointNetSetAbstraction(npoint=int(in_point//2), radius=0.2, nsample=32, in_channel=in_channel,
+        self.sa1 = PointNetSetAbstraction(npoint=int(in_point//4), radius=0.2, nsample=32, in_channel=in_channel,
                                           mlp=[hidden_dim, hidden_dim, hidden_dim*2], group_all=False)
-        self.sa2 = PointNetSetAbstraction(npoint=int(in_point//4), radius=0.4, nsample=64, in_channel=hidden_dim*2 + 3,
+        self.sa2 = PointNetSetAbstraction(npoint=int(in_point//16), radius=0.4, nsample=64, in_channel=hidden_dim*2 + 3,
                                           mlp=[hidden_dim*2, hidden_dim*2, hidden_dim*4], group_all=False)
         self.sa3 = PointNetSetAbstraction(npoint=None, radius=None, nsample=None, in_channel=hidden_dim*4 + 3,
                                           mlp=[hidden_dim*4, hidden_dim*4, hidden_dim*8], group_all=True)

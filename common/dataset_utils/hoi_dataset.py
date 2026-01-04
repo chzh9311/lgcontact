@@ -29,12 +29,12 @@ class BaseHOIDataset(Dataset):
         # self.n_obj_samples = cfg.object_sample
         self.mano_root = cfg.mano_root
         self.test_gt = test_gt
-        self.msdf_scale = cfg.msdf.scale
         self.hand_sides = None
         self.lh_data = None
-        if load_msdf:
+        if load_msdf and 'msdf' in cfg:
             self.msdf_path = osp.join(self.preprocessed_dir, cfg.dataset_name,
                                     f'msdf_{cfg.msdf.num_grids}_{cfg.msdf.kernel_size}_{int(cfg.msdf.scale*1000):02d}mm')
+            self.msdf_scale = cfg.msdf.scale
         else:
             self.msdf_path = None
 
@@ -82,7 +82,7 @@ class BaseHOIDataset(Dataset):
             sbj_id = fname_path[2]
             obj_name = fname_path[3].split('_')[0]
             obj_sample_pts = self.obj_info[obj_name]['samples'] # n_sample x 3
-            # obj_sample_normals = self.obj_info[obj_name]['sample_normals'] # n_sample x 3
+            obj_sample_normals = self.obj_info[obj_name]['sample_normals'] # n_sample x 3
             obj_rot = self.object_data['global_orient'][idx]
             obj_trans = self.object_data['transl'][idx]
 
@@ -90,7 +90,7 @@ class BaseHOIDataset(Dataset):
             objR = axis_angle_to_matrix(obj_rot).detach().cpu().numpy()
             objt = obj_trans.detach().cpu().numpy()
             obj_sample_pts = obj_sample_pts @ objR + objt
-            # obj_sample_normals = obj_sample_normals @ objR
+            obj_sample_normals = obj_sample_normals @ objR
 
             samples = {}
             if self.hand_sides is not None:
@@ -112,7 +112,7 @@ class BaseHOIDataset(Dataset):
                 'objName': obj_name,
                 'sbjId': sbj_id,
                 'objSamplePts': obj_sample_pts,
-                # 'objSampleNormals': obj_sample_normals,
+                'objSampleNormals': obj_sample_normals,
                 'objTrans': obj_trans,
                 'objRot': obj_rot,
                 'handSide': hand_side,
@@ -148,15 +148,15 @@ class BaseHOIDataset(Dataset):
             })
         else:
             obj_name = self.test_objects[int(idx // self.num_samples)]
-            # obj_sample_pts = self.obj_info[obj_name]['samples'] # n_sample x 3
-            # obj_sample_normals = self.obj_info[obj_name]['sample_normals'] # n_sample x 3
+            obj_sample_pts = self.obj_info[obj_name]['samples'] # n_sample x 3
+            obj_sample_normals = self.obj_info[obj_name]['sample_normals'] # n_sample x 3
             ## For testing, return object with random rotations. The rng is set to make sure
             ## each idx generates fixed rotation.
             # obj_rot = R.identity()
             sample = {
                 'objName': obj_name,
-                # 'objSamplePts': obj_sample_pts,
-                # 'objSampleNormals': obj_sample_normals,
+                'objSamplePts': obj_sample_pts,
+                'objSampleNormals': obj_sample_normals,
                 # 'objRot': obj_rot.as_rotvec(),
             }
 

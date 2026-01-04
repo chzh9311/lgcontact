@@ -73,7 +73,7 @@ class MLCTrainer(L.LightningModule):
 
         obj_msdf_center = handobject.obj_msdf[:, :, self.msdf_k**3:] # B x 3
         recon_lg_contact, mu, logvar = self.model(
-            lg_contact.permute(0, 1, 5, 2, 3, 4), obj_msdf, obj_msdf_center)
+            lg_contact.permute(0, 1, 5, 2, 3, 4), obj_msdf=obj_msdf, msdf_center=obj_msdf_center)
         recon_lg_contact = recon_lg_contact.permute(0, 1, 3, 4, 5, 2)  # B x N x K x K x K x (1 + cse_dim)
 
         batch_size = handobject.batch_size
@@ -372,8 +372,8 @@ class MLCTrainer(L.LightningModule):
         if not self.kl_anneal_enabled or self.kl_warmup_epochs == 0:
             return self.loss_weights.w_kl
 
-        # Linear warmup: 0 -> w_kl over kl_warmup_epochs
-        warmup_progress = min(1.0, self.current_epoch / self.kl_warmup_epochs)
+        # Linear warmup: w_kl/n -> w_kl over kl_warmup_epochs
+        warmup_progress = min(1.0, (self.current_epoch + 1) / self.kl_warmup_epochs)
         return warmup_progress * self.loss_weights.w_kl
 
     def loss_net(self, pred_lgc, gt_lgc, mu, logvar, pred_hand_verts, gt_hand_verts, contact_verts_mask):
@@ -477,18 +477,3 @@ class MLCTrainer(L.LightningModule):
 
         # Visualize
         o3d.visualization.draw_geometries([hand_mesh, obj_mesh, pcd])
-
-
-class DummyModel(nn.Module):
-    def __init__(self):
-        super(DummyModel, self).__init__()
-        # Add a dummy parameter to satisfy optimizer requirements
-        self.dummy_param = nn.Parameter(torch.zeros(1))
-
-    def forward(self, x, msdf, msdf_center):
-        batch_size = x.shape[0]
-        recon_x = x.clone()
-        mean = torch.randn(batch_size, 16) * 0.1
-        logvar = torch.randn(batch_size, 16) * 0.1
-
-        return recon_x, mean, logvar
