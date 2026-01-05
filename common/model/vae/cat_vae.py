@@ -17,6 +17,7 @@ class CAT_VAE(nn.Module):
         super(CAT_VAE, self).__init__()
         self.hc = cfg.generator.pointnet_hc
         self.corr_embedding_type = cfg.generator.embedding_type
+        self.latentD = cfg.generator.latentD
         if self.corr_embedding_type == 'part':
             self.embed_class = nn.Embedding(cfg.generator.part_dim, self.hc)
         elif self.corr_embedding_type == 'cse':
@@ -62,7 +63,7 @@ class CAT_VAE(nn.Module):
             z_gen_contact = torch.tensor(z_gen_contact, dtype=dtype).to(device)
             z_gen_part = np.random.normal(0., 1., size=(bs, self.latentD))
             z_gen_part = torch.tensor(z_gen_part, dtype=dtype).to(device)
-            return self.decoder(self.embed_class, z_gen_contact, z_gen_part, obj_cond)
+            return self.decoder(z_gen_contact, z_gen_part, obj_cond)
 
 class CatEncoder(nn.Module):
     def __init__(self, cfg):

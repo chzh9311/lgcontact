@@ -14,3 +14,4 @@ downsample_rate:
   test: 200
 
 num_workers: 16
+test_samples: ${test.n_samples}

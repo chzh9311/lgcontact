@@ -20,3 +20,4 @@ msdf:
 object_sample: 1024
 
 num_workers: 16
+test_samples: ${test.n_samples}

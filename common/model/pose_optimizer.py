@@ -17,7 +17,7 @@ from common.utils.geometry import (
 
 def optimize_pose_contactopt(mano_layer, obj_verts, obj_normals, obj_contact_target, obj_partition, n_iter=1200, lr=0.002, w_cont_obj=1,
                   save_history=False, w_cont_asym=2, caps_top=0.0005, caps_bot=-0.001, caps_rad=0.001, caps_on_hand=False,
-                  contact_norm_method=0, w_pen_cost=600, pen_it=0, hand_cse=None, partition_type='part'):
+                  contact_norm_method=0, w_pen_cost=600, pen_it=0, hand_cse=None, partition_type='part', is_thin=None):
     """Runs differentiable optimization to align the hand with the target contact map.
     Minimizes the loss between ground truth contact and contact calculated with DiffContact"""
     batch_size = obj_contact_target.shape[0]
@@ -122,7 +122,8 @@ def optimize_pose_contactopt(mano_layer, obj_verts, obj_normals, obj_contact_tar
 
         loss = loss_contact_obj * w_cont_obj
 
-        is_thin = torch.zeros(batch_size, device=device)  # For hands, we never use thin mode
+        if is_thin is None:
+            is_thin = torch.zeros(batch_size, device=device)  # For hands, we never use thin mode
         if w_pen_cost > 0 and it >= pen_it:
             pen_cost = calculate_penetration_cost(hand_verts, hand_normals, obj_verts, obj_normals, is_thin, contact_norm_method)
             loss += pen_cost.mean(dim=1) * w_pen_cost

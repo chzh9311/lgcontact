@@ -1,4 +1,33 @@
+import random
+import numpy as np
 import torch
+import lightning as L
+
+
+def set_seed(seed=42):
+    """Set seeds for maximum reproducibility across all random number generators.
+
+    Args:
+        seed: Integer seed value for reproducibility
+    """
+    # Python's built-in random
+    random.seed(seed)
+
+    # NumPy
+    np.random.seed(seed)
+
+    # PyTorch
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # for multi-GPU
+
+    # PyTorch backend settings for deterministic behavior
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    # Lightning's seed setting (includes worker seeds)
+    L.seed_everything(seed, workers=True)
+
 
 def linear_normalize(x: torch.Tensor, lower_bound: float, upper_bound:float, lower_th:float|None=None, upper_th:float|None=None) -> torch.Tensor:
     """

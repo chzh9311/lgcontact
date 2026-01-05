@@ -24,6 +24,7 @@ from common.model.hand_cse.hand_cse import HandCSE
 from common.model.pose_optimizer import optimize_pose_contactopt
 from common.evaluation.eval_fns import calculate_metrics, calc_diversity, value_metrics
 
+thin_objects = ['wineglass', 'mug', 'fryingpan']
 
 class SCTrainer(L.LightningModule):
     def __init__(self, model, cfg):
@@ -37,7 +38,6 @@ class SCTrainer(L.LightningModule):
         # self.hc = cfg.generator.pointnet_hc
         # self.object_feature = cfg.generator.obj_feature
         self.model = model
-        self.embed_class = nn.Embedding(16, 64)
 
         ## Other utils
         self.closed_mano_faces = np.load(os.path.join('data', 'misc', 'closed_mano_r_faces.npy'))
@@ -67,6 +67,8 @@ class SCTrainer(L.LightningModule):
                 self.handcse = HandCSE(n_verts=778, emb_dim=cfg.data.hand_cse_dim, cano_faces=handF.cpu().numpy())
                 self.handcse.load_state_dict(cse_ckpt['state_dict'])
                 self.handcse.eval()
+        else:
+            self.embed_class = nn.Embedding(cfg.generator.part_dim, cfg.generator.pointnet_hc)
 
         self.debug = cfg.debug
         ## For simulation
@@ -179,8 +181,8 @@ class SCTrainer(L.LightningModule):
             handobject.load_from_batch(batch, obj_templates=obj_templates)
             verts_obj, obj_normals, contacts, parts, nn_idx = handobject.obj_verts, handobject.obj_normals, handobject.contact_map, handobject.part_map, handobject.obj2hand_nn_idx
             contacts_object = contacts
+            pred_parts = parts
             if self.corr_embedding_type == 'part':
-                pred_parts = parts
                 partition_object = pred_parts.argmax(dim=-1)
             elif self.corr_embedding_type == 'cse':
                 cse = self.handcse.vert2emb(nn_idx.flatten()).reshape(nn_idx.shape[0], -1, self.cse_dim)
@@ -190,9 +192,18 @@ class SCTrainer(L.LightningModule):
             # use_obj_normals = torch.cat([obj_normals[k] for k in self.model_cfg.obj_feature_keys], dim=-1)
             verts_obj, obj_normals = handobject.obj_verts, handobject.obj_normals
             batch_start = time.time()
-            sample_result = self.sample(verts_obj, obj_normals)
-            pred_contacts, pred_parts = sample_result
-            contacts_object = pred_contacts.squeeze(-1)
+            sample_result = self.model.sample(verts_obj, obj_normals)
+            pred_contacts, pred_emb = sample_result
+            contacts_object = pred_contacts.squeeze(1)
+            if self.corr_embedding_type == 'part':
+                pred_parts = pred_emb
+                pred_parts = pred_parts.permute(0, 2, 1)
+                partition_object = pred_parts.argmax(dim=-1)
+            elif self.corr_embedding_type == 'cse':
+                Wverts = self.handcse.emb2Wvert(pred_emb.permute(0, 2, 1)) # (B, N, 778)
+                vertex_idx = torch.argmax(Wverts, dim=-1)  # (B, N)
+                partition_object = self.mano_layer.part_ids[vertex_idx.cpu().numpy()]
+                pred_parts = F.one_hot(torch.tensor(partition_object), num_classes=16).to(self.device).float()
 
         ## Ablation: avg predictor
 
@@ -201,7 +212,8 @@ class SCTrainer(L.LightningModule):
                                 self.mano_layer, verts_obj, obj_normals,
                                 contacts_object, partition_object, n_iter=1000, save_history=False,
                                 partition_type=self.corr_embedding_type, w_pen_cost=self.w_pene,
-                                hand_cse=self.handcse if self.corr_embedding_type=='cse' else None)
+                                hand_cse=self.handcse if self.corr_embedding_type=='cse' else None,
+                                is_thin=torch.LongTensor([obj_name in thin_objects for obj_name in obj_names]).to(self.device))
 
             self.runtime += time.time() - batch_start
             print(self.runtime / (batch_idx + 1))
@@ -236,11 +248,11 @@ class SCTrainer(L.LightningModule):
 
             vis_idx = 0
             pred_ho = copy(handobject)
-            pred_ho.contact_map = contacts_object
-            pred_ho.part_map = pred_parts
             pred_ho.hand_verts = torch.tensor(handV, dtype=torch.float32)
             pred_ho.hand_joints = torch.tensor(handJ, dtype=torch.float32)
-            img = handobject.vis_img(vis_idx, 250, 250, obj_templates=obj_templates, draw_maps=True)
+            pred_ho.contact_map = contacts_object
+            pred_ho.part_map = pred_parts
+            img = pred_ho.vis_img(vis_idx, 250, 250, obj_templates=obj_templates, draw_maps=True)
             if self.cfg.generator.model_type == 'gt':
                 gt_img = handobject.vis_img(vis_idx, 250, 250, obj_templates=obj_templates, draw_maps=False)
                 img = np.concatenate((gt_img, img), axis=0)
@@ -252,17 +264,23 @@ class SCTrainer(L.LightningModule):
             for vis_idx in range(batch_size):
                 # gt_geoms = handobject.get_vis_geoms(idx=vis_idx, obj_templates=obj_templates)
                 handV0, handJ0, _ = self.mano_layer(torch.cat([init_pose[0], torch.zeros_like(mano_pose)], dim=1), th_trans=init_pose[1])
-                gt_img = handobject.vis_img(vis_idx, 250, 250, obj_templates=obj_templates, draw_maps=True)
                 pred_ho = copy(handobject)
                 pred_ho.hand_verts = handV0
                 pred_ho.hand_joints = handJ0
+                pred_ho.contact_map = contacts_object
+                pred_ho.part_map = pred_parts
                 init_img = pred_ho.vis_img(vis_idx, 250, 250, obj_templates=obj_templates)
 
                 pred_ho.hand_verts = torch.tensor(handV, dtype=torch.float32)
                 pred_ho.hand_joints = torch.tensor(handJ, dtype=torch.float32)
-                pred_img = pred_ho.vis_img(vis_idx, 250, 250, obj_templates=obj_templates)
-                vis_img = np.concatenate((gt_img, init_img, pred_img), axis=0)
+                pred_img = pred_ho.vis_img(vis_idx, 250, 250, obj_templates=obj_templates, draw_maps=True)
+                if self.cfg.generator.model_type == 'gt':
+                    gt_img = handobject.vis_img(vis_idx, 250, 250, obj_templates=obj_templates)
+                    vis_img = np.concatenate((gt_img, init_img, pred_img), axis=0)
+                else:
+                    vis_img = np.concatenate((init_img, pred_img), axis=0)
                 plt.imsave(f'logs/tb_logs/debug_samples/test_sample_{batch_idx*batch_size+vis_idx}.png', vis_img)
+                print(f"Saved debug image for sample {batch_idx*batch_size+vis_idx}")
 
             # o3d.visualization.draw(gt_img + [g['geometry'].translate((0, 0.25, 0)) if 'geometry' in g else g for g in pred_img])
 

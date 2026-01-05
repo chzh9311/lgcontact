@@ -208,6 +208,37 @@ class HandObject:
             self.hand_verts = self.hand_verts - self.obj_com
             self.hand_joints = self.hand_joints - self.obj_com
 
+    def load_from_batch_obj_only(self, batch, obj_templates=None, obj_hulls=None):
+        """
+        Load only object-related data from batched data. Used for testing.
+        No hand-related variables are loaded - those will be generated later.
+        """
+        self.obj_names = batch['objName']
+        self.obj_verts = batch['objSamplePts'].clone().to(self.device).float()
+        self.obj_normals = batch['objSampleNormals'].clone().to(self.device).float()
+        self.batch_size = self.obj_verts.shape[0]
+
+        # Load object templates
+        if obj_templates is not None:
+            self.obj_models = []
+            for b in range(self.batch_size):
+                obj_mesh = copy(obj_templates[b])
+                self.obj_models.append(obj_mesh)
+
+        # Load object hulls
+        if obj_hulls is not None:
+            self.obj_hulls = []
+            for b in range(self.batch_size):
+                ohs = []
+                for h in obj_hulls[b]:
+                    h0 = copy(h)
+                    ohs.append(h0)
+                self.obj_hulls.append(ohs)
+
+        # Center object at origin
+        # self.obj_com = self.obj_verts.mean(dim=1, keepdim=True)
+        # self.obj_verts = self.obj_verts - self.obj_com
+
 
     def _load_templates(self, idx, obj_templates, obj_hull=None):
         if self.hand_verts is not None:
@@ -218,9 +249,9 @@ class HandObject:
         self.hand_models = []
         self.obj_models = []
         for i in range(self.batch_size):
-            objR = axis_angle_to_matrix(self.obj_rot[i]).detach().cpu().numpy()
-            objt = self.obj_trans[i].detach().cpu().numpy()
             if not self.normalize:
+                objR = axis_angle_to_matrix(self.obj_rot[i]).detach().cpu().numpy()
+                objt = self.obj_trans[i].detach().cpu().numpy()
                 T = np.eye(4)
                 T[:3, :3] = objR.T if self.inv_obj_rot else objR
                 T[:3, 3] = objt
@@ -256,6 +287,10 @@ class HandObject:
             hand_mesh = self.hand_models[idx]
             obj_mesh = self.obj_models[idx]
 
+        # Downsample object mesh for visualization if it has too many faces
+        if obj_mesh is not None and len(obj_mesh.faces) > 6000:
+            obj_mesh = obj_mesh.simplify_quadric_decimation(face_count=6000)
+
         default_mat = vis.rendering.MaterialRecord()
         default_mat.shader = 'defaultLit'
         hand_mat = vis.rendering.MaterialRecord()
@@ -288,7 +323,7 @@ class HandObject:
             comesh.apply_translation(offset)
             ## contact upscale
             dists = np.linalg.norm(self.obj_verts[idx].view(1, -1, 3).detach().cpu().numpy()
-                                   - self.obj_models[idx].vertices.reshape(-1, 1, 3), axis=-1)
+                                   - obj_mesh.vertices.reshape(-1, 1, 3), axis=-1)
             nn_idx = np.argmin(dists, axis=1)
             up_contact = self.contact_map[idx, nn_idx]
             up_contact = linear_normalize(up_contact, 0, 1).detach().cpu().numpy()

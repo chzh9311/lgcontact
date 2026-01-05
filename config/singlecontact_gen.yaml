@@ -6,6 +6,7 @@ defaults:
 
 training_stage: "generator"
 contact_unit: "point"
+seed: 42  # Global seed for reproducibility
 
 train:
   batch_size: 64

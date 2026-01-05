@@ -7,11 +7,18 @@ from omegaconf import OmegaConf
 from common.dataset_utils.datamodules import HOIDatasetModule
 # from common.model.mlctrainer import MLCTrainer
 from common.model.vae.dummy import DummyModel
+from common.utils.misc import set_seed
 import importlib
 
 OmegaConf.register_new_resolver("add", lambda x, y: x + y, replace=True)
 @hydra.main(config_path="../config", config_name="singlecontact_gen")
 def main(cfg):
+    # Set seed for reproducibility FIRST
+    if hasattr(cfg, 'seed'):
+        set_seed(cfg.seed)
+    else:
+        set_seed(42)  # default seed
+
     print("Configuration:")
     print(OmegaConf.to_yaml(cfg))
     
