@@ -119,6 +119,7 @@ class HandObject:
             self.contact_map = obj_cmap.to(self.device).squeeze(-1)
             self.pmap = torch.as_tensor(self.hand_part_ids).to(self.device)[nn_idx].squeeze(-1)
             self.part_map = F.one_hot(self.pmap, 16).float()
+            self.obj2hand_nn_idx = nn_idx.to(self.device)
 
         # hand_frames = batch['handPartT'].clone()
 
@@ -169,7 +170,7 @@ class HandObject:
             #     torch.as_tensor(self.hand_models[i].vertex_normals, dtype=torch.float32, device=self.device)
             #     for i in range(len(self.hand_models))
             # ], dim=0)
-            # self.hand_normals = (objT_inv[:, :3, :3].unsqueeze(1) @ self.hand_normals.unsqueeze(-1)).squeeze(-1)
+            self.hand_normals = (objT_inv[:, :3, :3].unsqueeze(1) @ self.hand_normals.unsqueeze(-1)).squeeze(-1)
 
             # Transform hand models
             # for i in range(len(self.hand_models)):
@@ -181,11 +182,11 @@ class HandObject:
 
             # Apply inverse transformation objT^-1 to object vertices and normals
             # (they are already transformed when loaded from batch)
-            # homo_obj_verts = F.pad(self.obj_verts, (0, 1), 'constant', 1)
-            # self.obj_verts = (objT_inv.unsqueeze(1) @ homo_obj_verts.unsqueeze(-1))[:, :, :3, 0]
+            homo_obj_verts = F.pad(self.obj_verts, (0, 1), 'constant', 1)
+            self.obj_verts = (objT_inv.unsqueeze(1) @ homo_obj_verts.unsqueeze(-1))[:, :, :3, 0]
 
             # Transform object normals with inverse transformation
-            # self.obj_normals = (objT_inv[:, :3, :3].unsqueeze(1) @ self.obj_normals.unsqueeze(-1)).squeeze(-1)
+            self.obj_normals = (objT_inv[:, :3, :3].unsqueeze(1) @ self.obj_normals.unsqueeze(-1)).squeeze(-1)
         else:
             # When normalize=False, object vertices and normals are already transformed
             # Only transform object models and hulls which are loaded from canonical space
@@ -363,27 +364,31 @@ class HandObject:
 
         return self.obj_verts, self.obj_normals, hand_params
 
-    def vis_img(self, idx:int, h:int=600, w:int=800, **kwargs) -> np.ndarray:
+    def vis_img(self, idx:int, h:int=600, w:int=800, draw_maps=False, **kwargs) -> np.ndarray:
         """
         Visualize the hand-object as an image.
         pts: N x 3
         returns an image array of h x w x 3
         """
-        vis_geoms = self.get_vis_geoms(idx, **kwargs)
+        vis_geoms = self.get_vis_geoms(idx, draw_maps=draw_maps, **kwargs)
 
+        scale = 0.5
         # Separate geometries into three groups
         hand_obj_geoms = [g for g in vis_geoms if g['name'] in ['hand', 'object']]
-        contact_geoms = [g for g in vis_geoms if g['name'] == 'obj_contacts']
-        part_geoms = [g for g in vis_geoms if g['name'] == 'obj_parts']
-
-        # Render each group separately
-        scale = 0.6
         img_hand_obj = geom_to_img(hand_obj_geoms, w, h, scale=scale)
-        img_contacts = geom_to_img(contact_geoms, w, h, scale=scale)
-        img_parts = geom_to_img(part_geoms, w, h, scale=scale)
+
+        if draw_maps:
+            contact_geoms = [g for g in vis_geoms if g['name'] == 'obj_contacts']
+            part_geoms = [g for g in vis_geoms if g['name'] == 'obj_parts']
+
+            # Render each group separately
+            img_contacts = geom_to_img(contact_geoms, w, h, scale=scale)
+            img_parts = geom_to_img(part_geoms, w, h, scale=scale)
+            ret_img = np.concatenate([img_hand_obj, img_contacts, img_parts], axis=0)
+        else:
+            ret_img = img_hand_obj
 
         # Concatenate vertically (along y axis)
-        ret_img = np.concatenate([img_hand_obj, img_contacts, img_parts], axis=0)
         return ret_img
 
 

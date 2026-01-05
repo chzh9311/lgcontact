@@ -247,7 +247,7 @@ def geom_to_img(vis_geoms, w, h, scale=0.07):
 
         # Set camera position for each view
         angle = np.pi * i / 2 + np.pi / 6  # 30-degree offset for better view
-        elev = 0  # Slight elevation for better 3D view
+        elev = 30  # Slight elevation for better 3D view
         azim = np.degrees(angle)
         ax.view_init(elev=elev, azim=azim)
 

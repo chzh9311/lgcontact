@@ -20,7 +20,6 @@ from common.model.losses import masked_rec_loss, kl_div_normal_muvar
 from common.msdf.utils.msdf import get_grid
 from common.evaluation.eval_fns import calculate_metrics, calc_diversity
 
-value_metrics = ["Contact Ratio", "Success Rate", "Pierce-Free Rate", "Cluster Size", "Entropy", "Canonical Entropy", "Canonical Cluster Size"]
 
 class MLCTrainer(L.LightningModule):
     """

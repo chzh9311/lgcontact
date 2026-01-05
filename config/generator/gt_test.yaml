@@ -1,6 +1,8 @@
 model_type: gt
 model_name: gt_test
 
+embedding_type: part
+
 # Override test criteria to include GT-specific metrics
 test:
   criteria:

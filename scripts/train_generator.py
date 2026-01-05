@@ -44,17 +44,17 @@ def main(cfg):
 
     data_module = HOIDatasetModule(cfg)
 
-    if cfg.generator.model_name == 'grid_vae':
+    if cfg.contact_unit == 'grid':
         from common.model.mlctrainer import MLCTrainer
         trainer_module = MLCTrainer
-    elif cfg.generator.model_name == 'cat_vae':
+    elif cfg.contact_unit == 'point':
         from common.model.sctrainer import SCTrainer
         trainer_module = SCTrainer
 
     # Start training
     if cfg.run_phase == 'train':
         pl_model = trainer_module(model, cfg)
-        trainer.fit(pl_model, datamodule=data_module)
+        trainer.fit(pl_model, datamodule=data_module, ckpt_path=cfg.train.get('resume_ckpt', None))
     elif cfg.run_phase == 'val':
         pl_model = trainer_module(model, cfg)
         trainer.validate(pl_model, datamodule=data_module)
@@ -62,6 +62,7 @@ def main(cfg):
         pl_model = trainer_module(model, cfg)
         trainer.test(pl_model, datamodule=data_module)
     else:
+        # Make config temporarily writable for checkpoint loading
         pl_model = trainer_module.load_from_checkpoint(cfg.ckpt_path, model=model, cfg=cfg)
         trainer.test(pl_model, datamodule=data_module)
 

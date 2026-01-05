@@ -21,6 +21,7 @@ from common.utils.vis import o3dmesh_from_trimesh
 from .bullet_simulation import run_simulation
 from common.utils.converter import transform_to_canonical, convert_joints
 
+value_metrics = ["Contact Ratio", "Success Rate", "Pierce-Free Rate", "Cluster Size", "Entropy", "Canonical Entropy", "Canonical Cluster Size"]
 
 def diversity_legacy(params_list, cls_num=20):
     # k-means (original scipy implementation)
@@ -59,9 +60,37 @@ def diversity(params_list, cls_num=20):
     return ee, np.mean(min_distances)
 
 
+def downsample_mesh(mesh, target_faces=10000):
+    """
+    Downsample mesh to target number of faces to reduce memory usage.
+
+    Args:
+        mesh: trimesh.Trimesh object
+        target_faces: Target number of faces after downsampling
+
+    Returns:
+        Downsampled trimesh.Trimesh object
+    """
+    if len(mesh.faces) <= target_faces:
+        return mesh
+
+    # Calculate reduction ratio for fast_simplification
+    # target_reduction is the fraction of faces to REMOVE (not keep)
+    # target_reduction = 1.0 - (target_faces / len(mesh.faces))
+
+    # Use quadric decimation to preserve mesh quality while reducing complexity
+    return mesh.simplify_quadric_decimation(face_count=target_faces)
+
+
 def parallel_calculate_metrics(params:dict):
     metrics = params['metrics']
     result = {}
+
+    # Downsample mesh at the beginning to avoid memory overflow in all metrics
+    MAX_FACES = 10000  # Adjust based on memory constraints
+    if len(params['obj_model'].faces) > MAX_FACES:
+        params['obj_model'] = downsample_mesh(params['obj_model'], target_faces=MAX_FACES)
+
     if "Simulation Displacement" in metrics:
         ## decomposition
         if "obj_hulls" not in params:

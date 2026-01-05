@@ -12,44 +12,61 @@ import trimesh
 from collections import defaultdict
 from copy import deepcopy, copy
 import wandb
+import open3d as o3d
 from multiprocessing.pool import Pool
 import time
+from matplotlib import pyplot as plt
+from omegaconf import OmegaConf
 
 from common.manopth.manopth.manolayer import ManoLayer 
 from common.model.handobject import HandObject
+from common.model.hand_cse.hand_cse import HandCSE
 from common.model.pose_optimizer import optimize_pose_contactopt
-from common.evaluation.eval_fns import calculate_metrics, calc_diversity
+from common.evaluation.eval_fns import calculate_metrics, calc_diversity, value_metrics
 
 
 class SCTrainer(L.LightningModule):
     def __init__(self, model, cfg):
         super(SCTrainer, self).__init__()
         self.cfg = cfg
+        self.corr_embedding_type = cfg.generator.embedding_type
         self.model_cfg = cfg.generator
         # self.label_cfg = cfg.label
-        self.n_neurons = cfg.generator.n_neurons
-        self.latentD = cfg.generator.latentD
-        self.hc = cfg.generator.pointnet_hc
-        self.object_feature = cfg.generator.obj_feature
+        # self.n_neurons = cfg.generator.n_neurons
+        # self.latentD = cfg.generator.latentD
+        # self.hc = cfg.generator.pointnet_hc
+        # self.object_feature = cfg.generator.obj_feature
         self.model = model
-
-        self.num_parts = 16
-        self.embed_class = nn.Embedding(self.num_parts, self.hc)
+        self.embed_class = nn.Embedding(16, 64)
 
         ## Other utils
-        self.mano_layer = ManoLayer(mano_root=cfg.data.mano_root, use_pca=True, ncomps=26, side='right', flat_hand_mean=False)
+        self.closed_mano_faces = np.load(os.path.join('data', 'misc', 'closed_mano_r_faces.npy'))
+        self.mano_layer = ManoLayer(mano_root=cfg.data.mano_root, use_pca=True, ncomps=cfg.pose_optimizer.ncomps,
+                                    side='right', flat_hand_mean=False)
         self.hand_faces = self.mano_layer.th_faces
         self.part_ids = self.mano_layer.part_ids
         # self.testml = [testML(mano_root='data/mano_v1_2/models', use_pca=True, ncomps=26, side='right', flat_hand_mean=False)]
         self.lr = cfg.train.lr
         self.scheduler_step = cfg.train.scheduler_step
         self.lr_gamma = cfg.train.lr_gamma
-        self.max_kl_coef = cfg.generator.kl_coef
         self.weight_rec = 1.0
         # self.contact_th = cfg.data.contact_th
+        self.w_pene = cfg.pose_optimizer.w_pene
 
-        self.save_hyperparameters(cfg)
+        # Convert cfg to dict to avoid OmegaConf struct mode issues
+        self.save_hyperparameters({'cfg': OmegaConf.to_container(cfg, resolve=True)})
         self.validation_step_outputs = []
+        if self.corr_embedding_type == 'cse':
+            if hasattr(self.model, 'handcse'):
+                self.handcse = self.model.handcse
+            else:
+                handF = self.mano_layer.th_faces
+                # Initialize model and load state
+                cse_ckpt = torch.load(cfg.data.hand_cse_path)
+                self.cse_dim = cse_ckpt['emb_dim']
+                self.handcse = HandCSE(n_verts=778, emb_dim=cfg.data.hand_cse_dim, cano_faces=handF.cpu().numpy())
+                self.handcse.load_state_dict(cse_ckpt['state_dict'])
+                self.handcse.eval()
 
         self.debug = cfg.debug
         ## For simulation
@@ -71,17 +88,24 @@ class SCTrainer(L.LightningModule):
                                        total_step=num_total_iter,
                                        constant_step=0,
                                        min_kl_coeff=1e-7,
-                                       max_kl_coeff=self.max_kl_coef)
+                                       max_kl_coeff=self.cfg.generator.kl_coef)
 
         ho_gt = HandObject(self.cfg.data, self.device, mano_layer=self.mano_layer, normalize=False)
         # ho_gt = HandObject(self.device, self.hand_faces, self.part_ids, self.pressure_quantise_splits, contact_th=self.contact_th)
         ho_gt.load_from_batch(batch)
 
-        verts_obj, obj_normals, contacts, parts = ho_gt.obj_verts, ho_gt.obj_normals, ho_gt.contact_map, ho_gt.part_map
-        # verts_obj, obj_features, contacts, parts = ho_gt.get_phy_reps(
+        verts_obj, obj_normals, contacts, nn_idx, parts = ho_gt.obj_verts, ho_gt.obj_normals,\
+                ho_gt.contact_map, ho_gt.obj2hand_nn_idx, ho_gt.part_map
+        # verts_obj, obj_normals, contacts, parts = ho_gt.get_phy_reps(
         #     self.model_cfg.obj_feature_keys, random_rotate=True if proc_name=='train' else False)
-        results = self.model(verts_obj, obj_normals, contacts, parts)
-        gt = {'verts_object': verts_obj, 'normals_object':ho_gt.obj_normals, 'contacts_object': contacts, 'partition_object': parts}
+        gt = {'verts_object': verts_obj, 'normals_object':ho_gt.obj_normals, 'contacts_object': contacts}
+        if self.corr_embedding_type == 'part':
+            corr_feat = parts
+            gt['partition_object'] = parts
+        else:
+            corr_feat = nn_idx
+            gt['hand_cse'] = self.model.handcse.vert2emb(nn_idx.flatten()).reshape(nn_idx.shape[0], -1, self.model.part_dim)
+        results = self.model(verts_obj, obj_normals, contacts, corr_feat)
         # disps = torch.norm(batch['simuDisp'][:, :3], dim=-1)
         # disp_weight = 0.05 / (disps + 1e-6)
         # disp_weight[disp_weight > 1] = 1
@@ -147,131 +171,132 @@ class SCTrainer(L.LightningModule):
             obj_hull_templates.append(dataset.obj_hulls[obj_name])
 
         self.mano_layer.to(self.device)
-        ho_gt = HandObject(self.cfg.data, self.device, mano_layer=self.mano_layer)
+        handobject = HandObject(self.cfg.data, self.device, mano_layer=self.mano_layer, normalize=True)
 
         obj_names = batch['objName']
-        ho_gt.load_from_batch_obj_only(batch, obj_templates=obj_templates, obj_hulls=obj_hull_templates)
-        # use_obj_features = torch.cat([obj_features[k] for k in self.model_cfg.obj_feature_keys], dim=-1)
-        verts_obj, obj_features, contacts, parts = ho_gt.obj_verts, ho_gt.obj_features, ho_gt.contact_map, ho_gt.part_map
         batch_start = time.time()
-        sample_result = self.sample(verts_obj, obj_features)
-        pred_contacts, pred_parts = sample_result
+        if self.cfg.generator.model_type == 'gt':
+            handobject.load_from_batch(batch, obj_templates=obj_templates)
+            verts_obj, obj_normals, contacts, parts, nn_idx = handobject.obj_verts, handobject.obj_normals, handobject.contact_map, handobject.part_map, handobject.obj2hand_nn_idx
+            contacts_object = contacts
+            if self.corr_embedding_type == 'part':
+                pred_parts = parts
+                partition_object = pred_parts.argmax(dim=-1)
+            elif self.corr_embedding_type == 'cse':
+                cse = self.handcse.vert2emb(nn_idx.flatten()).reshape(nn_idx.shape[0], -1, self.cse_dim)
+                partition_object = cse
+        else:
+            handobject.load_from_batch_obj_only(batch, obj_templates=obj_templates, obj_hulls=obj_hull_templates)
+            # use_obj_normals = torch.cat([obj_normals[k] for k in self.model_cfg.obj_feature_keys], dim=-1)
+            verts_obj, obj_normals = handobject.obj_verts, handobject.obj_normals
+            batch_start = time.time()
+            sample_result = self.sample(verts_obj, obj_normals)
+            pred_contacts, pred_parts = sample_result
+            contacts_object = pred_contacts.squeeze(-1)
 
-        contacts_object = pred_contacts.squeeze(-1)
-        partition_object = pred_parts.argmax(dim=-1)
         ## Ablation: avg predictor
-        # pressure_object[:] = 0.5295791
 
         with torch.enable_grad():
-            global_pose, mano_pose, mano_shape, mano_trans = optimize_pose_contactopt(
-                                self.mano_layer, verts_obj, ho_gt.obj_normals,
-                                contacts_object, partition_object, n_iter=1000, ret_history=False)
+            global_pose, mano_pose, mano_shape, mano_trans, init_pose = optimize_pose_contactopt(
+                                self.mano_layer, verts_obj, obj_normals,
+                                contacts_object, partition_object, n_iter=1000, save_history=False,
+                                partition_type=self.corr_embedding_type, w_pen_cost=self.w_pene,
+                                hand_cse=self.handcse if self.corr_embedding_type=='cse' else None)
 
             self.runtime += time.time() - batch_start
             print(self.runtime / (batch_idx + 1))
-        res = {'pred_contacts': contacts_object.unsqueeze(-1), 'pred_parts': ho_gt.part_map, 'pred_pressure': ho_gt.pressure_map}
-        hand_params = {'rot_aa': global_pose, 'pose': mano_pose, 'shape': mano_shape, 'trans': mano_trans}
-        handV, handJ, handF = self.mano_layer.mesh_data_np(hand_params)
-        # contact_mask = contacts_object > self.contact_th
 
-        ho_pred = copy(ho_gt)
-        res.update({'hand_verts': handV, 'hand_joints': handJ,
-                    'obj_verts': np.stack([om.vertices for om in ho_gt.obj_models], axis=0),
-                    'obj_faces': np.stack([om.faces for om in ho_gt.obj_models], axis=0)})
-        self.sample_result.append(res)
-        # ho_pred.hand_models = [trimesh.Trimesh(handV[i], handF) for i in range(handV.shape[0])]
-        # if self.model_cfg.name == 'contactgen':
-        #     handrot = torch.cat([global_pose, mano_pose], dim=-1)
-        #     handV, handJ, hand_frames = self.mano_layer(handrot, th_betas=mano_shape, th_trans=mano_trans)
-        #     handV = handV.detach().cpu().numpy()
-        #     handJ = handJ.detach().cpu().numpy()
-        # else:
+        handV, handJ, _ = self.mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
 
-        hand_models = [trimesh.Trimesh(handV[i], self.hand_faces) for i in range(handV.shape[0])]
-        ho_pred.hand_models = hand_models
-        ho_pred.hand_joints = handJ
-        ho_pred.update_contact_from_hand_models()
+        handV, handJ = handV.detach().cpu().numpy(), handJ.detach().cpu().numpy()
 
-        # ho_baseline = copy(ho_pred)
-        # hand_params1 = {'rot_aa': global_pose1, 'pose': mano_pose1, 'shape': mano_shape1, 'trans': mano_trans1}
-        # handV1, handJ1, handF1 = self.mano_layer.mesh_data_np(hand_params1)
-        # ho_baseline.hand_models = [trimesh.Trimesh(handV1[i], self.hand_faces) for i in range(handV1.shape[0])]
-        # ho_baseline.hand_joints = handJ1
+        param_list = [{'dataset_name': 'grab', 'frame_name': f"{obj_names[i]}_{i}", 'hand_model': trimesh.Trimesh(handV[i], self.closed_mano_faces),
+                       'obj_name': obj_names[i], 'hand_joints': handJ[i], 'obj_model': obj_templates[i], 'obj_hulls': obj_hull_templates[i],
+                       'idx': i} for i in range(handV.shape[0])]
+            
+        result = calculate_metrics(param_list, metrics=self.cfg.test.criteria, pool=self.pool, reduction='none')
+        ## MPJPE:
+        if self.cfg.generator.model_type == 'gt':
+            mpjpe = np.linalg.norm(handobject.hand_joints.cpu().numpy() - handJ, axis=-1).mean(axis=1) * 1000  # B,
+            mpvpe = np.linalg.norm(handobject.hand_verts.cpu().numpy() - handV, axis=-1).mean(axis=1) * 1000  # B,
+            result.update({'MPJPE': mpjpe, 'MPVPE': mpvpe})
 
-        ## Calculate force errors: in a way similar to heatmap
-        # pe = pressure_error(gt_pressure, pred_pressure, verts_obj)
-
-        # for i in range(handV.shape[0]):
-        param_list = [{'label_cfg': deepcopy(self.label_cfg), 'dataset_name': 'grab',
-                       'frame_name': f"{obj_names[i]}_{i}", 'hand_model': hand_models[i],
-                       'obj_name': obj_names[i], 'hand_joints': handJ[i],
-                       'obj_model': ho_gt.obj_models[i], 'obj_hulls': ho_gt.obj_hulls[i],
-                       'idx': batch_idx * batch_size + i, 'part_id': self.part_ids} for i in range(len(ho_pred.hand_models))]
-        # self.obj_hulls += ho_gt.obj_hulls
-        assert handJ.shape[1] == 21
+        # print(result)
+        self.all_results.append(result)
         self.sample_joints.append(handJ)
 
-        # result_metrics = self.pool.map(parallel_calculate_metrics, param_list)
-        metric_names = ["PyBullet SimuDisp", "Pybullet Stable Rate", "Intersection Volume", "Contact Ratio"]
-        results = calculate_metrics(param_list, pool=self.pool, metrics=metric_names)
-        #
-        metrics = {}
-        for m in metric_names:
-            metrics[m] = results[m]
-
-        ## Calculate the GT pressure map using simulation.
-        # qposes = np.stack(results['obj_disp'], axis=0)
-        # label_disps = np.stack(results['label_obj_disp'], axis=0)
-        # contacts = results['contacts']
-        # ho_pred.calculate_pressure(contacts, torch.as_tensor(qposes).float(), torch.as_tensor(label_disps).float())
-        ## Get part-level contact forces
-        # gt_part_pres = torch.zeros_like(part_pres, device=self.device).float()
-        # for b in range(batch_size):
-        #     for c in contacts[b]:
-        #         part_id = c['part_id']
-        #         part_force = torch.as_tensor(c['frame'].reshape(3, 3).T @ c['force'].reshape(3, 1), device=self.device).squeeze()
-        #         gt_part_pres[b, part_id] += part_force
-
-        ## Force related predictions:
-        # metrics['Force value error'] = torch.mean(torch.abs(torch.abs(torch.norm(gt_part_pres, dim=-1) - torch.norm(part_pres, dim=-1))))
-        # metrics['Force angular error'] = torch.mean(torch.arccos(torch.sum(gt_part_pres * part_pres, dim=-1) / (torch.norm(gt_part_pres, dim=-1)*torch.norm(part_pres, dim=-1) + 1e-8)))
-        # metrics['Clustered force value error'] = torch.mean(torch.abs(torch.abs(torch.norm(gt_part_pres, dim=-1) - torch.norm(new_part_pres, dim=-1))))
-        # metrics['Clustered force angular error'] = torch.mean(torch.arccos(torch.sum(gt_part_pres * new_part_pres, dim=-1) / (torch.norm(gt_part_pres, dim=-1)*torch.norm(new_part_pres, dim=-1) + 1e-8)))
-
-        # simu_pressure = ho_pred.quantised_pressure
-        # pred_q_pressure = torch.argmax(pred_pressure, dim=-1)
-        # if self.model_cfg.name != 'external' and contact_mask.any() and not self.test_gt:
-            # pressure_acc = torch.sum(simu_pressure[contact_mask] == pred_q_pressure[contact_mask]) / torch.sum(contact_mask)
-            # metrics.update({'Pressure Err': pressure_value_error(contact_mask, ho_pred.pressure_map.sum(dim=-1), pressure_object)})
-            # gt_pressure = ho_pred.pressure_map.sum(dim=-1)[contact_mask]
-            # metrics.update({'Pressure Err Avg Predictor': torch.abs(gt_pressure - 0.5295791).mean()})
-            # metrics.update({'Quantised Pressure Err': pressure_value_error(contact_mask, self.mid_pts.to(self.device)[simu_pressure], pressure_object)})
-        #
-        #     ho_pred.onehot_pressure = pred_pressure
-        #
+        # Log raw per-sample metrics to wandb
         if not self.debug:
-            self.logger.log_metrics(metrics)
+            # Option 1: Log each sample as individual rows (creates distributions in wandb)
+            for i in range(len(next(iter(result.values())))):
+                sample_metrics = {f"{metric_name}": float(metric_values[i])
+                                 for metric_name, metric_values in result.items()}
+                wandb.log(sample_metrics)
+            # Visualize some samples
+
+            vis_idx = 0
+            pred_ho = copy(handobject)
+            pred_ho.contact_map = contacts_object
+            pred_ho.part_map = pred_parts
+            pred_ho.hand_verts = torch.tensor(handV, dtype=torch.float32)
+            pred_ho.hand_joints = torch.tensor(handJ, dtype=torch.float32)
+            img = handobject.vis_img(vis_idx, 250, 250, obj_templates=obj_templates, draw_maps=True)
+            if self.cfg.generator.model_type == 'gt':
+                gt_img = handobject.vis_img(vis_idx, 250, 250, obj_templates=obj_templates, draw_maps=False)
+                img = np.concatenate((gt_img, img), axis=0)
+
+            wandb.log({f'test/sampled_grasp': wandb.Image(img)})
+        
         else:
-            print(metrics)
+            print(result)
+            for vis_idx in range(batch_size):
+                # gt_geoms = handobject.get_vis_geoms(idx=vis_idx, obj_templates=obj_templates)
+                handV0, handJ0, _ = self.mano_layer(torch.cat([init_pose[0], torch.zeros_like(mano_pose)], dim=1), th_trans=init_pose[1])
+                gt_img = handobject.vis_img(vis_idx, 250, 250, obj_templates=obj_templates, draw_maps=True)
+                pred_ho = copy(handobject)
+                pred_ho.hand_verts = handV0
+                pred_ho.hand_joints = handJ0
+                init_img = pred_ho.vis_img(vis_idx, 250, 250, obj_templates=obj_templates)
 
-        # if batch_idx % self.cfg.test.vis_every_n_batch == 0:
-        print(metrics)
-        idx = np.random.randint(0, len(ho_pred.hand_models))
-        if not self.debug:
-            pred_img = ho_pred.vis_img(idx, 300, 1200)
-            # vis_img = np.concatenate((gt_img, pred_img), axis=1)
-            vis_img = pred_img
-            vis_img = wandb.Image(vis_img, caption='Sampled Result')
-            self.logger.experiment.log({'Sample Results': vis_img}, step=batch_idx * batch_size + idx)
+                pred_ho.hand_verts = torch.tensor(handV, dtype=torch.float32)
+                pred_ho.hand_joints = torch.tensor(handJ, dtype=torch.float32)
+                pred_img = pred_ho.vis_img(vis_idx, 250, 250, obj_templates=obj_templates)
+                vis_img = np.concatenate((gt_img, init_img, pred_img), axis=0)
+                plt.imsave(f'logs/tb_logs/debug_samples/test_sample_{batch_idx*batch_size+vis_idx}.png', vis_img)
+
+            # o3d.visualization.draw(gt_img + [g['geometry'].translate((0, 0.25, 0)) if 'geometry' in g else g for g in pred_img])
 
     def on_test_epoch_end(self):
-        self.sample_joints = np.concatenate(self.sample_joints)
-        entropy, cluster_size, entropy2, cluster_size2 = calc_diversity(self.sample_joints)
-        self.logger.log_metrics({'Entropy': np.mean(entropy), 'Canonical Entropy': np.mean(entropy2),
-                                'Cluster Size': np.mean(cluster_size), 'Canonical Cluster Size': np.mean(cluster_size2)})
-        if not os.path.exists(self.tmp_dump_file):
-            with open(self.tmp_dump_file, 'wb') as f:
-                pickle.dump(self.sample_result, f)
+        final_metrics = {}
+
+        # Compute statistics for all metrics from test results
+        for m in self.cfg.test.criteria:
+            if "Entropy" not in m and "Cluster Size" not in m:
+                all_metrics = np.concatenate([res[m] for res in self.all_results], axis=0)
+                # Log comprehensive statistics for each metric
+                final_metrics[f"{m}/mean"] = np.mean(all_metrics).item()
+                if m not in value_metrics:
+                    final_metrics[f"{m}/std"] = np.std(all_metrics).item()
+                    final_metrics[f"{m}/min"] = np.min(all_metrics).item()
+                    final_metrics[f"{m}/max"] = np.max(all_metrics).item()
+                    final_metrics[f"{m}/median"] = np.median(all_metrics).item()
+                    # final_metrics[f"{m}/p25"] = np.percentile(all_metrics, 25).item()
+                    # final_metrics[f"{m}/p75"] = np.percentile(all_metrics, 75).item()
+
+        ## Calculate diversity
+        sample_joints = np.concatenate(self.sample_joints, axis=0)
+        # run_time = np.concatenate(run_time, axis=0)
+        entropy, cluster_size, entropy_2, cluster_size_2 = calc_diversity(sample_joints)
+        final_metrics.update({
+            "Entropy": entropy.item(),
+            "Cluster Size": cluster_size.item(),
+            "Canonical Entropy": entropy_2.item(),
+            "Canonical Cluster Size": cluster_size_2.item()
+        })
+
+        # Log final metrics to wandb
+        if not self.debug:
+            wandb.log(final_metrics)
 
         # with open('logs/grasp_results/grab_Obj_hulls.pkl', 'wb') as f:
         #     pickle.dump(self.obj_hulls, f)
@@ -336,9 +361,15 @@ class SCTrainer(L.LightningModule):
                                                       dtype=target_contact.dtype), reduction='none')
         loss_contact_rec = self.weight_rec * torch.sum(torch.mean(loss_contact_rec, dim=-1)) / batch_size
 
-        target_part = dorig['partition_object'].argmax(dim=-1).to(device)
-        loss_part_rec = F.nll_loss(input=F.log_softmax(drec['partition_object'], dim=-1).float().permute(0, 2, 1),
-                                   target=target_part.long(), reduction='none')
+        if 'partition_object' in dorig:
+            target_part = dorig['partition_object'].argmax(dim=-1).to(device)
+            loss_part_rec = F.nll_loss(input=F.log_softmax(drec['partition_object'], dim=-1).float().permute(0, 2, 1),
+                                    target=target_part.long(), reduction='none')
+        elif 'hand_cse' in dorig:
+            ## Use L2 loss
+            target_part = dorig['hand_cse'].to(device)
+            loss_part_rec = F.mse_loss(target_part, drec['hand_cse'], reduction='none')
+
         loss_part_rec = self.weight_rec * 0.5 * torch.sum(torch.mean(weight * loss_part_rec, dim=-1)) / batch_size
 
         # weight_pres = 1. + 5. * target_contact

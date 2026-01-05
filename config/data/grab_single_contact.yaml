@@ -6,11 +6,11 @@ hand_cse_path: common/model/hand_cse/hand_cse_${data.hand_cse_dim}.ckpt
 preprocessed_dir: data/preprocessed
 MSDF_dir: data/preprocessed/grab_msdf
 n_obj_samples: 2048
-contact_unit: 'point'
+contact_unit: ${contact_unit}
 
 downsample_rate: 
   train: 1
   val: 5
-  test: 64
+  test: 200
 
 num_workers: 16

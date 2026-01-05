@@ -625,6 +625,25 @@ def cp_match(pts1: torch.Tensor, pts2: torch.Tensor, weight: torch.Tensor=None):
     return R, t
 
 
+def cp_match_Ronly(pts1: torch.Tensor, pts2: torch.Tensor, weight: torch.Tensor=None):
+    """
+    Do closest point matching for point clouds pts1 and pts2.
+    The points are in correspondence according to the order.
+    Only return rotation.
+    """
+    if weight is None:
+        weight = torch.ones(*pts1.shape[:-1], 1, device=pts1.device)
+    W = torch.sum((pts2.unsqueeze(-1) @ pts1.unsqueeze(-2)) * weight.unsqueeze(-1), dim=1)
+    U, S, Vh = torch.linalg.svd(W)
+    R = U @ Vh
+    I = torch.eye(3, device=pts1.device, dtype=pts1.dtype).view(1, 3, 3).repeat(pts1.shape[0], 1, 1)
+    # Cast to float32 for determinant computation if needed (fp16 not supported)
+    R_compute = R.float() if R.dtype == torch.float16 else R
+    I[:, 2, 2] = torch.det(R_compute).to(I.dtype)
+    R = U @ I @ Vh
+    return R
+
+
 def geo_distance_3dmap(sdf_samples: torch.Tensor, target_idx: torch.Tensor, th=0, gap=0.005):
     """
     :param sdf_samples: n1 x n2 x n3

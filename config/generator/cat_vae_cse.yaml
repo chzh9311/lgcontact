@@ -1,6 +1,8 @@
 model_type: vae
 model_name: cat_vae
 
+embedding_type: cse
+part_dim: ${data.hand_cse_dim}
 hid_dim: 2056
 emd_dim: 512
 coords_dim: 64

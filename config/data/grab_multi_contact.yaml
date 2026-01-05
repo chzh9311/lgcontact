@@ -6,7 +6,7 @@ hand_cse_path: common/model/hand_cse/hand_cse_${data.hand_cse_dim}.ckpt
 preprocessed_dir: data/preprocessed
 MSDF_dir: data/preprocessed/grab_msdf
 
-contact_unit: "grid"
+contact_unit: ${contact_unit}
 downsample_rate: 
   train: 5
   val: 5

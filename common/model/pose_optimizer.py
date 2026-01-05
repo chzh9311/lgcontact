@@ -5,32 +5,72 @@ from copy import copy
 
 from pytorch3d.structures import Meshes
 from pytorch3d.transforms import matrix_to_axis_angle
+from manotorch.anchorlayer import AnchorLayer
 from common.utils.geometry import (
         cp_match,
+        cp_match_Ronly,
         calculate_contact_capsule,
-        calculate_penetration_cost
+        calculate_penetration_cost,
+        sdf_to_contact
     )
 
 
 def optimize_pose_contactopt(mano_layer, obj_verts, obj_normals, obj_contact_target, obj_partition, n_iter=1200, lr=0.002, w_cont_obj=1,
-                  save_history=False, ncomps=26, w_cont_asym=2, caps_top=0.0005, caps_bot=-0.001, caps_rad=0.001, caps_on_hand=False,
-                  contact_norm_method=0, w_pen_cost=600, pen_it=0):
+                  save_history=False, w_cont_asym=2, caps_top=0.0005, caps_bot=-0.001, caps_rad=0.001, caps_on_hand=False,
+                  contact_norm_method=0, w_pen_cost=600, pen_it=0, hand_cse=None, partition_type='part'):
     """Runs differentiable optimization to align the hand with the target contact map.
     Minimizes the loss between ground truth contact and contact calculated with DiffContact"""
     batch_size = obj_contact_target.shape[0]
     device = obj_contact_target.device
 
-    opt_vector = torch.zeros((batch_size, ncomps + 16), device=device)   # 3 hand rot, 10 hand shape, 3 hand trans
-    opt_vector.requires_grad = True
+    global_pose = torch.zeros((batch_size, 3), dtype=obj_verts.dtype, device=obj_verts.device)
+    mano_trans = torch.zeros((batch_size, 3), dtype=obj_verts.dtype, device=obj_verts.device)
+    
+    mano_pose = torch.zeros((batch_size, mano_layer.ncomps), dtype=obj_verts.dtype, device=obj_verts.device)
+    mano_shape = torch.zeros((batch_size, 10), dtype=obj_verts.dtype, device=obj_verts.device)
+    # opt_vector = torch.zeros((batch_size, ncomps + 16), device=device)   # 3 hand rot, 10 hand shape, 3 hand trans
+    # opt_vector.requires_grad = True
 
-    optimizer = torch.optim.Adam([opt_vector], lr=lr, amsgrad=True)  # AMSgrad helps
+    ## Initialization:
+    hand_verts, hand_joints, _ = mano_layer(torch.cat([global_pose, mano_pose], dim=1),
+                                            th_betas=mano_shape, th_trans=mano_trans)
+    root = hand_joints[:, 0:1]
+    if partition_type == 'part':
+        anchor_layer = AnchorLayer("/home/zxc417/Downloads/Lib/manotorch/assets/anchor").to(device)
+        part_anchor_idx = [19, 7, 8, 9, 13, 14, 15, 27, 28, 29, 20, 21, 22, 0, 1, 2]
+        init_anchors = anchor_layer(hand_verts)[:, part_anchor_idx, :]  # (B, 16, 3)
+        part_weight = torch.stack([torch.sum(obj_contact_target * (obj_partition == i).float(), dim=1) for i in range(16)], dim=1) # (B, 16)
+        part_weight[:, 0] = 0
+        part_centers = [torch.sum(obj_verts * obj_contact_target.unsqueeze(-1) * (obj_partition == i).float().unsqueeze(-1), dim=1)
+                        / (torch.sum(obj_contact_target * (obj_partition == i).float(), dim=1, keepdim=True) + 1e-8) for i in range(16)]
+        part_centers = torch.stack(part_centers, dim=1)  # (B, 16, 3)
+        Rs, ts = cp_match(init_anchors - root, part_centers - root, part_weight.unsqueeze(-1))
+    elif partition_type == 'cse':
+        Wverts = hand_cse.emb2Wvert(obj_partition) # (B, N, 778)
+        target_hand_pts0 = Wverts @ hand_verts # (B, N, 3)
+        Rs, ts = cp_match(target_hand_pts0 - root, obj_verts - root, obj_contact_target.unsqueeze(-1))
+
+    global_pose = matrix_to_axis_angle(Rs).detach()
+    mano_trans = ts.detach()
+
+    glob_pose0 = copy(global_pose).detach()
+    mano_trans0 = copy(mano_trans).detach()
+    init_pose = [glob_pose0, mano_trans0]
+
+    mano_pose.requires_grad = True
+    mano_shape.requires_grad = True
+    global_pose.requires_grad = True
+    mano_trans.requires_grad = True 
+
+    optimizer = torch.optim.Adam([global_pose, mano_pose, mano_shape, mano_trans], lr=lr, amsgrad=True)  # AMSgrad helps
     loss_criterion = torch.nn.L1Loss(reduction='none')  # Benchmarked, L1 performs best vs MSE/SmoothL1
     opt_state = []
 
     for it in range(n_iter):
         optimizer.zero_grad()
 
-        hand_verts, hand_joints, _ = mano_layer(opt_vector[:, :ncomps+3], th_betas=opt_vector[:, ncomps+3:ncomps+13], th_trans=opt_vector[:, ncomps+13:ncomps+16])
+        hand_verts, hand_joints, _ = mano_layer(torch.cat([global_pose, mano_pose], dim=1),
+                                                th_betas=mano_shape, th_trans=mano_trans)
 
         if contact_norm_method != 0 and not caps_on_hand:
             with torch.no_grad():   # We need to calculate hand normals if using more complicated methods
@@ -39,12 +79,42 @@ def optimize_pose_contactopt(mano_layer, obj_verts, obj_normals, obj_contact_tar
         else:
             hand_normals = torch.zeros(hand_verts.shape, device=device)
 
-        contact_obj, contact_hand, _ = calculate_contact_capsule(hand_verts, hand_normals, obj_verts, obj_normals,
-                              caps_top=caps_top, caps_bot=caps_bot, caps_rad=caps_rad, caps_on_hand=caps_on_hand, contact_norm_method=contact_norm_method)
+        if partition_type == 'part':
+            contact_obj = torch.zeros_like(obj_contact_target)
+            for i in range(16):
+                hand_mask = mano_layer.part_ids == i
+                obj_mask = (obj_partition == i)
+                # Calculate contact from this hand part to all object vertices for all batches
+                c_full, _, _ = calculate_contact_capsule(
+                    hand_verts[:, hand_mask],
+                    hand_normals[:, hand_mask],
+                    obj_verts,
+                    obj_normals,
+                    caps_top=caps_top, caps_bot=caps_bot, caps_rad=caps_rad,
+                    caps_on_hand=caps_on_hand, contact_norm_method=contact_norm_method
+                )
+                # Assign contact values only to vertices belonging to this part
+                contact_obj[obj_mask] = c_full.squeeze(-1)[obj_mask]
+        
+        elif partition_type == 'cse':
+            assert hand_cse is not None, "hand_cse model must be provided for cse-based contact optimization"
+            Wverts = hand_cse.emb2Wvert(obj_partition) # (B, N, 778)
+            target_hand_pts = Wverts @ hand_verts # (B, N, 3)
+            capsule_tops = obj_verts + obj_normals * caps_top  # Coordinates of the top focii of the capsules (batch, V, 3)
+            capsule_bots = obj_verts + obj_normals * caps_bot
+            delta_top = target_hand_pts - capsule_tops
 
-        contact_obj_sub = obj_contact_target.unsqueeze(-1) - contact_obj
+            bot_to_top = capsule_bots - capsule_tops  # Vector from capsule bottom to top
+            along_axis = torch.sum(delta_top * bot_to_top, dim=2)   # Dot product
+            top_to_bot_square = torch.sum(bot_to_top * bot_to_top, dim=2)
+            h = torch.clamp(along_axis / top_to_bot_square, 0, 1)   # Could avoid NaNs with offset in division here
+            dist_to_axis = torch.norm(delta_top - bot_to_top * h.unsqueeze(2), dim=2)   # Distance to capsule centerline
+            dist = dist_to_axis / caps_rad
+            contact_obj = sdf_to_contact(dist, None, method=contact_norm_method)# * (dot_obj/2+0.5) # TODO dotting contact normal
+
+        contact_obj_sub = obj_contact_target - contact_obj
         contact_obj_weighted = contact_obj_sub + torch.nn.functional.relu(contact_obj_sub) * w_cont_asym  # Loss for 'missing' contact higher
-        loss_contact_obj = loss_criterion(contact_obj_weighted, torch.zeros_like(contact_obj_weighted)).mean(dim=(1, 2))
+        loss_contact_obj = loss_criterion(contact_obj_weighted, torch.zeros_like(contact_obj_weighted)).mean(dim=1)
 
         # contact_hand_sub = hand_contact_target - contact_hand
         # contact_hand_weighted = contact_hand_sub + torch.nn.functional.relu(contact_hand_sub) * w_cont_asym  # Loss for 'missing' contact higher
@@ -62,14 +132,16 @@ def optimize_pose_contactopt(mano_layer, obj_verts, obj_normals, obj_contact_tar
             out_dict['hand_verts'] = hand_verts.detach().cpu()#.numpy()
             out_dict['hand_joints'] = hand_joints.detach().cpu()#.numpy()
             out_dict['contact_obj'] = contact_obj.detach().cpu()#.numpy()
-            out_dict['contact_hand'] = contact_hand.detach().cpu()#.numpy()
+            # out_dict['contact_hand'] = contact_hand.detach().cpu()#.numpy()
         opt_state.append(out_dict)
         if it % 100 == 99:
-            print(f"Iter {it} | Loss: {loss.mean().item():.6f} | Contact Obj Loss: {loss_contact_obj.mean().item():.6f}")
+            print(f"Iter {it} | Loss: {loss.mean().item():.6f} | Contact Obj Loss: {loss_contact_obj.mean().item():.6f} | Penetration Cost: {pen_cost.mean().item() if w_pen_cost > 0 and it >= pen_it else 0:.6f}")
         loss.mean().backward()
         optimizer.step()
 
-    return opt_vector.detach()
+    # opt_vector = opt_vector.detach()
+    # global_pose, mano_pose, mano_shape, mano_trans = opt_vector[:, :3], opt_vector[:, 3:ncomps+3], opt_vector[:, ncomps+3:ncomps+13], opt_vector[:, ncomps+13:ncomps+16]
+    return global_pose, mano_pose, mano_shape, mano_trans, init_pose
 
 
 def optimize_pose_wrt_local_grids(mano_layer, target_pts, target_W_verts, weights, n_iter=1200, lr=0.01):
