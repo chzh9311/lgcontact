@@ -1,7 +1,7 @@
 defaults:
   - _self_
   - data: grab_single_contact
-  - generator: cat_vae_part
+  - generator: cat_vae_cse
   - pose_optimizer: base
 
 training_stage: "generator"
@@ -15,7 +15,8 @@ train:
   lr_gamma: 0.8
   scheduler_step: 5
   vis_every_n_batch: 500
-  resume_ckpt: "logs/wandb_logs/LG3DContact/SingleContact_epoch9/checkpoints/epoch=9-step=25290.ckpt"
+  resume_ckpt: null
+  # resume_ckpt: "logs/wandb_logs/LG3DContact/SingleContact_epoch9/checkpoints/epoch=9-step=25290.ckpt"
 
 val:
   batch_size: 64
@@ -44,8 +45,10 @@ trainer: ## For instantiating pytorch-lightning Trainer
   enable_progress_bar: true
   enable_model_summary: true
 
+test_gt: false
 run_phase: test
-ckpt_path: /home/zxc417/Projects/HandSyn/multi_contact/logs/wandb_logs/LG3DContact/fmi21hvu/checkpoints/epoch43_weightonly.ckpt
+# ckpt_path: /home/zxc417/Projects/HandSyn/multi_contact/logs/wandb_logs/LG3DContact/catvae_part/checkpoints/epoch43_weightonly.ckpt
+ckpt_path: logs/wandb_logs/LG3DContact/catvae_cse/checkpoints/epoch=15-step=40464.ckpt
 
 debug: true
 

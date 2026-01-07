@@ -30,7 +30,7 @@ class LocalGridDataModule(LightningDataModule):
         """
         for split in ['train', 'val', 'test']:
             os.makedirs(osp.join(self.preprocessed_dir, 'grab', split), exist_ok=True)
-            self.base_dataset = getattr(self.module, self.cfg.dataset_name.upper() + 'Dataset')(self.cfg, split, load_msdf=False)
+            self.base_dataset = getattr(self.module, self.cfg.dataset_name.upper() + 'Dataset')(self.cfg, split, load_msdf=False, test_gt=True)
             loader = DataLoader(self.base_dataset, batch_size=64, shuffle=False, num_workers=8)
             masks = []
             preprocessed_file = osp.join(self.preprocessed_dir, 'grab', split, f'local_grid_masks_{self.cfg.msdf.scale*1000:.1f}mm.npy')
@@ -111,7 +111,7 @@ class HOIDatasetModule(LightningDataModule):
         self.train_batch_size = cfg.train.batch_size
         self.val_batch_size = cfg.val.batch_size
         self.test_batch_size = cfg.test.batch_size
-        self.test_gt = cfg.generator.get('model_type', 'gt') == 'gt'
+        self.test_gt = cfg.get('test_gt', False)
         module = importlib.import_module(f'common.dataset_utils.{cfg.data.dataset_name}_dataset')
         self.dataset_class = getattr(module, cfg.data.dataset_name.upper() + 'Dataset')
 
@@ -136,16 +136,17 @@ class HOIDatasetModule(LightningDataModule):
                     np.savez_compressed(msdf_path, msdf=msdf)
                     print('result saved to ', msdf_path)
                 
-            sample_path = osp.join(self.preprocessed_dir, self.cfg.dataset_name,
-                                f'obj_samples_{self.cfg.n_obj_samples}', f'{k}.npz')
-            if not osp.exists(osp.dirname(sample_path)):
-                os.makedirs(osp.dirname(sample_path))
-            if not osp.exists(sample_path):
-                print(f'Preprocessing object surface samples for {k}...')
-                sample_pts, fid = mesh.sample(self.cfg.n_obj_samples, return_index=True)
-                sample_normals = mesh.face_normals[fid]
-                np.savez_compressed(sample_path, samples=sample_pts, sample_normals=sample_normals)
-                print('result saved to ', sample_path)
+            if hasattr(self.cfg, 'n_obj_samples'):
+                sample_path = osp.join(self.preprocessed_dir, self.cfg.dataset_name,
+                                    f'obj_samples_{self.cfg.n_obj_samples}', f'{k}.npz')
+                if not osp.exists(osp.dirname(sample_path)):
+                    os.makedirs(osp.dirname(sample_path))
+                if not osp.exists(sample_path):
+                    print(f'Preprocessing object surface samples for {k}...')
+                    sample_pts, fid = mesh.sample(self.cfg.n_obj_samples, return_index=True)
+                    sample_normals = mesh.face_normals[fid]
+                    np.savez_compressed(sample_path, samples=sample_pts, sample_normals=sample_normals)
+                    print('result saved to ', sample_path)
     
         # Simplified object meshes
         # simp_obj_mesh_path = osp.join('data', 'preprocessed', 'simplified_obj_mesh.pkl')

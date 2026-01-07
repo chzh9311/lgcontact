@@ -40,7 +40,7 @@ trainer: ## For instantiating pytorch-lightning Trainer
   strategy: ddp_find_unused_parameters_true
 
 run_phase: train
-ckpt_path: null
+ckpt_path: logs/wandb_logs/LG3DContact/GRIDAE-${ae.obj_feat_dim}v1/checkpoints/last.ckpt
 
 hydra:
   job:

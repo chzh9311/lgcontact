@@ -2,7 +2,7 @@ model_type: vae
 model_name: grid_vae
 feat_dim: ${ae.feat_dim}
 ae_pretrained_weight: ${ae.pretrained_weight}
-ae_freeze_until_epoch: 0  # Epoch to unfreeze pretrained autoencoder weights for end-to-end training
+ae_freeze_until_epoch: 10  # Epoch to unfreeze pretrained autoencoder weights for end-to-end training
 glob_feat_dim: 256
 glob_obj_feat_dim: 128
 latent:

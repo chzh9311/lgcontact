@@ -59,6 +59,7 @@ class SCTrainer(L.LightningModule):
         if self.corr_embedding_type == 'cse':
             if hasattr(self.model, 'handcse'):
                 self.handcse = self.model.handcse
+                self.cse_dim = self.model.embed_dim
             else:
                 handF = self.mano_layer.th_faces
                 # Initialize model and load state
@@ -106,7 +107,7 @@ class SCTrainer(L.LightningModule):
             gt['partition_object'] = parts
         else:
             corr_feat = nn_idx
-            gt['hand_cse'] = self.model.handcse.vert2emb(nn_idx.flatten()).reshape(nn_idx.shape[0], -1, self.model.part_dim)
+            gt['hand_cse'] = self.model.handcse.vert2emb(nn_idx.flatten()).reshape(nn_idx.shape[0], -1, self.cse_dim)
         results = self.model(verts_obj, obj_normals, contacts, corr_feat)
         # disps = torch.norm(batch['simuDisp'][:, :3], dim=-1)
         # disp_weight = 0.05 / (disps + 1e-6)
@@ -130,7 +131,15 @@ class SCTrainer(L.LightningModule):
             # ho_gt.load_from_batch(batch, obj_templates=obj_templates)
             gt_img = ho_gt.vis_img(0, 250, 250, obj_templates=obj_templates, draw_maps=True)
             ho_pred = copy(ho_gt)
-            ho_pred.contact_map, ho_pred.part_map = results['contacts_object'].squeeze(-1), results['partition_object']
+            ho_pred.contact_map = results['contacts_object'].squeeze(-1)
+            if self.corr_embedding_type == 'cse':
+                Wverts = self.handcse.emb2Wvert(results['partition_object']) # (B, N, 778)
+                vertex_idx = torch.argmax(Wverts, dim=-1)  # (B, N)
+                partition_object = self.mano_layer.part_ids[vertex_idx.cpu().numpy()]
+                ho_pred.part_map = F.one_hot(torch.tensor(partition_object), num_classes=16).to(self.device).float()
+                partition_object = results['partition_object']
+            else:
+                ho_pred.part_map = results['partition_object']
             pred_img = ho_pred.vis_img(0, 250, 250, obj_templates=obj_templates, draw_maps=True)
             img = wandb.Image(np.concatenate((gt_img, pred_img), axis=0), caption="Top: GT; Bottom: Pred")
             self.logger.experiment.log({f"{proc_name} Sample": img})
@@ -204,6 +213,7 @@ class SCTrainer(L.LightningModule):
                 vertex_idx = torch.argmax(Wverts, dim=-1)  # (B, N)
                 partition_object = self.mano_layer.part_ids[vertex_idx.cpu().numpy()]
                 pred_parts = F.one_hot(torch.tensor(partition_object), num_classes=16).to(self.device).float()
+                partition_object = pred_emb.permute(0, 2, 1)
 
         ## Ablation: avg predictor
 
@@ -386,7 +396,7 @@ class SCTrainer(L.LightningModule):
         elif 'hand_cse' in dorig:
             ## Use L2 loss
             target_part = dorig['hand_cse'].to(device)
-            loss_part_rec = F.mse_loss(target_part, drec['hand_cse'], reduction='none')
+            loss_part_rec = F.mse_loss(target_part, drec['partition_object'], reduction='none').sum(dim=-1)
 
         loss_part_rec = self.weight_rec * 0.5 * torch.sum(torch.mean(weight * loss_part_rec, dim=-1)) / batch_size
 

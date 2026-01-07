@@ -221,13 +221,13 @@ def calculate_contact_mask(point_cloud, hand_verts, grid_scale, device):
     return obj_pt_mask, hand_vert_mask
 
 
-def calc_local_grid_batch(contact_points, normalized_coords, obj_mesh, kernel_size, grid_scale, hand_verts, hand_cse, device):
+def calc_local_grid_batch(contact_points, normalized_coords, kernel_size, grid_scale, hand_verts, hand_cse, device):
     M = contact_points.shape[0]
 
     if M == 0:
         # No contact points for this sample
         local_grids = torch.empty(0, kernel_size, kernel_size, kernel_size,
-                                                2 + hand_cse.shape[-1], device=device)
+                                                1 + hand_cse.shape[-1], device=device)
 
     else:
         # Scale and translate to world coordinates for each contact point
@@ -236,10 +236,10 @@ def calc_local_grid_batch(contact_points, normalized_coords, obj_mesh, kernel_si
         grid_points_flat = (contact_points[:, None, :] + normalized_coords[None, :, :] * grid_scale).reshape(-1, 3)
 
         # Calculate SDF values if obj_mesh is provided
-        if obj_mesh is not None:
-            objSDF = SDF(obj_mesh.vertices, obj_mesh.faces)
-            grid_sdfs_np = objSDF(grid_points_flat.cpu().numpy())
-            grid_sdfs = torch.from_numpy(grid_sdfs_np).float().to(device).reshape(M, kernel_size, kernel_size, kernel_size, 1)
+        # if obj_mesh is not None:
+        #     objSDF = SDF(obj_mesh.vertices, obj_mesh.faces)
+        #     grid_sdfs_np = objSDF(grid_points_flat.cpu().numpy())
+        #     grid_sdfs = torch.from_numpy(grid_sdfs_np).float().to(device).reshape(M, kernel_size, kernel_size, kernel_size, 1)
 
         # Calculate distance to nearest hand vertex for this sample
         dist_mat = torch.norm(hand_verts[None, :, :] - grid_points_flat[:, None, :], dim=-1)  # (M*kernel_size^3, H)
@@ -249,10 +249,10 @@ def calc_local_grid_batch(contact_points, normalized_coords, obj_mesh, kernel_si
         grid_hand_cse = hand_cse[nn_idx].reshape(M, kernel_size, kernel_size, kernel_size, -1)
 
         # Concatenate features based on whether obj_mesh is provided
-        if obj_mesh is not None:
-            local_grids = torch.cat([grid_sdfs, grid_distance, grid_hand_cse], dim=-1)  # (M, kernel_size, kernel_size, kernel_size, 1 + 1 + cse_dim)
-        else:
-            local_grids = torch.cat([grid_distance, grid_hand_cse], dim=-1)  # (M, kernel_size, kernel_size, kernel_size, 1 + cse_dim)
+        # if obj_mesh is not None:
+        #     local_grids = torch.cat([grid_sdfs, grid_distance, grid_hand_cse], dim=-1)  # (M, kernel_size, kernel_size, kernel_size, 1 + 1 + cse_dim)
+        # else:
+        local_grids = torch.cat([grid_distance, grid_hand_cse], dim=-1)  # (M, kernel_size, kernel_size, kernel_size, 1 + cse_dim)
 
     return local_grids
 
@@ -328,7 +328,6 @@ def msdf2mlcontact(obj_msdf, hand_verts, hand_cse, kernel_size, grid_scale):
         local_grid = calc_local_grid_batch(
             contact_points=centers[b][obj_pt_mask[b]],
             normalized_coords=normalized_coords,
-            obj_mesh=None,  # not needed here
             kernel_size=kernel_size,
             grid_scale=grid_scale,
             hand_verts=hand_verts[b],

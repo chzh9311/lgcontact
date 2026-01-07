@@ -6,7 +6,7 @@ from common.manopth.manopth.manolayer import ManoLayer
 from common.dataset_utils.grab_dataset import GRABDataset
 from common.dataset_utils.datamodules import HOIDatasetModule, LocalGridDataModule
 from common.utils.vis import visualize_local_grid, visualize_local_grid_with_hand
-from common.model.vae.grid_vae import MLCVAE
+# from common.model.vae.grid_vae import MLCVAE
 import numpy as np
 from omegaconf import OmegaConf
 
@@ -120,8 +120,17 @@ def test_pointvae(cfg):
     recon, mu, logvar = model(dummy_contact, dummy_obj_msdf, dummy_msdf_center)
 
 
+def compare_ckpt():
+    ckpt1 = torch.load('logs/wandb_logs/LG3DContact/GRIDAE-128v1/checkpoints/last.ckpt')['state_dict']['handcse.embedding_tensor']
+    ckpt2 = torch.load('common/model/hand_cse/hand_cse_4.ckpt')['state_dict']
+    ckpt2 = ckpt2['embedding_tensor']
+    print(ckpt1)
+    print(ckpt2)
+
+
 if __name__ == "__main__":
     # vis_msdf_data_sample()
     # test_obj()
     # vis_local_grid_interact()
-    test_pointvae()
+    # test_pointvae()
+    compare_ckpt()

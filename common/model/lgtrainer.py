@@ -35,6 +35,8 @@ class LGTrainer(L.LightningModule):
         self.handcse = HandCSE(n_verts=778, emb_dim=cse_ckpt['emb_dim'], cano_faces=handF.cpu().numpy()).to(self.device)
         self.handcse.load_state_dict(cse_ckpt['state_dict'])
         self.handcse.eval()
+        for param in self.handcse.parameters():
+            param.requires_grad = False
         self.grid_coords = get_grid(self.cfg.msdf.kernel_size) * self.cfg.msdf.scale  # (K^3, 3)
 
     def training_step(self, batch, batch_idx):

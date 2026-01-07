@@ -66,7 +66,7 @@ class MLCTrainer(L.LightningModule):
         obj_templates = [trimesh.Trimesh(simp_obj_mesh[name]['verts'], simp_obj_mesh[name]['faces'])
                          for name in obj_names]
         handobject = HandObject(self.cfg.data, self.device, mano_layer=self.mano_layer)
-        handobject.load_from_batch(batch, obj_templates=obj_templates)
+        handobject.load_from_batch(batch)
         lg_contact = handobject.ml_contact
         obj_msdf = handobject.obj_msdf[:, :, :self.msdf_k**3].view(-1, self.msdf_k, self.msdf_k, self.msdf_k)
 
@@ -166,6 +166,7 @@ class MLCTrainer(L.LightningModule):
         obj_hulls = [obj_hulls[name] for name in obj_names]
         obj_mesh_dict = getattr(self.trainer.datamodule, 'test_set').simp_obj_mesh
         obj_meshes = []
+        batch_size, n_pts = batch['objMsdf'].shape[:2]
         for name in obj_names:
             obj_meshes.append(trimesh.Trimesh(obj_mesh_dict[name]['verts'], obj_mesh_dict[name]['faces']))
 
@@ -175,13 +176,30 @@ class MLCTrainer(L.LightningModule):
             obj_msdf_center = handobject.obj_msdf[:, :, self.msdf_k**3:]
             recon_lg_contact = handobject.ml_contact
         else:
-            handobject.load_from_batch_object_only(batch)
+            ## Test the reconstrucion 
+            handobject.load_from_batch(batch)
+            lg_contact = handobject.ml_contact
             obj_msdf = handobject.obj_msdf[:, :, :self.msdf_k**3].view(-1, self.msdf_k, self.msdf_k, self.msdf_k)
-            recon_lg_contact = self.model.sample(obj_msdf, obj_msdf_center).permute(0, 1, 3, 4, 5, 2)
+            obj_msdf_center = handobject.obj_msdf[:, :, self.msdf_k**3:] # B x 3
+            # recon_lg_contact, mu, logvar = self.model(
+            #     lg_contact.permute(0, 1, 5, 2, 3, 4), obj_msdf=obj_msdf, msdf_center=obj_msdf_center)
+            recon_lg_contact, z_e, obj_feat = self.model.grid_ae(
+                lg_contact.view(batch_size*n_pts, self.msdf_k, self.msdf_k, self.msdf_k, -1).permute(0, 4, 1, 2, 3),
+                obj_msdf=obj_msdf.unsqueeze(1))
+            recon_lg_contact = recon_lg_contact.permute(0, 2, 3, 4, 1)  # B x N x K x K x K x (1 + cse_dim)
+            recon_lg_contact = recon_lg_contact.view(batch_size, n_pts, self.msdf_k, self.msdf_k, self.msdf_k, -1)
+
+            ## If masked with GT pt mask
+            recon_lg_contact = recon_lg_contact * handobject.obj_pt_mask[:, :, None, None, None, None]
+
+            # handobject.load_from_batch_object_only(batch)
+            # obj_msdf = handobject.obj_msdf[:, :, :self.msdf_k**3].view(-1, self.msdf_k, self.msdf_k, self.msdf_k)
+            # recon_lg_contact = self.model.sample(obj_msdf, obj_msdf_center).permute(0, 1, 3, 4, 5, 2)
+
         batch_size, n_pts = recon_lg_contact.shape[:2]
-        pred_grid_contact = recon_lg_contact[..., 0].view(batch_size, -1)  # B x N x K^3
+        pred_grid_contact = recon_lg_contact[..., 0].reshape(batch_size, -1)  # B x N x K^3
         grid_coords = obj_msdf_center[:, :, None, :] + self.grid_coords.view(-1, 3)[None, None, :, :]  # B x N x K^3 x 3
-        pred_grid_cse = recon_lg_contact[..., 1:].view(batch_size, -1, self.cse_dim)
+        pred_grid_cse = recon_lg_contact[..., 1:].reshape(batch_size, -1, self.cse_dim)
         pred_targetWverts = self.handcse.emb2Wvert(pred_grid_cse.view(batch_size, -1, self.cse_dim))
 
         with torch.enable_grad():
@@ -200,7 +218,7 @@ class MLCTrainer(L.LightningModule):
             
         result = calculate_metrics(param_list, metrics=self.cfg.test.criteria, pool=self.pool, reduction='none')
         ## MPJPE:
-        if self.cfg.generator.model_type == 'gt':
+        if self.cfg.test_gt:
             mpjpe = np.linalg.norm(handobject.hand_joints.cpu().numpy() - handJ, axis=-1).mean(axis=1) * 1000  # B,
             mpvpe = np.linalg.norm(handobject.hand_verts.cpu().numpy() - handV, axis=-1).mean(axis=1) * 1000  # B,
             result.update({'MPJPE': mpjpe, 'MPVPE': mpvpe})
@@ -223,13 +241,13 @@ class MLCTrainer(L.LightningModule):
             # table = wandb.Table(data=table_data, columns=["object"] + list(result.keys()))
             # wandb.log({f"test_metrics_batch_{batch_idx}": table})
         ## Visualization
-        # vis_idx = 2
-        # gt_geoms = handobject.get_vis_geoms(idx=vis_idx, obj_templates=obj_meshes)
-        # pred_ho = copy(handobject)
-        # pred_ho.hand_verts = torch.tensor(handV, dtype=torch.float32)
-        # pred_ho.hand_joints = torch.tensor(handJ, dtype=torch.float32)
-        # pred_geoms = pred_ho.get_vis_geoms(idx=vis_idx, obj_templates=obj_meshes)
-        # o3d.visualization.draw(gt_geoms + [g['geometry'].translate((0, 0.25, 0)) if 'geometry' in g else g for g in pred_geoms])
+        vis_idx = 2
+        gt_geoms = handobject.get_vis_geoms(idx=vis_idx, obj_templates=obj_meshes)
+        pred_ho = copy(handobject)
+        pred_ho.hand_verts = torch.tensor(handV, dtype=torch.float32)
+        pred_ho.hand_joints = torch.tensor(handJ, dtype=torch.float32)
+        pred_geoms = pred_ho.get_vis_geoms(idx=vis_idx, obj_templates=obj_meshes)
+        o3d.visualization.draw(gt_geoms + [g['geometry'].translate((0, 0.25, 0)) if 'geometry' in g else g for g in pred_geoms])
 
         return result
 

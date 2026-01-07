@@ -2,11 +2,12 @@ defaults:
   - _self_
   - msdf: sparse
   - data: grab_multi_contact
-  - ae: gridae_64latent
-  - generator: point_vae
+  - ae: gridae_128latent
+  - generator: grid_vae
   - pose_optimizer: base
 
 training_stage: "generator"
+contact_unit: "grid"
 
 train:
   lr: 0.0005
@@ -48,6 +49,7 @@ trainer: ## For instantiating pytorch-lightning Trainer
   enable_model_summary: true
 
 run_phase: val
+test_gt: true
 
 debug: true
 

@@ -20,27 +20,33 @@ class CAT_VAE(nn.Module):
         self.latentD = cfg.generator.latentD
         if self.corr_embedding_type == 'part':
             self.embed_class = nn.Embedding(cfg.generator.part_dim, self.hc)
+            self.embed_dim = self.hc
         elif self.corr_embedding_type == 'cse':
             cse_ckpt = torch.load(cfg.data.hand_cse_path)
 
             self.mano_layer = ManoLayer(mano_root=cfg.data.mano_root)
             handF = self.mano_layer.th_faces
             # Initialize model and load state
-            self.cse_dim = cse_ckpt['emb_dim']
             self.handcse = HandCSE(n_verts=778, emb_dim=cfg.data.hand_cse_dim, cano_faces=handF.cpu().numpy())
+            cse_ckpt['state_dict']['cano_faces'] = handF
             self.handcse.load_state_dict(cse_ckpt['state_dict'])
+            # self.handcse.embedding_tensor = cse_ckpt['embedding_tensor']
             self.handcse.eval()
+            # Freeze handcse parameters to prevent gradient computation
+            for param in self.handcse.parameters():
+                param.requires_grad = False
+            self.embed_dim = cse_ckpt['emb_dim']
         self.obj_encoder = PointNet2seg(in_dim=cfg.generator.obj_feature, hidden_dim=cfg.generator.pointnet_hc,
                                         in_point=cfg.data.n_obj_samples, out_dim=cfg.generator.pointnet_hc)
-        self.encoder = CatEncoder(cfg)
+        self.encoder = CatEncoder(cfg, self.embed_dim)
         self.decoder = CatDecoder(cfg)
 
     def forward(self, verts_object, feat_object, contacts_object, partition_object):
         _, obj_cond = self.obj_encoder(torch.cat([verts_object, feat_object], -1).permute(0, 2, 1))
         if self.corr_embedding_type == 'cse':
             with torch.no_grad():
-                hand_cse_feat = self.handcse.vert2emb(partition_object.flatten()).reshape(partition_object.shape[0], -1, self.cse_dim)
-                partition_feat = hand_cse_feat.permute(0, 2, 1)
+                hand_cse_feat = self.handcse.vert2emb(partition_object.flatten()).reshape(partition_object.shape[0], -1, self.embed_dim)
+                partition_feat = hand_cse_feat
         else:
             partition_feat = self.embed_class(partition_object.argmax(dim=-1))
         z_contact, z_part, z_s_contact, z_s_part = self.encoder(obj_cond, contacts_object, partition_feat)
@@ -66,7 +72,7 @@ class CAT_VAE(nn.Module):
             return self.decoder(z_gen_contact, z_gen_part, obj_cond)
 
 class CatEncoder(nn.Module):
-    def __init__(self, cfg):
+    def __init__(self, cfg, embed_dim):
         super(CatEncoder, self).__init__()
         self.cfg = cfg
         self.n_neurons = cfg.generator.n_neurons
@@ -79,7 +85,7 @@ class CatEncoder(nn.Module):
         encode_dim = self.hc
 
         self.contact_encoder = Pointnet(in_dim=encode_dim + 1, hidden_dim=self.hc, out_dim=self.hc)
-        self.part_encoder = Pointnet(in_dim=encode_dim + self.latentD + self.hc, hidden_dim=self.hc, out_dim=self.hc)
+        self.part_encoder = Pointnet(in_dim=embed_dim + self.latentD + self.hc, hidden_dim=self.hc, out_dim=self.hc)
         # self.pressure_encoder = Pointnet(in_dim=encode_dim + self.hc + self.part_dim, hidden_dim=self.hc, out_dim=self.hc)
 
         self.contact_latent = LatentEncoder(in_dim=self.hc, dim=self.n_neurons, out_dim=self.latentD)

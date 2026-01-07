@@ -11,7 +11,7 @@ from common.utils.misc import set_seed
 import importlib
 
 OmegaConf.register_new_resolver("add", lambda x, y: x + y, replace=True)
-@hydra.main(config_path="../config", config_name="singlecontact_gen")
+@hydra.main(config_path="../config", config_name="mlcontact_gen")
 def main(cfg):
     # Set seed for reproducibility FIRST
     if hasattr(cfg, 'seed'):
@@ -70,7 +70,8 @@ def main(cfg):
         trainer.test(pl_model, datamodule=data_module)
     else:
         # Make config temporarily writable for checkpoint loading
-        pl_model = trainer_module.load_from_checkpoint(cfg.ckpt_path, model=model, cfg=cfg)
+        # pl_model = trainer_module.load_from_checkpoint(cfg.ckpt_path, model=model, cfg=cfg)
+        pl_model = trainer_module(model, cfg)
         trainer.test(pl_model, datamodule=data_module)
 
 
