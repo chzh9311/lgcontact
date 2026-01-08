@@ -12,7 +12,7 @@ non_contact_rate: 0.1
 downsample_rate: 
   train: 16
   val: 16
-  test: 64
+  test: 16
 
 msdf:
   num_grids: ${msdf.num_grids}

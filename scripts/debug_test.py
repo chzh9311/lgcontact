@@ -55,23 +55,24 @@ def vis_msdf_data_sample(cfg):
     print("\nDataModule validation complete!")
 
 
-@hydra.main(config_path="../config", config_name="mlcontact_vqvae")
+@hydra.main(config_path="../config", config_name="gridae")
 def vis_local_grid_interact(cfg):
     dm = LocalGridDataModule(cfg)
     mano_layer = ManoLayer(mano_root = cfg.data.mano_root, use_pca=False, side='right', flat_hand_mean=True, ncomps=45)
     hand_faces = mano_layer.th_faces.numpy()
     dm.prepare_data()
-    dm.setup('validate')
+    dm.setup('fit')
+    train_loader = dm.train_dataloader()
     val_loader = dm.val_dataloader()
-    print(f"Validation dataset size: {len(dm.val_set)}")
-    for batch_idx, batch in enumerate(val_loader):
+    print(f"Training dataset size: {len(dm.train_set)}")
+    for batch_idx, batch in enumerate(train_loader):
         grid_data = batch['localGrid']  # (B, K, K, K, C)
         batch_size = grid_data.shape[0]
         for b in range(batch_size):
             # Extract data for this sample
             local_grid = grid_data[b].cpu().numpy()  # (K, K, K, C)
-            contact_point = batch['obj_sample_pt'][b].cpu().numpy()  # (3,)
-            hand_verts = batch['handVerts'][b].cpu().numpy()  # (778, 3)
+            contact_point = batch['objSamplePt'][b].cpu().numpy()  # (3,)
+            nhand_verts = batch['nHandVerts'][b].cpu().numpy()  # (778, 3)
             obj_rot = batch['objRot'][b].cpu().numpy()  # (3, 3) or axis-angle (3,)
             obj_trans = batch['objTrans'][b].cpu().numpy()  # (3,)
             obj_name = batch['obj_name'][b]
@@ -90,11 +91,14 @@ def vis_local_grid_interact(cfg):
 
             obj_verts = (objR @ obj_mesh_data['verts'].T).T + obj_trans
             obj_mesh = trimesh.Trimesh(vertices=obj_verts, faces=obj_mesh_data['faces'], process=False)
+            hand_verts = nhand_verts + contact_point[np.newaxis, :]
 
             # Visualize
             print(f"\nVisualizing sample {b} from batch {batch_idx} (object: {obj_name})")
-            visualize_local_grid_with_hand(local_grid, contact_point, obj_mesh, hand_verts,
-                                          hand_faces, dm.val_set.hand_cse, cfg.msdf.kernel_size, cfg.msdf.scale)
+            geoms = visualize_local_grid_with_hand(local_grid, hand_verts, hand_faces, dm.val_set.hand_cse, cfg.msdf.kernel_size,
+                                           cfg.msdf.scale, contact_point=contact_point, obj_mesh=obj_mesh)
+            o3d.visualization.draw_geometries(geoms)
+            # break
         # Only visualize first batch
         break
 
@@ -131,6 +135,6 @@ def compare_ckpt():
 if __name__ == "__main__":
     # vis_msdf_data_sample()
     # test_obj()
-    # vis_local_grid_interact()
+    vis_local_grid_interact()
     # test_pointvae()
-    compare_ckpt()
+    # compare_ckpt()

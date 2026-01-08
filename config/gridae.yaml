@@ -10,17 +10,17 @@ debug: true
 
 train:
   lr: 0.001
-  batch_size: 128
+  batch_size: 256
   loss_weights:
     w_contact: 1.0
-    w_cse: 0.5
+    w_cse: 1.0
     w_kl: 0.001
     w_rec: 1.0
   rec_loss_start_epoch: 5
   vis_every_n_batches: 500
 
 val:
-  batch_size: 128
+  batch_size: 256
   vis_every_n_batches: 500
 
 test:

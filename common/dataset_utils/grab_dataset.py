@@ -198,8 +198,11 @@ class GRABLocalGridDataset(LocalGridDataset):
     A dataset class for loading local grid data for hand-object interactions.
     """
     def __init__(self, cfg, split):
+        self.dataset_path = cfg.dataset_path
         super().__init__(cfg, split)
-        self.obj_info = GRABDataset.load_mesh_info(cfg.dataset_path, msdf_path=None)
+
+    def _load_data(self):
+        self.obj_info = GRABDataset.load_mesh_info(self.dataset_path, msdf_path=None)
         with open(osp.join('data', 'preprocessed', 'grab', 'simplified_obj_mesh.pkl'), 'rb') as of:
             self.simp_obj_mesh = pickle.load(of)
         

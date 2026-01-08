@@ -63,8 +63,14 @@ class HandCSE(nn.Module):
         vert_cse = self.embedding_tensor[vert_idx]  # (B, n_pts, 3, emb_dim)
         # weights = F.softmax(-torch.cdist(emb_features.unsqueeze(2), vert_cse).squeeze(2) * 16, dim=2)  # (B, n_pts, 3)
         ## The weights should be inversely proportional to the distance in embedding space
-        dists_to_verts = torch.cdist(emb_features.unsqueeze(2), vert_cse).squeeze(2)  # (B, n_pts, 3)
-        weights = self.inv_proportional_weights(dists_to_verts)  # (B, n_pts, 3)
+        # dists_to_verts = torch.cdist(emb_features.unsqueeze(2), vert_cse).squeeze(2)  # (B, n_pts, 3)
+        # weights = self.inv_proportional_weights(dists_to_verts)  # (B, n_pts, 3)
+
+        ## Pseudo-inverse
+        weights = torch.linalg.inv(vert_cse @ vert_cse.transpose(2, 3) + 1e-6 * torch.eye(3).to(emb_features.device))\
+              @ vert_cse @ emb_features.unsqueeze(3)  # (B, n_pts, 3, emb_dim) -> (B, n_pts, 3, 1)
+        weights = weights.squeeze(3)  # (B, n_pts, 3)
+
         W = torch.zeros(emb_features.shape[0], emb_features.shape[1], self.n_verts).to(emb_features.device)  # (B, n_pts, n_verts)
         W.scatter_add_(2, vert_idx, weights)
         # W = F.softmax(-dists*16, dim=2)

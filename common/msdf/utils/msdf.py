@@ -257,17 +257,16 @@ def calc_local_grid_batch(contact_points, normalized_coords, kernel_size, grid_s
     return local_grids
 
 
-def calc_local_grid(contact_point, normalized_coords, obj_mesh, kernel_size, grid_scale, hand_verts, hand_cse):
+def calc_local_grid_1pt(normalized_coords, obj_mesh, hand_mesh, kernel_size, grid_scale, hand_cse):
     """
     Calculate local grid for a single contact point using numpy on CPU.
 
     Args:
-        contact_point: numpy array of shape (3,), single contact point
         normalized_coords: numpy array of shape (kernel_size^3, 3), normalized grid coordinates
         obj_mesh: trimesh.Trimesh, object mesh
+        hand_mesh: trimesh.Trimesh, the normalized hand mesh
         kernel_size: int, size of the cubic grid
         grid_scale: float, scale of the grid
-        hand_verts: numpy array of shape (778, 3), hand vertices
         hand_cse: numpy array of shape (778, cse_dim), hand contact surface embeddings
 
     Returns:
@@ -277,9 +276,10 @@ def calc_local_grid(contact_point, normalized_coords, obj_mesh, kernel_size, gri
     # Scale and translate to world coordinates
     # contact_point: (3,), normalized_coords: (kernel_size^3, 3)
     # Result: (kernel_size^3, 3)
-    grid_points_flat = contact_point[None, :] + normalized_coords * grid_scale
+    grid_points_flat = normalized_coords * grid_scale
 
     ## Determine mask using Chebyshev distance
+    hand_verts = hand_mesh.vertices  # (778, 3)
     verts_mask = np.max(np.abs(hand_verts[:, :]), axis=-1) < grid_scale
 
     # Calculate SDF values
@@ -289,16 +289,151 @@ def calc_local_grid(contact_point, normalized_coords, obj_mesh, kernel_size, gri
 
     # Calculate distance to nearest hand vertex
     # grid_points_flat: (kernel_size^3, 3), hand_verts: (778, 3)
-    dist_mat = np.linalg.norm(grid_points_flat[:, None, :] - hand_verts[None, :, :], axis=-1)  # (kernel_size^3, 778)
-    nn_idx = np.argmin(dist_mat, axis=1)  # (kernel_size^3,)
-    nn_dist = np.min(dist_mat, axis=1)  # (kernel_size^3,)
+
+    ## Return only the points
+    # dist_mat = np.linalg.norm(grid_points_flat[:, None, :] - hand_verts[None, :, :], axis=-1)  # (kernel_size^3, 778)
+    # nn_idx = np.argmin(dist_mat, axis=1)  # (kernel_size^3,)
+    # nn_dist = np.min(dist_mat, axis=1)  # (kernel_size^3,)
+    # grid_hand_cse = hand_cse[nn_idx].reshape(kernel_size, kernel_size, kernel_size, -1)
+    ## Use mesh to calculate the nearest distance
+
+    # Calculate nearest point on hand mesh surface
+    nn_dist, nn_face_idx, nn_point = nn_dist_to_mesh(grid_points_flat, hand_mesh)
+
+    # Map face indices to vertex indices for CSE lookup
+    # For each face, find which of its 3 vertices is closest to the query point
+    # closest_face_verts = hand_mesh.vertices[hand_mesh.faces[nn_face_idx]]  # (N, 3, 3)
+    # vert_dists = np.linalg.norm(closest_face_verts - grid_points_flat[:, None, :], axis=2)  # (N, 3)
+    # local_vert_idx = np.argmin(vert_dists, axis=1)  # (N,) values in [0, 1, 2]
+    # nn_idx = hand_mesh.faces[nn_face_idx][np.arange(len(nn_face_idx)), local_vert_idx]
+    face_vert_idx = hand_mesh.faces[nn_face_idx]  # (N, 3)
+    face_verts = hand_mesh.vertices[face_vert_idx]  # (N, 3, 3)
+    face_cse = hand_cse[face_vert_idx] # (N, 3, cse_dim)
+    ## Calculate the CSE
+    ## Use Barycentric weights
+    # d = np.linalg.norm(nn_point[:, np.newaxis, :] - face_verts, axis=-1)  # (N, 3)
+    # w = 1 / (d + 1e-8)
+    # w = w / np.sum(w, axis=1, keepdims=True)  #
+
+    ## Use linear invert
+    w = np.linalg.inv(face_verts.transpose((0, 2, 1))) @ nn_point[:, :, np.newaxis]  # (N, 3, 1)
+    ## make sure weights are all positive
+    w = np.clip(w, 0, 1)
+    w = w / np.sum(w, axis=1, keepdims=True)  # (N, 3, 1)
+
+    grid_hand_cse = np.sum(face_cse * w, axis=1).reshape(kernel_size, kernel_size, kernel_size, -1)  # (N, cse_dim)
 
     grid_distance = nn_dist.reshape(kernel_size, kernel_size, kernel_size, 1)
-    grid_hand_cse = hand_cse[nn_idx].reshape(kernel_size, kernel_size, kernel_size, -1)
+
+    ## Calculate the distance to the nearest surface
 
     local_grid = np.concatenate([grid_sdfs, grid_distance, grid_hand_cse], axis=-1)  # (kernel_size, kernel_size, kernel_size, 2 + cse_dim)
 
     return local_grid, verts_mask
+
+
+def calc_local_grid_all_pts(contact_points, normalized_coords, obj_mesh, hand_mesh, kernel_size, grid_scale, hand_cse, device='cpu'):
+    """
+    Calculate local grids for all contact points using numpy on CPU.
+
+    :param contact_points: N x 3, contact points in world coordinates
+    :param normalized_coords: K^3 x 3, normalized grid coordinates
+    :param obj_mesh: trimesh.Trimesh, object mesh
+    :param hand_mesh: trimesh.Trimesh, the normalized hand mesh
+    :param kernel_size: K, size of the cubic grid
+    :param grid_scale: float, scale of the grid
+    :param hand_verts: H x 3, hand vertices (should be hand_mesh.vertices)
+    :param hand_cse: H x cse_dim, hand contact surface embeddings
+
+    Returns:
+        local_grids: numpy array of shape (N, kernel_size, kernel_size, kernel_size, 2 + cse_dim)
+        verts_mask: numpy array of shape (N, n_verts), boolean mask indicating valid vertices for each contact point
+    """
+    N = contact_points.shape[0]
+
+    # Handle empty case
+    hand_verts = hand_mesh.vertices
+    if N == 0:
+        cse_dim = hand_cse.shape[-1]
+        return np.empty((0, kernel_size, kernel_size, kernel_size, 2 + cse_dim)), np.empty((0, hand_verts.shape[0]), dtype=bool)
+
+    # Scale and translate to world coordinates for all contact points
+    # contact_points: (N, 3), normalized_coords: (K^3, 3)
+    # Result: (N, K^3, 3)
+    grid_points_flat = contact_points[:, None, :] + normalized_coords[None, :, :] * grid_scale  # N x K^3 x 3
+
+    # Determine mask using Chebyshev distance for all contact points
+    # For each contact point, check which hand vertices are within the grid
+    # hand_verts centered at each contact point
+    verts_mask = np.max(np.abs(hand_verts[None, :, :] - contact_points[:, None, :]), axis=-1) < grid_scale  # N x H
+    grid_mask = np.any(verts_mask, axis=1) # N
+    M = np.sum(grid_mask)
+
+    # Calculate SDF values for all grid points at once (same obj_mesh for all points)
+    objSDF = SDF(obj_mesh.vertices, obj_mesh.faces)
+    grid_points_all = grid_points_flat[grid_mask].reshape(-1, 3)  # (M * K^3, 3)
+
+    grid_sdfs_np = objSDF(grid_points_all)  # (M * K^3,)
+    grid_sdfs = grid_sdfs_np.reshape(M, kernel_size, kernel_size, kernel_size, 1)  # (M, K, K, K, 1)
+
+    # Calculate distance to nearest hand mesh surface for all grid points at once
+    nn_dist, nn_face_idx, nn_point = nn_dist_to_mesh(grid_points_all, hand_mesh)
+
+    # Map face indices to get CSE using barycentric interpolation
+    face_vert_idx = hand_mesh.faces[nn_face_idx]  # (M * K^3, 3)
+    face_verts = hand_mesh.vertices[face_vert_idx]  # (M * K^3, 3, 3)
+    face_cse = hand_cse[face_vert_idx]  # (M * K^3, 3, cse_dim)
+
+    # Calculate barycentric weights using linear invert
+    w = np.linalg.inv(face_verts.transpose((0, 2, 1))) @ nn_point[:, :, np.newaxis]  # (M * K^3, 3, 1)
+    # Make sure weights are all positive and normalized
+    w = np.clip(w, 0, 1)
+    w = w / np.sum(w, axis=1, keepdims=True)  # (M * K^3, 3, 1)
+
+    # Interpolate CSE values
+    grid_hand_cse = np.sum(face_cse * w, axis=1).reshape(M, kernel_size, kernel_size, kernel_size, -1)  # (M, K, K, K, cse_dim)
+
+    # Reshape distances
+    grid_distance = nn_dist.reshape(M, kernel_size, kernel_size, kernel_size, 1)  # (M, K, K, K, 1)
+
+    # Concatenate all features
+    local_grids = np.concatenate([grid_sdfs, grid_distance, grid_hand_cse], axis=-1)  # (M, K, K, K, 2 + cse_dim)
+
+    return local_grids, verts_mask, grid_mask, nn_face_idx, nn_point
+
+
+def nn_dist_to_mesh(points: np.ndarray, mesh: trimesh.Trimesh) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Calculate the nearest distance from points to mesh surface.
+
+    For each query point, finds the closest point on the mesh surface and returns
+    the distance, which face contains that point, and the coordinates of the
+    closest point.
+
+    Args:
+        points: numpy array of shape (N, 3), points to calculate distances for
+        mesh: trimesh.Trimesh, the mesh to calculate distances to
+
+    Returns:
+        distances: numpy array of shape (N,), unsigned distances from each point
+                   to nearest point on mesh surface (always >= 0)
+        face_indices: numpy array of shape (N,), triangle indices indicating which
+                      face contains the nearest point (values in range [0, num_faces))
+        closest_points: numpy array of shape (N, 3), coordinates of the nearest
+                        points on the mesh surface
+    """
+    # Handle edge case: empty points array
+    if len(points) == 0:
+        return np.array([]), np.array([], dtype=np.int64), np.array([]).reshape(0, 3)
+
+    # Use trimesh's optimized closest_point function
+    # Returns: (closest_points, distances, triangle_ids)
+    closest_points, distances, face_indices = trimesh.proximity.closest_point(mesh, points)
+
+    # Ensure distances are unsigned (they should already be, but make it explicit)
+    distances = np.abs(distances)
+
+    return distances, face_indices, closest_points
 
 
 def msdf2mlcontact(obj_msdf, hand_verts, hand_cse, kernel_size, grid_scale):

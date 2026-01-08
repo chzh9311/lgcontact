@@ -525,7 +525,7 @@ def visualize_local_grid_with_hand(local_grid, hand_verts, hand_faces, hand_cse,
 
     # ==================== CREATE CORRESPONDENCE LINES ====================
     # Extract predicted CSE from local_grid (indices 2:18, which is 16 dimensions)
-    predicted_cse = local_grid[:, :, :, 2:18].reshape(-1, 16)  # (kernel_size^3, 16)
+    predicted_cse = local_grid[:, :, :, 2:].reshape(-1, hand_cse.shape[1])  # (kernel_size^3, 16)
 
     # Compute distance matrix between predicted CSE and hand CSE
     # predicted_cse: (K^3, 16), hand_cse: (778, 16)

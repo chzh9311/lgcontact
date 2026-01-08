@@ -24,6 +24,7 @@ class LGTrainer(L.LightningModule):
         super().__init__()
         self.model = model
         self.cfg = cfg
+        self.debug = cfg.get('debug', False)
         self.loss_weights = cfg.train.loss_weights
         self.lr = cfg.train.lr
         self.mano_layer = ManoLayer(mano_root=cfg.data.mano_root, side='right',
@@ -65,42 +66,58 @@ class LGTrainer(L.LightningModule):
             mask_th = 0.02
         )
         loss_dict = self.loss_net(gt_grid_contact, recon_cgrid,
-                                  latent, pred_hand_verts, batch['nHandVerts'], batch['handVertMask'])
+                                  latent, pred_hand_verts, batch['nHandVerts'], batch['handVertMask'], proc=stage)
         # recon_loss = F.mse_loss(recon_grid_contact, gt_grid_contact.permute(0, 4, 1, 2, 3))
         # loss_dict = {f'{stage}/embedding_loss': loss, f'{stage}/recon_loss': recon_loss, f'{stage}/perplexity': perplexity}
         # total_loss = sum(loss_dict.values())
         # total_loss = loss + self.recon_weight * recon_loss
+        self.log_dict(loss_dict, prog_bar=True, sync_dist=True)
         if batch_idx % self.cfg[stage].vis_every_n_batches == 0:
             pred_grid_contact = recon_cgrid
-            vis_geoms = self.visualize_grid_and_hand(
+            gt_geoms = self.visualize_grid_and_hand(
+                grid_coords=self.grid_coords.view(-1, 3),
+                grid_contact=gt_grid_contact[..., 0].reshape(batch_size, -1),
+                pred_hand_verts=batch['nHandVerts'],
+                hand_faces=self.mano_layer.th_faces,
+                pred_mask=batch['handVertMask'],
+                gt_mask=batch['handVertMask'],
+                gt_hand_verts=batch['nHandVerts'],
+                batch_idx=0
+            )
+            pred_geoms = self.visualize_grid_and_hand(
                 grid_coords=self.grid_coords.view(-1, 3),
                 grid_contact=pred_grid_contact[..., 0].reshape(batch_size, -1),
                 pred_hand_verts=pred_hand_verts,
                 hand_faces=self.mano_layer.th_faces,
-                pred_mask=pred_verts_mask,
-                gt_hand_verts=batch['nHandVerts'],
+                pred_mask=batch['handVertMask'],
                 gt_mask=batch['handVertMask'],
+                gt_hand_verts=batch['nHandVerts'],
                 batch_idx=0
             )
-            img = geom_to_img(vis_geoms, w=400, h=400)
-            # Log image - works for both WandbLogger and TensorBoardLogger
-            if hasattr(self.logger, 'experiment'):
-                if hasattr(self.logger.experiment, 'add_image'):
-                    # TensorBoardLogger
-                    global_step = self.current_epoch * len(eval(f'self.trainer.datamodule.{stage}_dataloader()')) + batch_idx
-                    self.logger.experiment.add_image(f'{stage}/local_grid', img, global_step, dataformats='HWC')
-                elif hasattr(self.logger.experiment, 'log'):
-                    # WandbLogger
-                    import wandb
-                    self.logger.experiment.log({f'{stage}/local_grid': wandb.Image(img)},
-                                              step=self.global_step)
-        self.log_dict(loss_dict, prog_bar=True, sync_dist=True)
-        return loss_dict['total_loss']
+            if self.debug:
+                all_geoms = gt_geoms + [g.translate((self.cfg.msdf.scale * 3, 0, 0)) for g in pred_geoms]
+                o3d.visualization.draw_geometries(all_geoms, window_name=f'{stage} Local Grid Visualization')
+            else:
+                gt_img = geom_to_img(gt_geoms, w=400, h=400)
+                pred_img = geom_to_img(pred_geoms, w=400, h=400)
+                img = np.concatenate([gt_img, pred_img], axis=1)
+                # Log image - works for both WandbLogger and TensorBoardLogger
+                if hasattr(self.logger, 'experiment'):
+                    if hasattr(self.logger.experiment, 'add_image'):
+                        # TensorBoardLogger
+                        global_step = self.current_epoch * len(eval(f'self.trainer.datamodule.{stage}_dataloader()')) + batch_idx
+                        self.logger.experiment.add_image(f'{stage}/local_grid', img, global_step, dataformats='HWC')
+                    elif hasattr(self.logger.experiment, 'log'):
+                        # WandbLogger
+                        import wandb
+                        self.logger.experiment.log({f'{stage}/local_grid': wandb.Image(img)},
+                                                step=self.global_step)
+        return loss_dict[f'{stage}/total_loss']
     
     def test_step(self, batch, batch_idx):
         self.grid_coords = self.grid_coords.to(self.device)
         grid_sdf, gt_grid_contact = batch['localGrid'][..., 0], batch['localGrid'][..., 1:]
-        loss, recon_grid_contact, perplexity = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
+        recon_grid_contact, z_e, obj_feat = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
         recon_grid_contact = recon_grid_contact.permute(0, 2, 3, 4, 1)
         batch_size = grid_sdf.shape[0]
 
@@ -108,16 +125,17 @@ class LGTrainer(L.LightningModule):
             self.handcse,
             gt_grid_contact[..., 0].view(batch_size, -1), gt_grid_contact[..., 1:].view(batch_size, -1, gt_grid_contact.shape[-1]-1),
             grid_coords=self.grid_coords.view(1, -1, 3).repeat(batch_size, 1, 1),
-            mask_th = 0.01
+            mask_th = 0.02
         )
         gt_geoms = self.visualize_grid_and_hand(
-            grid_coords=self.grid_coords.view(1, -1, 3).repeat(batch_size, 1, 1),
+            grid_coords=self.grid_coords.view(-1, 3),
             grid_contact=gt_grid_contact[..., 0].view(batch_size, -1),
             pred_hand_verts=gt_rec_hand_verts,
             hand_faces=self.mano_layer.th_faces,
-            pred_mask=gt_rec_verts_mask,
+            pred_mask=batch['handVertMask'],
+            # pred_mask=gt_rec_verts_mask,
             gt_hand_verts=batch['nHandVerts'],
-            gt_mask=gt_rec_verts_mask,
+            gt_mask=batch['handVertMask'],
             batch_idx=0
         )
 
@@ -126,16 +144,18 @@ class LGTrainer(L.LightningModule):
             self.handcse,
             recon_grid_contact[..., 0].reshape(batch_size, -1),
             recon_grid_contact[..., 1:].reshape(batch_size, -1, gt_grid_contact.shape[-1] - 1),
-            grid_coords=self.grid_coords.view(1, -1, 3).repeat(batch_size, 1, 1)
+            grid_coords=self.grid_coords.view(1, -1, 3).repeat(batch_size, 1, 1),
+            mask_th=0.02
         )
         pred_geoms = self.visualize_grid_and_hand(
             grid_coords=self.grid_coords.view(-1, 3),
             grid_contact=recon_grid_contact[..., 0].view(batch_size, -1),
             pred_hand_verts=pred_hand_verts,
             hand_faces=self.mano_layer.th_faces,
-            pred_mask=pred_verts_mask,
+            pred_mask=batch['handVertMask'],
+            # pred_mask=pred_verts_mask,
             gt_hand_verts=batch['nHandVerts'],
-            gt_mask=gt_rec_verts_mask,
+            gt_mask=batch['handVertMask'],
             batch_idx=0
         )
         all_geoms = gt_geoms + [g.translate((self.cfg.msdf.scale * 3, 0, 0)) for g in pred_geoms]
@@ -160,7 +180,7 @@ class LGTrainer(L.LightningModule):
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr)
         return optimizer
     
-    def loss_net(self, x, x_hat, z_e, pred_hand_verts, gt_hand_verts, gt_verts_mask):
+    def loss_net(self, x, x_hat, z_e, pred_hand_verts, gt_hand_verts, gt_verts_mask, proc='train'):
         """
         Compute the loss for training the GRIDAE
         1. Reconstruction loss between x and x_hat
@@ -177,11 +197,11 @@ class LGTrainer(L.LightningModule):
         w_rec = self.loss_weights.w_rec if self.current_epoch >= self.cfg.train.rec_loss_start_epoch else 0.0
 
         loss_dict = {
-            'contact_loss': contact_loss,
-            'cse_loss': cse_loss,
-            'kl_loss': kl_loss,
-            'rec_loss': rec_loss,
-            'total_loss': self.loss_weights.w_contact * contact_loss + self.loss_weights.w_cse * cse_loss\
+            f'{proc}/contact_loss': contact_loss,
+            f'{proc}/cse_loss': cse_loss,
+            f'{proc}/kl_loss': kl_loss,
+            f'{proc}/rec_loss': rec_loss,
+            f'{proc}/total_loss': self.loss_weights.w_contact * contact_loss + self.loss_weights.w_cse * cse_loss\
                 + self.loss_weights.w_kl * kl_loss + w_rec * rec_loss
         }
         return loss_dict
