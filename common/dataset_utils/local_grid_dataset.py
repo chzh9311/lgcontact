@@ -12,6 +12,7 @@ from scipy.spatial.transform import Rotation as R
 from pysdf import SDF
 from lightning import LightningDataModule
 from tqdm import tqdm
+import h5py
 
 from common.utils.geometry import sdf_to_contact
 from common.msdf.utils.msdf import calc_local_grid_1pt
@@ -97,12 +98,17 @@ class LocalGridDataset(Dataset):
             th_trans=hdata['transl'][sample_idx][None, :])
         nhandV = handV[0].detach().cpu().numpy() - obj_sample_pt[np.newaxis, :]
 
-        grid_data_raw = np.load(osp.join(self.preprocessed_dir, self.dataset_name, self.split,
-                                         f'local_grid_values_{self.grid_scale*1000:.1f}mm_every{self.downsample_rate}', f'{sample_idx:08d}_local_grid.npz'))
-        verts_mask, grid_mask = grid_data_raw['verts_mask'][point_idx], grid_data_raw['grid_mask']
-        # Convert unmasked point_idx to masked array index
-        masked_point_idx = np.searchsorted(np.where(grid_mask)[0], point_idx)
-        grid_data = grid_data_raw['grid_data'][masked_point_idx]
+        grid_file_path = osp.join(self.preprocessed_dir, self.dataset_name, self.split,
+                                  f'local_grid_values_{self.grid_scale*1000:.1f}mm_every{self.downsample_rate}',
+                                  f'{sample_idx:08d}_local_grid.h5')
+        with h5py.File(grid_file_path, 'r') as grid_data_raw:
+            verts_mask = grid_data_raw['verts_mask'][point_idx]
+            grid_mask = grid_data_raw['grid_mask'][:]
+            # Convert unmasked point_idx to masked array index
+            masked_point_idx = np.sum(grid_mask[:point_idx]).item()
+            # masked_point_idx = np.searchsorted(np.where(grid_mask)[0], point_idx)
+            grid_data = grid_data_raw['grid_data'][masked_point_idx]
+
         # hand_mesh = trimesh.Trimesh(vertices=nhandV, faces=self.close_mano_faces, process=False)
         # grid_data, verts_mask = calc_local_grid_1pt(self.normalized_coords.numpy(), obj_mesh, hand_mesh,
         #                                         self.kernel_size, self.grid_scale, self.hand_cse)
@@ -111,7 +117,8 @@ class LocalGridDataset(Dataset):
         grid_data[:, :, :, 1] = sdf_to_contact(grid_data[:, :, :, 1] / (self.grid_scale / (self.kernel_size-1)), None, method=2)
         grid_data[:, :, :, 0] = grid_data[:, :, :, 0] / self.grid_scale / np.sqrt(3)  # Normalize SDF
 
-        sample = {'localGrid': grid_data,
+        sample = {
+                  'localGrid': grid_data,
                   'objSamplePt': obj_sample_pt,
                   'objSampleNormal': obj_sample_normal,
                   'objRot': obj_rot,
