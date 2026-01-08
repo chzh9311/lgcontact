@@ -80,8 +80,6 @@ class LGTrainer(L.LightningModule):
                 pred_hand_verts=batch['nHandVerts'],
                 hand_faces=self.mano_layer.th_faces,
                 pred_mask=batch['handVertMask'],
-                gt_mask=batch['handVertMask'],
-                gt_hand_verts=batch['nHandVerts'],
                 batch_idx=0
             )
             pred_geoms = self.visualize_grid_and_hand(
@@ -100,7 +98,7 @@ class LGTrainer(L.LightningModule):
             else:
                 gt_img = geom_to_img(gt_geoms, w=400, h=400)
                 pred_img = geom_to_img(pred_geoms, w=400, h=400)
-                img = np.concatenate([gt_img, pred_img], axis=1)
+                img = np.concatenate([gt_img, pred_img], axis=0)
                 # Log image - works for both WandbLogger and TensorBoardLogger
                 if hasattr(self.logger, 'experiment'):
                     if hasattr(self.logger.experiment, 'add_image'):
