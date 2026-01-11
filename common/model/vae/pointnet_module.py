@@ -122,9 +122,10 @@ class LatentEncoder(nn.Module):
     def __init__(self, in_dim, dim, out_dim):
         super().__init__()
         self.block = ResnetBlockFC(size_in=in_dim, size_out=dim, size_h=dim)
+        self.relu = nn.ReLU(True)
         self.fc_mean = nn.Linear(dim, out_dim)
         self.fc_logstd = nn.Linear(dim, out_dim)
 
     def forward(self, x):
-        x = self.block(x, final_nl=True)
+        x = self.block(self.relu(x), final_nl=True)
         return self.fc_mean(x), self.fc_logstd(x)

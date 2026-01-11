@@ -7,6 +7,7 @@ import datetime
 import importlib
 from common.dataset_utils.datamodules import LocalGridDataModule
 from common.model.lgtrainer import LGTrainer
+from lightning.pytorch.callbacks import ModelCheckpoint
 # from common.model.gridvqvae.gridvqvae import GRIDVQVAE
 
 # Register OmegaConf resolvers for arithmetic operations
@@ -36,13 +37,21 @@ def main(cfg):
     model_module = importlib.import_module(f"common.model.{model_name.lower()}.{model_name.lower()}")
     model_class = getattr(model_module, model_name)
     model = model_class(cfg.ae)
+    checkpoint_callback = ModelCheckpoint(
+        monitor='val/total_loss',
+        dirpath=cfg.checkpoint.dirpath,
+        filename=cfg.checkpoint.filename + '-{epoch:02d}-{val/total_loss:.4f}',
+        save_top_k=cfg.checkpoint.save_top_k,
+        mode='min',
+    )
     # input = torch.randn(3, cfg.ae.in_dim, 8, 8, 8)
     # embedding_loss, recon, perplexity = model(input, verbose=True)
     data_module = LocalGridDataModule(cfg)
     if cfg.run_phase == 'train':
         pl_trainer = LGTrainer(model, cfg)
-        trainer = L.Trainer(**cfg.trainer, logger=logger)
-        trainer.fit(pl_trainer, datamodule=data_module)
+        trainer = L.Trainer(**cfg.trainer, logger=logger, callbacks=[checkpoint_callback])
+        # trainer.fit(pl_trainer, datamodule=data_module)
+        trainer.fit(pl_trainer, datamodule=data_module, ckpt_path=cfg.train.get('resume_ckpt', None))
     else:
         pl_trainer = LGTrainer.load_from_checkpoint(cfg.ckpt_path, model=model, cfg=cfg)
         trainer = L.Trainer(**cfg.trainer, logger=logger)

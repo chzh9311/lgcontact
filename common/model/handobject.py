@@ -427,13 +427,13 @@ class HandObject:
         return ret_img
 
 
-def recover_hand_verts_from_contact(handcse, grid_contact, grid_cse, grid_coords, mask_th=0.01):
+def recover_hand_verts_from_contact(handcse, gt_face_idx, grid_contact, grid_cse, grid_coords, mask_th=0.01):
     """
     :param grid_contact: (B, N) contact values
     :param grid_cse: (B, N, D) contact signature embeddings
     :param grid_coords: (B, N, 3)
     """
-    targetWverts = handcse.emb2Wvert(grid_cse)
+    targetWverts = handcse.emb2Wvert(grid_cse, gt_face_idx)
     # verts_mask = torch.sum(targetWverts, dim=1) > 0.01  # (B, 778)
     weight = (targetWverts * grid_contact.unsqueeze(-1)).transpose(-1, -2)  # (B, 778, K^3)
     verts_mask = torch.sum(weight, dim=-1) > mask_th  # (B, 778)

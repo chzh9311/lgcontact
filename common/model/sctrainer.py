@@ -253,7 +253,7 @@ class SCTrainer(L.LightningModule):
             for i in range(len(next(iter(result.values())))):
                 sample_metrics = {f"{metric_name}": float(metric_values[i])
                                  for metric_name, metric_values in result.items()}
-                wandb.log(sample_metrics)
+                wandb.log(sample_metrics, commit=False)
             # Visualize some samples
 
             vis_idx = 0
@@ -267,7 +267,7 @@ class SCTrainer(L.LightningModule):
                 gt_img = handobject.vis_img(vis_idx, 250, 250, obj_templates=obj_templates, draw_maps=False)
                 img = np.concatenate((gt_img, img), axis=0)
 
-            wandb.log({f'test/sampled_grasp': wandb.Image(img)})
+            wandb.log({f'test/sampled_grasp': wandb.Image(img)}, commit=False)
         
         else:
             print(result)
@@ -324,7 +324,7 @@ class SCTrainer(L.LightningModule):
 
         # Log final metrics to wandb
         if not self.debug:
-            wandb.log(final_metrics)
+            wandb.log(final_metrics, commit=False)
 
         # with open('logs/grasp_results/grab_Obj_hulls.pkl', 'wb') as f:
         #     pickle.dump(self.obj_hulls, f)

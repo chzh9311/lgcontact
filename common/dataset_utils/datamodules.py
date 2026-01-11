@@ -4,6 +4,7 @@ import importlib
 import numpy as np
 import torch
 import trimesh
+import h5py
 from torch.utils.data import DataLoader
 from lightning import LightningDataModule
 from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
@@ -14,6 +15,7 @@ from multiprocessing.pool import Pool
 
 from common.msdf.utils.msdf import calculate_contact_mask, calc_local_grid_all_pts
 from common.msdf.simplified_msdf import mesh2msdf
+from common.manopth.manopth.manolayer import ManoLayer
 
 class LocalGridDataModule(LightningDataModule):
     def __init__(self, cfg):
@@ -25,9 +27,10 @@ class LocalGridDataModule(LightningDataModule):
         self.val_batch_size = cfg.val.batch_size
         self.test_batch_size = cfg.test.batch_size
         self.hand_cse = torch.load(cfg.data.get('hand_cse_path', 'data/misc/hand_cse.ckpt'))['state_dict']['embedding_tensor'].detach().cpu().numpy()
+        self.mano_layer = ManoLayer(mano_root=cfg.data.mano_root, side='right', use_pca=False, ncomps=45, flat_hand_mean=True)
         self.module = importlib.import_module(f'common.dataset_utils.{cfg.data.dataset_name}_dataset')
         self.dataset_class = getattr(self.module, cfg.data.dataset_name.upper() + 'LocalGridDataset')
-        self.close_mano_faces = np.load(osp.join('data', 'misc', 'closed_mano_r_faces.npy'), allow_pickle=True)
+        self.mano_faces = self.mano_layer.th_faces.numpy()
         kernel_size = self.cfg.msdf.kernel_size
         coords = torch.tensor([(i, j, k) for i in range(kernel_size)
                                     for j in range(kernel_size)
@@ -40,7 +43,7 @@ class LocalGridDataModule(LightningDataModule):
         dump local training data to disk
         """
         data_cfg = deepcopy(self.cfg)
-        for split in ['train', 'val', 'test']:
+        for split in ['train', 'val']:
         # for split in ['val']:
             masks = []
             os.makedirs(osp.join(self.preprocessed_dir, 'grab', split), exist_ok=True)
@@ -90,6 +93,8 @@ class LocalGridDataModule(LightningDataModule):
                 os.makedirs(local_grid_dir, exist_ok=True)
                 pool = Pool(processes=20)
                 for idx, sample in tqdm(enumerate(loader), total=len(loader), desc="Preparing local grid data..."):
+                    if split == 'train' and idx < 449:
+                        continue
                     obj_samples = sample['objSamplePts'].numpy() # (B, N, 3)
                     hand_verts = sample['handVerts'].numpy() # (B, H, 3)
 
@@ -109,11 +114,14 @@ class LocalGridDataModule(LightningDataModule):
                         obj_meshes.append(obj_mesh)
 
                     param_list = [{'contact_points': obj_samples[i], 'normalized_coords': self.normalized_coords.numpy(),
-                                'obj_mesh': obj_meshes[i], 'hand_mesh': trimesh.Trimesh(vertices=hand_verts[i], faces=self.close_mano_faces, process=False),
+                                'obj_mesh': obj_meshes[i], 'hand_mesh': trimesh.Trimesh(vertices=hand_verts[i], faces=self.mano_faces, process=False),
                                 'kernel_size': self.cfg.msdf.kernel_size, 'grid_scale': self.cfg.msdf.scale, 'hand_cse': self.hand_cse,
                                 'idx': idx * loader.batch_size + i, 'save_dir': local_grid_dir,
                                 } for i in range(len(obj_names))]
                     pool.map(self.calc_and_save_local_grid, param_list)
+                    # for param in tqdm(param_list):
+                    #     print(f"processing sample idx: {param['idx']}")
+                    #     self.calc_and_save_local_grid(param)
 
                 pool.close()
                 pool.join()
@@ -121,10 +129,10 @@ class LocalGridDataModule(LightningDataModule):
             preprocessed_mask_file = osp.join(self.preprocessed_dir, 'grab', split, f'local_grid_masks_{self.cfg.msdf.scale*1000:.1f}mm_every{self.cfg.downsample_rate[split]}.npy')
             if not osp.exists(preprocessed_mask_file):
                 for i in tqdm(range(len(os.listdir(local_grid_dir))), desc="Collecting local grid masks..."):
-                    f = osp.join(local_grid_dir, f'{i:08d}_local_grid.npz')
-                    data = np.load(f)
-                    mask = data['grid_mask']
-                    masks.append(mask)
+                    f = osp.join(local_grid_dir, f'{i:08d}_local_grid.h5')
+                    with h5py.File(f, 'r') as data:
+                        mask = data['grid_mask'][:]
+                        masks.append(mask)
                     # if cnt > next_save_cnt:
                     #     concatenated_grids = np.concatenate(result['local_grids'], axis=0)
                     #     concatenated_masks = np.concatenate(result['mask'], axis=0)
@@ -153,10 +161,15 @@ class LocalGridDataModule(LightningDataModule):
         local_grid_dir = param['save_dir']
         grid_data, verts_mask, grid_mask, nn_face_idx, nn_point = calc_local_grid_all_pts(contact_points, normalized_coords, obj_mesh, hand_mesh,
                                                         kernel_size, grid_scale, hand_cse)
-        save_path = osp.join(local_grid_dir, f'{idx:08d}_local_grid.npz')
-        np.savez_compressed(save_path, grid_data=grid_data, verts_mask=verts_mask, grid_mask=grid_mask, nn_face_idx=nn_face_idx, nn_point=nn_point)
+        save_path = osp.join(local_grid_dir, f'{idx:08d}_local_grid.h5')
+        with h5py.File(save_path, 'w') as f:
+            f.create_dataset('grid_data', data=grid_data, compression='gzip', compression_opts=4)
+            f.create_dataset('verts_mask', data=verts_mask, compression='gzip', compression_opts=4)
+            f.create_dataset('grid_mask', data=grid_mask, compression='gzip', compression_opts=4)
+            f.create_dataset('nn_face_idx', data=nn_face_idx, compression='gzip', compression_opts=4)
+            f.create_dataset('nn_point', data=nn_point, compression='gzip', compression_opts=4)
         # return grid_mask
-        # print('Saved local grid data to ', save_path)
+        print('Saved local grid data to ', save_path)
 
     def setup(self, stage: str):
         if stage == 'fit':

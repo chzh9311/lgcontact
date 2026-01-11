@@ -36,12 +36,14 @@ class LocalGridDataset(Dataset):
         if not osp.exists(mask_file):
             raise FileNotFoundError(f"Mask file not found: {mask_file}. Please run LocalGridDataModule.prepare_data() first.")
         self.masks = np.load(mask_file)
-        self.hand_cse = torch.load(cfg.get('hand_cse_path', 'data/misc/hand_cse.ckpt'), weights_only=True)['state_dict']['embedding_tensor'].detach().cpu().numpy()
+        hand_cse_sd = torch.load(cfg.get('hand_cse_path', 'data/misc/hand_cse.ckpt'), weights_only=True)['state_dict']
+        self.hand_cse = hand_cse_sd['embedding_tensor'].detach().cpu().numpy()
+        self.mano_faces = hand_cse_sd['cano_faces'].detach().cpu().numpy()
         self.obj_info = {}
         all_samples = np.stack(np.meshgrid(np.arange(self.masks.shape[0]), np.arange(self.masks.shape[1]), indexing='ij'), axis=-1)
         self.idx2sample = all_samples[self.masks, :].reshape(-1, 2)
-        ## Downsample data
         self.close_mano_faces = np.load(osp.join('data', 'misc', 'closed_mano_r_faces.npy'), allow_pickle=True)
+        ## Downsample data
         # self.idx2sample = self.idx2sample[::cfg.downsample_rate[split], :]
         coords = torch.tensor([(i, j, k) for i in range(self.kernel_size)
                                     for j in range(self.kernel_size)
@@ -108,6 +110,20 @@ class LocalGridDataset(Dataset):
             masked_point_idx = np.sum(grid_mask[:point_idx]).item()
             # masked_point_idx = np.searchsorted(np.where(grid_mask)[0], point_idx)
             grid_data = grid_data_raw['grid_data'][masked_point_idx]
+            ## TODO: do shape transformation for nn_face_idx and nn_point when saving data.
+            nn_face_idx = grid_data_raw['nn_face_idx'][masked_point_idx].reshape(self.kernel_size**3)
+            nn_point= grid_data_raw['nn_point'][masked_point_idx].reshape(self.kernel_size**3, 3)
+            nn_point = nn_point - obj_sample_pt[np.newaxis, :]
+
+        nn_vert_idx = self.mano_faces[nn_face_idx] # N,  3
+        face_verts = nhandV[nn_vert_idx]  # (N, 3, 3)
+        face_cse = self.hand_cse[nn_vert_idx]  # (M * K^3, 3, cse_dim)
+        w = np.linalg.inv(face_verts.transpose((0, 2, 1))) @ nn_point[:, :, np.newaxis]  # (M * K^3, 3, 1)
+        # Make sure weights are all positive and normalized
+        w = np.clip(w, 0, 1)
+        w = w / np.sum(w, axis=1, keepdims=True)  # (M * K^3, 3, 1)
+
+        grid_hand_cse = np.sum(face_cse * w, axis=1).reshape(self.kernel_size, self.kernel_size, self.kernel_size, -1)  # (N, cse_dim)
 
         # hand_mesh = trimesh.Trimesh(vertices=nhandV, faces=self.close_mano_faces, process=False)
         # grid_data, verts_mask = calc_local_grid_1pt(self.normalized_coords.numpy(), obj_mesh, hand_mesh,
@@ -116,6 +132,7 @@ class LocalGridDataset(Dataset):
         grid_data = torch.from_numpy(grid_data).float()
         grid_data[:, :, :, 1] = sdf_to_contact(grid_data[:, :, :, 1] / (self.grid_scale / (self.kernel_size-1)), None, method=2)
         grid_data[:, :, :, 0] = grid_data[:, :, :, 0] / self.grid_scale / np.sqrt(3)  # Normalize SDF
+        grid_data = torch.cat([grid_data, torch.from_numpy(grid_hand_cse).float()], dim=-1).numpy()
 
         sample = {
                   'localGrid': grid_data,
@@ -126,6 +143,8 @@ class LocalGridDataset(Dataset):
                   'nHandVerts': nhandV,
                   'handVertMask': verts_mask,
                   'obj_name': obj_name,
+                  'face_idx': nn_face_idx,
+                  'cse_weights': w.squeeze(-1),
                 }
 
         return sample

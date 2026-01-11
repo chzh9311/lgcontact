@@ -71,7 +71,7 @@ def vis_local_grid_interact(cfg):
         grid_data = batch['localGrid']  # (B, K, K, K, C)
         batch_size = grid_data.shape[0]
         for b in range(10):
-            break
+            # break
             # Extract data for this sample
             local_grid = grid_data[b].cpu().numpy()  # (K, K, K, C)
             contact_point = batch['objSamplePt'][b].cpu().numpy()  # (3,)

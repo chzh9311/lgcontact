@@ -316,12 +316,12 @@ def calc_local_grid_1pt(normalized_coords, obj_mesh, hand_mesh, kernel_size, gri
     # w = w / np.sum(w, axis=1, keepdims=True)  #
 
     ## Use linear invert
-    w = np.linalg.inv(face_verts.transpose((0, 2, 1))) @ nn_point[:, :, np.newaxis]  # (N, 3, 1)
-    ## make sure weights are all positive
-    w = np.clip(w, 0, 1)
-    w = w / np.sum(w, axis=1, keepdims=True)  # (N, 3, 1)
+    # w = np.linalg.inv(face_verts.transpose((0, 2, 1))) @ nn_point[:, :, np.newaxis]  # (N, 3, 1)
+    # ## make sure weights are all positive
+    # w = np.clip(w, 0, 1)
+    # w = w / np.sum(w, axis=1, keepdims=True)  # (N, 3, 1)
 
-    grid_hand_cse = np.sum(face_cse * w, axis=1).reshape(kernel_size, kernel_size, kernel_size, -1)  # (N, cse_dim)
+    # grid_hand_cse = np.sum(face_cse * w, axis=1).reshape(kernel_size, kernel_size, kernel_size, -1)  # (N, cse_dim)
 
     grid_distance = nn_dist.reshape(kernel_size, kernel_size, kernel_size, 1)
 
@@ -380,24 +380,26 @@ def calc_local_grid_all_pts(contact_points, normalized_coords, obj_mesh, hand_me
     nn_dist, nn_face_idx, nn_point = nn_dist_to_mesh(grid_points_all, hand_mesh)
 
     # Map face indices to get CSE using barycentric interpolation
-    face_vert_idx = hand_mesh.faces[nn_face_idx]  # (M * K^3, 3)
-    face_verts = hand_mesh.vertices[face_vert_idx]  # (M * K^3, 3, 3)
-    face_cse = hand_cse[face_vert_idx]  # (M * K^3, 3, cse_dim)
+    # face_vert_idx = hand_mesh.faces[nn_face_idx]  # (M * K^3, 3)
+    # face_verts = hand_mesh.vertices[face_vert_idx]  # (M * K^3, 3, 3)
+    # face_cse = hand_cse[face_vert_idx]  # (M * K^3, 3, cse_dim)
 
     # Calculate barycentric weights using linear invert
-    w = np.linalg.inv(face_verts.transpose((0, 2, 1))) @ nn_point[:, :, np.newaxis]  # (M * K^3, 3, 1)
-    # Make sure weights are all positive and normalized
-    w = np.clip(w, 0, 1)
-    w = w / np.sum(w, axis=1, keepdims=True)  # (M * K^3, 3, 1)
+    # w = np.linalg.inv(face_verts.transpose((0, 2, 1))) @ nn_point[:, :, np.newaxis]  # (M * K^3, 3, 1)
+    # # Make sure weights are all positive and normalized
+    # w = np.clip(w, 0, 1)
+    # # w = w / np.sum(w, axis=1, keepdims=True)  # (M * K^3, 3, 1)
 
-    # Interpolate CSE values
-    grid_hand_cse = np.sum(face_cse * w, axis=1).reshape(M, kernel_size, kernel_size, kernel_size, -1)  # (M, K, K, K, cse_dim)
+    # # Interpolate CSE values
+    # grid_hand_cse = np.sum(face_cse * w, axis=1).reshape(M, kernel_size, kernel_size, kernel_size, -1)  # (M, K, K, K, cse_dim)
 
     # Reshape distances
     grid_distance = nn_dist.reshape(M, kernel_size, kernel_size, kernel_size, 1)  # (M, K, K, K, 1)
+    nn_face_idx = nn_face_idx.reshape(M, kernel_size, kernel_size, kernel_size)  # (M, K, K, K)
+    nn_point = nn_point.reshape(M, kernel_size, kernel_size, kernel_size, 3)  # (M, K, K, K, 3)
 
     # Concatenate all features
-    local_grids = np.concatenate([grid_sdfs, grid_distance, grid_hand_cse], axis=-1)  # (M, K, K, K, 2 + cse_dim)
+    local_grids = np.concatenate([grid_sdfs, grid_distance], axis=-1)  # (M, K, K, K, 2)
 
     return local_grids, verts_mask, grid_mask, nn_face_idx, nn_point
 

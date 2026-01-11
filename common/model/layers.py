@@ -13,6 +13,20 @@ class MaxPool3D(nn.Module):
         return self.pool(x)
 
 
+class FiLM(nn.Module):
+    def __init__(self, input_dim, num_features):
+        super(FiLM, self).__init__()
+        self.num_features = num_features
+        self.gamma_layer = nn.Linear(input_dim, num_features)
+        self.beta_layer = nn.Linear(input_dim, num_features)
+
+    def forward(self, x, cond):
+        gamma = self.gamma_layer(cond.flatten())
+        beta = self.beta_layer(cond.flatten())
+        out = gamma * x + beta
+        return out
+
+
 class UpSample3D(nn.Module):
     def __init__(self, scale_factor, mode='nearest'):
         super(UpSample3D, self).__init__()
@@ -128,7 +142,7 @@ class ResnetBlockFC(nn.Module):
         nn.init.zeros_(self.fc_1.weight)
 
     def forward(self, x, final_nl=False):
-        net = self.fc_0(self.actvn(x))
+        net = self.fc_0(x)
         dx = self.fc_1(self.actvn(net))
         if self.shortcut is not None:
             x_s = self.shortcut(x)

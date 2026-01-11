@@ -19,6 +19,4 @@ msdf:
   kernel_size: ${msdf.kernel_size}
   scale: ${msdf.scale}
 
-pick_every_n_frames: 1
-
 num_workers: 16

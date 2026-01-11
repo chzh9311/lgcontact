@@ -233,7 +233,7 @@ class MLCTrainer(L.LightningModule):
             for i in range(len(next(iter(result.values())))):
                 sample_metrics = {f"sample/{metric_name}": float(metric_values[i])
                                  for metric_name, metric_values in result.items()}
-                wandb.log(sample_metrics)
+                wandb.log(sample_metrics, commit=False)
 
             # Option 2 (alternative): Use wandb Table for structured logging
             # table_data = [[obj_names[i]] + [float(result[m][i]) for m in result.keys()]
@@ -280,7 +280,7 @@ class MLCTrainer(L.LightningModule):
 
         # Log final metrics to wandb
         if not self.debug:
-            wandb.log(final_metrics)
+            wandb.log(final_metrics, commit=False)
 
         # return final_metrics
     

@@ -48,17 +48,30 @@ class HandCSE(nn.Module):
         emb_features = self.embedding_tensor[verts_idx]
         return emb_features
     
-    def emb2Wvert(self, emb_features):
+    def _nn_face_idx(self, emb_features):
         """
-        Find the nearest triangular surface and compute weights for each vertex on the triangle
+        Find the nearest triangular surface for given embedding features
         Args:
             emb_features: (B, n_pts, emb_dim) tensor of embedding features
         Returns:
-            W: (B, n_pts, n_verts) tensor of weights for each vertex
+            face_idx: (B, n_pts) tensor of nearest face indices
         """
         triangle_cse = self.embedding_tensor[self.cano_faces].mean(dim=1)  # (n_faces, emb_dim)
         dists = torch.cdist(emb_features, triangle_cse)  # (B, n_pts, n_faces)
         face_idx = dists.argmin(dim=2)  # (B, n_pts)
+        return face_idx
+    
+    def emb2Wvert(self, emb_features, face_idx=None):
+        """
+        Find the nearest triangular surface and compute weights for each vertex on the triangle
+        Args:
+            emb_features: (B, n_pts, emb_dim) tensor of embedding features
+            face_idx: (B, n_pts) tensor of nearest face indices (optional). If not provided, will be approximately computed.
+        Returns:
+            W: (B, n_pts, n_verts) tensor of weights for each vertex
+        """
+        if face_idx is None:
+            face_idx = self._nn_face_idx(emb_features)  # (B, n_pts)
         vert_idx = self.cano_faces[face_idx]  # (B, n_pts, 3)
         vert_cse = self.embedding_tensor[vert_idx]  # (B, n_pts, 3, emb_dim)
         # weights = F.softmax(-torch.cdist(emb_features.unsqueeze(2), vert_cse).squeeze(2) * 16, dim=2)  # (B, n_pts, 3)
@@ -75,6 +88,25 @@ class HandCSE(nn.Module):
         W.scatter_add_(2, vert_idx, weights)
         # W = F.softmax(-dists*16, dim=2)
         return W
+    
+
+    def cse_rec_loss(self, pred_cse, gt_face_idx, gt_coef):
+        """
+        Compute the CSE reconstruction loss between predicted and ground truth CSE features
+        Args:
+            pred_cse: (B, n_pts, emb_dim) tensor of predicted CSE features
+            gt_cse: (B, n_pts, emb_dim) tensor of ground truth CSE features
+        Returns:
+            loss: scalar tensor of reconstruction loss
+         """
+        # face_idx = self._nn_face_idx(gt_cse)  # (B, n_pts)
+        vert_idx = self.cano_faces[gt_face_idx]  # (B, n_pts, 3)
+        vert_cse = self.embedding_tensor[vert_idx]  # (B, n_pts, 3, emb_dim)
+        pseudo_inv = torch.linalg.inv(vert_cse @ vert_cse.transpose(2, 3) + 1e-6 * torch.eye(3).to(pred_cse.device)) @ vert_cse 
+        # gt_coef = (pseudo_inv @ gt_cse.unsqueeze(3)).squeeze(3)  # (B, n_pts, 3)
+        pred_coef = (pseudo_inv @ pred_cse.unsqueeze(3)).squeeze(3)  # (B, n_pts, 3)
+        loss = F.l1_loss(pred_coef, gt_coef)
+        return loss
 
     
     @staticmethod
