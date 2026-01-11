@@ -16,7 +16,9 @@ class GridDecoder3D(nn.Module):
         self.num_layers = len(h_dims)
         self.init_N = N // 2**(self.num_layers-1)
         self.init_layer = nn.Sequential(
-            nn.Linear(latent_dim, h_dims[0]*(self.init_N)**3),
+            nn.Linear(latent_dim, 2*latent_dim),
+            nn.ReLU(),
+            nn.Linear(2*latent_dim, h_dims[0]*(self.init_N)**3),
             nn.ReLU()
         )
         self.residual_layer = ResidualStack(h_dims[0], res_h_dim=res_h_dim, n_res_layers=n_res_layers)

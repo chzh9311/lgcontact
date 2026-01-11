@@ -101,7 +101,10 @@ class GridEncoder3D(nn.Module):
             self.final_layer = nn.Sequential(
                 ResidualStack(h_dims[-1], res_h_dim=res_h_dim, n_res_layers=n_res_layers),
                 nn.Flatten(),
-                nn.Linear(h_dims[-1]*(N//2**(self.num_layers-1))**3, feat_dim)
+                # ResnetBlockFC(h_dims[-1]*(N//2**(self.num_layers-1))**3, feat_dim, 2 * feat_dim),
+                nn.Linear(h_dims[-1]*(N//2**(self.num_layers-1))**3, 2 * feat_dim),
+                nn.ReLU(),
+                nn.Linear(2 * feat_dim, feat_dim)
             )
 
     def forward(self, x, cond=None):
