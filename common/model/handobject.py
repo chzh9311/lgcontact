@@ -29,7 +29,7 @@ class HandObject:
         else:
             self.mano_layer = mano_layer
 
-        self.hand_faces = np.load("data/misc/closed_mano_r_faces.npy")
+        self.closed_hand_faces = np.load("data/misc/closed_mano_r_faces.npy")
         self.hand_cse = torch.load(cfg.get('hand_cse_path', 'data/misc/hand_cse.ckpt'))['state_dict']['embedding_tensor'].detach().to(self.device)
         self.hand_part_ids = torch.argmax(self.mano_layer.th_weights, dim=-1).detach().cpu().numpy()
         self.hand_verts = None
@@ -99,27 +99,7 @@ class HandObject:
         self.obj_normals = batch['objSampleNormals'].clone().to(self.device).float()
         self.batch_size = self.obj_rot.shape[0]
         # handV, handJ = batch['handVerts'].clone().cpu().numpy(), batch['handJoints'][:, :16].clone().cpu().numpy()
-        # self.hand_models = [trimesh.Trimesh(handV[i], self.hand_faces.copy()) for i in range(handV.shape[0])]
-
-        ## Compute Local grid contact representation
-        if self.contact_unit == 'grid':
-            self.obj_msdf = batch['objMsdf'].clone().to(self.device).float()
-            ml_dist, ml_cse, mask, hand_vert_mask, normalized_coords = msdf2mlcontact(self.obj_msdf, self.hand_verts, self.hand_cse, self.cfg.msdf.kernel_size, self.cfg.msdf.scale)
-            ml_dist[mask] = sdf_to_contact(ml_dist[mask] / (self.cfg.msdf.scale / self.cfg.msdf.kernel_size), None, method=0)
-            # ml_contact[mask, :, :, :, 0] = sdf_to_contact(ml_contact[mask, :, :, :, 0] / (self.cfg.msdf.scale / self.cfg.msdf.num_grids), None, method=0)
-            self.ml_contact = torch.cat([ml_dist.unsqueeze(-1), ml_cse], dim=-1)
-            self.normalized_coords = normalized_coords
-            self.obj_pt_mask = mask
-            self.hand_vert_mask = hand_vert_mask
-
-        elif self.contact_unit == 'point':
-        ## Calculate contacts
-            obj_cmap, _, nn_idx = calculate_contact_capsule(self.hand_verts, self.hand_normals,
-                                                            self.obj_verts, self.obj_normals)
-            self.contact_map = obj_cmap.to(self.device).squeeze(-1)
-            self.pmap = torch.as_tensor(self.hand_part_ids).to(self.device)[nn_idx].squeeze(-1)
-            self.part_map = F.one_hot(self.pmap, 16).float()
-            self.obj2hand_nn_idx = nn_idx.to(self.device)
+        # self.hand_models = [trimesh.Trimesh(handV[i], self.closed_hand_faces.copy()) for i in range(handV.shape[0])]
 
         # hand_frames = batch['handPartT'].clone()
 
@@ -207,6 +187,30 @@ class HandObject:
             self.obj_verts = self.obj_verts - self.obj_com
             self.hand_verts = self.hand_verts - self.obj_com
             self.hand_joints = self.hand_joints - self.obj_com
+        
+        ## Compute Local grid contact representation
+        if self.contact_unit == 'grid':
+            self.obj_msdf = batch['objMsdf'].clone().to(self.device).float()
+            ml_dist, ml_cse, mask, hand_vert_mask, normalized_coords = msdf2mlcontact(self.obj_msdf, self.hand_verts,
+                                                                                      self.hand_cse, self.cfg.msdf.kernel_size, self.cfg.msdf.scale,
+                                                                                      self.mano_layer.th_faces)
+
+            ml_dist[mask] = sdf_to_contact(ml_dist[mask] / (self.cfg.msdf.scale / (self.cfg.msdf.kernel_size-1)), None, method=2)
+            # ml_contact[mask, :, :, :, 0] = sdf_to_contact(ml_contact[mask, :, :, :, 0] / (self.cfg.msdf.scale / self.cfg.msdf.num_grids), None, method=0)
+            self.ml_contact = torch.cat([ml_dist.unsqueeze(-1), ml_cse], dim=-1)
+            self.normalized_coords = normalized_coords
+            self.obj_pt_mask = mask
+            self.hand_vert_mask = hand_vert_mask
+
+        elif self.contact_unit == 'point':
+        ## Calculate contacts
+            obj_cmap, _, nn_idx = calculate_contact_capsule(self.hand_verts, self.hand_normals,
+                                                            self.obj_verts, self.obj_normals)
+            self.contact_map = obj_cmap.to(self.device).squeeze(-1)
+            self.pmap = torch.as_tensor(self.hand_part_ids).to(self.device)[nn_idx].squeeze(-1)
+            self.part_map = F.one_hot(self.pmap, 16).float()
+            self.obj2hand_nn_idx = nn_idx.to(self.device)
+
 
     def load_from_batch_obj_only(self, batch, obj_templates=None, obj_hulls=None):
         """
@@ -242,7 +246,7 @@ class HandObject:
 
     def _load_templates(self, idx, obj_templates, obj_hull=None):
         if self.hand_verts is not None:
-            hand_mesh = trimesh.Trimesh(self.hand_verts[idx].detach().cpu().numpy(), self.hand_faces.copy())
+            hand_mesh = trimesh.Trimesh(self.hand_verts[idx].detach().cpu().numpy(), self.closed_hand_faces.copy())
         else:
             hand_mesh = None
 
@@ -358,7 +362,7 @@ class HandObject:
         """
         hand_verts = recon_hand_verts[vis_idx].detach().cpu().numpy()
         hand_mask = self.hand_vert_mask[vis_idx].detach().cpu().numpy()
-        geometries = extract_masked_mesh_components(hand_verts, self.hand_faces, hand_mask,
+        geometries = extract_masked_mesh_components(hand_verts, self.closed_hand_faces, hand_mask,
                                                     create_geometries=True)
         return geometries
     
