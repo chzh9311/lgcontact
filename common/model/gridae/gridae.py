@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from .encoder import GridEncoder3D
 from .decoder import GridDecoder3D
 from common.msdf.utils.msdf import get_grid
+from common.model.layers import DiagonalGaussianDistribution
 
 class GRIDAE(nn.Module):
     """
@@ -34,7 +35,7 @@ class GRIDAE(nn.Module):
                                      h_dims=cfg.h_dims,
                                      res_h_dim=cfg.res_h_dim,
                                      n_res_layers=cfg.n_res_layers,
-                                     feat_dim=cfg.feat_dim,
+                                     feat_dim=cfg.feat_dim*2,
                                      N=cfg.kernel_size,
                                      condition=True)
         # pass continuous latent vector through discretization bottleneck
@@ -51,19 +52,35 @@ class GRIDAE(nn.Module):
         # else:
         #     self.img_to_embedding_map = None
         self.grid_coords = get_grid(cfg.msdf.kernel_size) * cfg.msdf.scale
+    
+    def encode(self, x, obj_msdf):
+        obj_feat, obj_cond = self.obj_encoder(obj_msdf)
+        z_e, _ = self.encoder(x, cond=obj_cond)
+        posterior = DiagonalGaussianDistribution(z_e)
+        return posterior, obj_feat, obj_cond
+    
+    def decode(self, z, obj_cond):
+        c_hat, cse_hat, _ = self.decoder(z, cond=obj_cond[::-1])
+        x_hat = torch.cat([c_hat, cse_hat], dim=1)
+        return x_hat
 
-    def forward(self, x, obj_msdf):
+    def forward(self, x, obj_msdf, sample_posterior=True):
 
         obj_feat, obj_cond = self.obj_encoder(obj_msdf)
         z_e, _ = self.encoder(x, cond=obj_cond)
+        posterior = DiagonalGaussianDistribution(z_e)
 
+        if sample_posterior:
+            z = posterior.sample()
+        else:
+            z = posterior.mode()
         ## Adding skip connections for object decoder
         # dec_obj_cond = self.obj_decoder(obj_feat, cond=enc_obj_cond[::-1])
 
-        c_hat, cse_hat, _ = self.decoder(z_e, cond=obj_cond[::-1])
+        c_hat, cse_hat, _ = self.decoder(z, cond=obj_cond[::-1])
         x_hat = torch.cat([c_hat, cse_hat], dim=1)
 
-        return x_hat, z_e, obj_feat
+        return x_hat, posterior, obj_feat
     
     def inference(self, z_e, obj_msdf):
         _, obj_cond = self.obj_encoder(obj_msdf)
