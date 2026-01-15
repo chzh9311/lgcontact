@@ -2,6 +2,28 @@
 ## [Unreleased]
 
 
+<a name="v1.0.0"></a>
+## [v1.0.0] - 2026-01-15
+### Feat
+- Version 1 of the diffusion training.
+- Update the gridae to VAE structure.
+- Enable checkpointing according to validation performance.
+- Add an extra linear layer in encoding & decoding.
+- Enable baseline training&testing.
+
+### Fix
+- Fix the problem of unaligned hand & object.
+- Update data loading scripts to allow preprocessing of grid data.
+- Fix the dimension mismatches for gridae test.
+- Fix bugs; Added random seeds for reproducibility.
+
+### Misc
+- Update the arrangement of visualization images.
+
+### Optim
+- Use hdf5 for fast IO instead of npz.
+
+
 <a name="v0.2.0"></a>
 ## [v0.2.0] - 2026-01-04
 ### Feat
@@ -39,6 +61,7 @@
 - Update gitignore.
 
 
-[Unreleased]: /compare/v0.2.0...HEAD
+[Unreleased]: /compare/v1.0.0...HEAD
+[v1.0.0]: /compare/v0.2.0...v1.0.0
 [v0.2.0]: /compare/v0.1.1...v0.2.0
 [v0.1.1]: /compare/v0.1.0...v0.1.1
