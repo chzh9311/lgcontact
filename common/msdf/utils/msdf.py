@@ -364,9 +364,12 @@ def calc_local_grid_all_pts(contact_points, normalized_coords, obj_mesh, hand_me
     # Determine mask using Chebyshev distance for all contact points
     # For each contact point, check which hand vertices are within the grid
     # hand_verts centered at each contact point
-    verts_mask = np.max(np.abs(hand_verts[None, :, :] - contact_points[:, None, :]), axis=-1) < grid_scale  # N x H
+    ho_dist = np.max(np.abs(hand_verts[None, :, :] - contact_points[:, None, :]), axis=-1) 
+    verts_mask = ho_dist < grid_scale  # N x H
     grid_mask = np.any(verts_mask, axis=1) # N
     M = np.sum(grid_mask)
+
+    ho_dist = np.min(ho_dist, axis=1)  # N
 
     grid_points_flat = contact_points[:, None, :] + normalized_coords[None, :, :] * grid_scale  # N x K^3 x 3
     grid_points_all = grid_points_flat[grid_mask].reshape(-1, 3)  # (M * K^3, 3)
@@ -404,7 +407,7 @@ def calc_local_grid_all_pts(contact_points, normalized_coords, obj_mesh, hand_me
     else:
         local_grids = grid_distance  # (M, K, K, K, 1)
 
-    return local_grids, verts_mask, grid_mask, nn_face_idx, nn_point
+    return local_grids, verts_mask, grid_mask, ho_dist, nn_face_idx, nn_point
 
 
 def nn_dist_to_mesh(points: np.ndarray, mesh: trimesh.Trimesh) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -441,7 +444,7 @@ def nn_dist_to_mesh(points: np.ndarray, mesh: trimesh.Trimesh) -> tuple[np.ndarr
     return distances, face_indices, closest_points
 
 
-def msdf2mlcontact(obj_msdf, hand_verts, hand_cse, kernel_size, grid_scale, hand_faces):
+def msdf2mlcontact(obj_msdf, hand_verts, hand_cse, kernel_size, grid_scale, hand_faces, pool=None):
     """
     calculate MLcontact from MSDF and hand vertices.
 
@@ -464,27 +467,35 @@ def msdf2mlcontact(obj_msdf, hand_verts, hand_cse, kernel_size, grid_scale, hand
         device=obj_msdf.device
     )  # B, N, K, K, K, 1 + cse_dim
 
-    obj_pt_mask, hand_vert_mask = [], []
-    for b in range(obj_msdf.shape[0]):
-        # local_grid = calc_local_grid_batch(
-        #     contact_points=centers[b][obj_pt_mask[b]],
-        #     normalized_coords=normalized_coords,
-        #     kernel_size=kernel_size,
-        #     grid_scale=grid_scale,
-        #     hand_verts=hand_verts[b],
-        #     hand_cse=hand_cse,
-        #     device=obj_msdf.device
-        # )  # M, K, K, K, 1 + cse_dim
-        hand_mesh = trimesh.Trimesh(vertices=hand_verts[b].cpu().numpy(), faces=hand_faces.cpu().numpy())
-        local_grid, verts_mask, grid_mask, nn_face_idx, nn_point = calc_local_grid_all_pts(
-            contact_points=centers[b].cpu().numpy(),
-            normalized_coords=normalized_coords.cpu().numpy(),
+    # Prepare shared data (threads share memory, no copying needed)
+    hand_faces_np = hand_faces.cpu().numpy()
+    normalized_coords_np = normalized_coords.cpu().numpy()
+    hand_cse_np = hand_cse.cpu().numpy()
+    centers_np = centers.cpu().numpy()
+    hand_verts_np = hand_verts.cpu().numpy()
+
+    def process_batch(b):
+        """Worker function using shared memory via closure."""
+        hand_mesh = trimesh.Trimesh(vertices=hand_verts_np[b], faces=hand_faces_np)
+        local_grid, verts_mask, grid_mask, ho_dist, nn_face_idx, nn_point = calc_local_grid_all_pts(
+            contact_points=centers_np[b],
+            normalized_coords=normalized_coords_np,
             obj_mesh=None,
             hand_mesh=hand_mesh,
             kernel_size=kernel_size,
             grid_scale=grid_scale,
-            hand_cse=hand_cse.cpu().numpy(),
+            hand_cse=hand_cse_np,
         )
+        return b, local_grid, verts_mask, grid_mask, ho_dist, nn_face_idx, nn_point
+
+    # Execute in parallel or sequentially
+    if pool is not None:
+        results = list(pool.map(process_batch, range(obj_msdf.shape[0])))
+    else:
+        results = [process_batch(b) for b in range(obj_msdf.shape[0])]
+
+    obj_pt_mask, hand_vert_mask, ho_dists = [], [], []
+    for b, local_grid, verts_mask, grid_mask, ho_dist, nn_face_idx, nn_point in results:
         # Convert numpy arrays to torch tensors
         nn_face_idx_t = torch.from_numpy(nn_face_idx.flatten()).to(device=hand_faces.device, dtype=hand_faces.dtype)
         nn_point_t = torch.from_numpy(nn_point.reshape(-1, 3)).to(device=hand_verts.device, dtype=hand_verts.dtype)
@@ -508,9 +519,12 @@ def msdf2mlcontact(obj_msdf, hand_verts, hand_cse, kernel_size, grid_scale, hand
         local_grid_dist[b][grid_mask] = local_grid_t
         local_grid_cse[b][grid_mask] = grid_hand_cse.reshape(-1, kernel_size, kernel_size, kernel_size, hand_cse.shape[-1])
         obj_pt_mask.append(grid_mask)
+        ho_dists.append(ho_dist)
         hand_vert_mask.append(verts_mask)
 
     obj_pt_mask = torch.from_numpy(np.array(obj_pt_mask)).to(device=obj_msdf.device)
     hand_vert_mask = torch.from_numpy(np.array(hand_vert_mask)).to(device=obj_msdf.device)
+    ho_dists = torch.from_numpy(np.array(ho_dists)).to(device=obj_msdf.device).float()
     
-    return local_grid_dist, local_grid_cse, obj_pt_mask, hand_vert_mask, normalized_coords
+    return local_grid_dist, local_grid_cse, obj_pt_mask, hand_vert_mask, ho_dists, normalized_coords
+

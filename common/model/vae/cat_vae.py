@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 from common.manopth.manopth.manolayer import ManoLayer
 from common.model.hand_cse.hand_cse import HandCSE
-from .pointnet_module import Pointnet, PointNet2seg, LatentEncoder
+from ..pointnet_module import Pointnet, PointNet2seg, LatentEncoder
 
 
 class CAT_VAE(nn.Module):

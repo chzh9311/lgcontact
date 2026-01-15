@@ -159,7 +159,7 @@ class LocalGridDataModule(LightningDataModule):
         hand_cse = param['hand_cse']
         idx = param['idx']
         local_grid_dir = param['save_dir']
-        grid_data, verts_mask, grid_mask, nn_face_idx, nn_point = calc_local_grid_all_pts(contact_points, normalized_coords, obj_mesh, hand_mesh,
+        grid_data, verts_mask, grid_mask, _, nn_face_idx, nn_point = calc_local_grid_all_pts(contact_points, normalized_coords, obj_mesh, hand_mesh,
                                                         kernel_size, grid_scale, hand_cse)
         save_path = osp.join(local_grid_dir, f'{idx:08d}_local_grid.h5')
         with h5py.File(save_path, 'w') as f:

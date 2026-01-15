@@ -83,6 +83,9 @@ class HandCSE(nn.Module):
         weights = torch.linalg.inv(vert_cse @ vert_cse.transpose(2, 3) + 1e-6 * torch.eye(3).to(emb_features.device))\
               @ vert_cse @ emb_features.unsqueeze(3)  # (B, n_pts, 3, emb_dim) -> (B, n_pts, 3, 1)
         weights = weights.squeeze(3)  # (B, n_pts, 3)
+        ## Regularization
+        weights = torch.clamp(weights, min=0.0, max=1.0)
+        weights = weights / (weights.sum(dim=2, keepdim=True) + 1e-8)
 
         W = torch.zeros(emb_features.shape[0], emb_features.shape[1], self.n_verts).to(emb_features.device)  # (B, n_pts, n_verts)
         W.scatter_add_(2, vert_idx, weights)

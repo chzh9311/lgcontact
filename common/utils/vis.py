@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 import trimesh
 import open3d as o3d
 from matplotlib import pyplot as plt
@@ -179,7 +180,7 @@ def extract_masked_mesh_components(hand_verts, hand_faces, vertex_mask,
     return geometries
 
 
-def geom_to_img(vis_geoms, w, h, scale=0.07):
+def geom_to_img(vis_geoms, w, h, scale=0.07, half_range=None):
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
     import matplotlib
     matplotlib.use('Agg')  # Use non-interactive backend
@@ -192,8 +193,10 @@ def geom_to_img(vis_geoms, w, h, scale=0.07):
     for geom in vis_geoms:
         if type(geom) is dict:
             o3d_geom = geom['geometry']
+            geom_alpha = geom.get('alpha', 0.95)  # Get custom alpha or use default
         else:
             o3d_geom = geom
+            geom_alpha = 0.95  # Default alpha
 
         if isinstance(o3d_geom, o3d.geometry.TriangleMesh):
             vertices = np.asarray(o3d_geom.vertices)
@@ -209,7 +212,7 @@ def geom_to_img(vis_geoms, w, h, scale=0.07):
                 colors = np.ones((len(vertices), 3)) * 0.5  # Default gray
 
             all_vertices.append(vertices)
-            mesh_data.append({'vertices': vertices, 'faces': faces, 'colors': colors})
+            mesh_data.append({'vertices': vertices, 'faces': faces, 'colors': colors, 'alpha': geom_alpha})
 
         elif isinstance(o3d_geom, o3d.geometry.PointCloud):
             points = np.asarray(o3d_geom.points)
@@ -235,8 +238,9 @@ def geom_to_img(vis_geoms, w, h, scale=0.07):
     center = np.array([0.0, 0.0, 0.0])  # Center on origin instead of mean
     extent = np.ptp(all_vertices, axis=0)
     # Tight framing for 80% coverage - use smaller multiplier
-    max_extent = np.max(extent)
-    half_range = max_extent * scale  # Even tighter for better zoom
+    if half_range is None:
+        max_extent = np.max(extent)
+        half_range = max_extent * scale  # Even tighter for better zoom
 
     result_imgs = []
     for i in range(4):
@@ -251,30 +255,40 @@ def geom_to_img(vis_geoms, w, h, scale=0.07):
         azim = np.degrees(angle)
         ax.view_init(elev=elev, azim=azim)
 
-        # Collect all faces from all meshes with their colors for proper depth sorting
-        all_faces = []
-        all_face_colors = []
-
+        # Render meshes grouped by alpha value for proper transparency
+        # Group meshes by alpha value
+        alpha_groups = {}
         for mesh in mesh_data:
-            verts = mesh['vertices']
-            faces = mesh['faces']
-            colors = mesh['colors']
+            alpha = mesh['alpha']
+            if alpha not in alpha_groups:
+                alpha_groups[alpha] = []
+            alpha_groups[alpha].append(mesh)
 
-            # Create face colors (average vertex colors for each face)
-            face_colors = colors[faces].mean(axis=1)
+        # Render each alpha group separately (opaque first, then transparent)
+        for alpha in sorted(alpha_groups.keys(), reverse=True):
+            all_faces = []
+            all_face_colors = []
 
-            # Add each face
-            for face_idx, face in enumerate(faces):
-                face_verts = [verts[face[0]], verts[face[1]], verts[face[2]]]
-                all_faces.append(face_verts)
-                all_face_colors.append(face_colors[face_idx])
+            for mesh in alpha_groups[alpha]:
+                verts = mesh['vertices']
+                faces = mesh['faces']
+                colors = mesh['colors']
 
-        # Create single polygon collection with all faces for proper depth sorting
-        if len(all_faces) > 0:
-            collection = Poly3DCollection(all_faces, facecolors=all_face_colors,
-                                         edgecolors='none', alpha=0.95, linewidths=0,
-                                         zsort='average')  # Enable depth sorting
-            ax.add_collection3d(collection)
+                # Create face colors (average vertex colors for each face)
+                face_colors = colors[faces].mean(axis=1)
+
+                # Add each face
+                for face_idx, face in enumerate(faces):
+                    face_verts = [verts[face[0]], verts[face[1]], verts[face[2]]]
+                    all_faces.append(face_verts)
+                    all_face_colors.append(face_colors[face_idx])
+
+            # Create polygon collection for this alpha group
+            if len(all_faces) > 0:
+                collection = Poly3DCollection(all_faces, facecolors=all_face_colors,
+                                             edgecolors='none', alpha=alpha, linewidths=0,
+                                             zsort='average')  # Enable depth sorting
+                ax.add_collection3d(collection)
 
         # Render all point clouds
         for pc in pointcloud_data:
@@ -713,3 +727,84 @@ def visualize_local_grid(msdf, kernel_size, point_idx, obj_mesh):
         [obj_o3d_mesh, pcd, center_pcd, all_centers_pcd, line_set],
         window_name=f"MSDF Grid Visualization - Point {point_idx}"
     )
+
+
+def visualize_grid_contact(contact_pts, contact_pt_mask, grid_scale, obj_mesh, w, h, bbox_alpha=0.2):
+    bboxes = create_bbox_geomtries(contact_pts, grid_scale, contact_pt_mask, alpha=bbox_alpha)
+    obj_geom = o3dmesh_from_trimesh(obj_mesh, color=[0.7, 0.7, 0.7])
+    # Wrap bboxes with alpha values
+    bbox_geoms = [{'geometry': bbox, 'alpha': bbox_alpha} for bbox in bboxes]
+    vis_geoms = [obj_geom] + bbox_geoms
+    img = geom_to_img(vis_geoms, w=w, h=h, scale=0.5)
+    return img, vis_geoms
+
+
+def create_bbox_geomtries(msdf_center, grid_scale, contact_mask=None, alpha=0.3):
+    # Create bounding boxes for each MSDF center using semi-transparent cubes
+    bbox_geometries = []
+    for i, center in enumerate(msdf_center):
+        # Create a box mesh centered at origin with size 2*grid_scale
+        box = o3d.geometry.TriangleMesh.create_box(
+            width=2*grid_scale,
+            height=2*grid_scale,
+            depth=2*grid_scale
+        )
+
+        # Translate box to be centered at the contact point
+        # create_box creates box from (0,0,0) to (width, height, depth), so we need to center it
+        box.translate(center - grid_scale * np.array([1, 1, 1]))
+
+        # Set color based on contact mask (blue for no contact, red for contact)
+        box_color = [0, 0, 1] if contact_mask is None or not contact_mask[i] else [1, 0, 0]
+        box.paint_uniform_color(box_color)
+
+        bbox_geometries.append(box)
+
+    return bbox_geometries
+
+
+def visualize_recon_hand_w_object(hand_verts, hand_verts_mask, hand_faces, obj_mesh, msdf_center, grid_scale, mesh_color=[0.8, 0.7, 0.6], h=500, w=500):
+    masked_hand_geometries = extract_masked_mesh_components(
+        hand_verts=hand_verts,
+        hand_faces=hand_faces,
+        vertex_mask=hand_verts_mask,
+        create_geometries=True,
+        mesh_color=mesh_color
+    )
+    obj_o3d_mesh = o3dmesh_from_trimesh(obj_mesh, color=[0.7, 0.7, 0.7])
+
+    # bbox_geometries = create_bbox_geomtries(msdf_center, grid_scale)
+
+    vis_geoms = masked_hand_geometries + [obj_o3d_mesh] # + bbox_geometries
+    img = geom_to_img(vis_geoms, w=w, h=h, scale=0.5, half_range=0.12)
+    return img, vis_geoms
+
+
+def vis_contact(obj_mesh, hand_mesh, obj_pts, obj_pt_mask):
+    hand_mesh = o3dmesh_from_trimesh(hand_mesh, color=[0.8, 0.7, 0.6])
+    obj_mesh = o3dmesh_from_trimesh(obj_mesh, color=[0.7, 0.7, 0.7])
+
+    # Convert obj_pts to numpy if it's a tensor
+    if isinstance(obj_pts, torch.Tensor):
+        obj_pts_np = obj_pts.cpu().numpy()
+    else:
+        obj_pts_np = obj_pts
+
+    # Convert obj_pt_mask to numpy if it's a tensor
+    if isinstance(obj_pt_mask, torch.Tensor):
+        obj_pt_mask_np = obj_pt_mask.cpu().numpy()
+    else:
+        obj_pt_mask_np = obj_pt_mask
+
+    # Create point cloud
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(obj_pts_np)
+
+    # Color points: red for masked (True), blue for rest (False)
+    colors = np.zeros((len(obj_pts_np), 3))
+    colors[obj_pt_mask_np] = [1.0, 0.0, 0.0]  # Red for selected points
+    colors[~obj_pt_mask_np] = [0.0, 0.0, 1.0]  # Blue for rest
+    pcd.colors = o3d.utility.Vector3dVector(colors)
+
+    # Visualize
+    o3d.visualization.draw_geometries([hand_mesh, obj_mesh, pcd])

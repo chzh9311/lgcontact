@@ -18,7 +18,7 @@ from common.utils.geometry import (
         calculate_contact_capsule
     )
 
-from common.msdf.utils.msdf import msdf2mlcontact
+from common.msdf.utils.msdf import msdf2mlcontact, get_grid
 
 class HandObject:
     def __init__(self, cfg, device, mano_layer=None, normalize=True):
@@ -78,7 +78,7 @@ class HandObject:
         new_ho.batch_size = self.batch_size
         return new_ho
 
-    def load_from_batch(self, batch, obj_templates=None, obj_hulls=None):
+    def load_from_batch(self, batch, obj_templates=None, obj_hulls=None, pool=None):
         """
         Load the sampled vertices of objects from batched data. Used for training & testing.
         Force labels are also loaded.
@@ -191,16 +191,27 @@ class HandObject:
         ## Compute Local grid contact representation
         if self.contact_unit == 'grid':
             self.obj_msdf = batch['objMsdf'].clone().to(self.device).float()
-            ml_dist, ml_cse, mask, hand_vert_mask, normalized_coords = msdf2mlcontact(self.obj_msdf, self.hand_verts,
+            ml_dist, ml_cse, mask, hand_vert_mask, ho_dist, normalized_coords = msdf2mlcontact(self.obj_msdf, self.hand_verts,
                                                                                       self.hand_cse, self.cfg.msdf.kernel_size, self.cfg.msdf.scale,
-                                                                                      self.mano_layer.th_faces)
+                                                                                      self.mano_layer.th_faces, pool=pool)
 
             ml_dist[mask] = sdf_to_contact(ml_dist[mask] / (self.cfg.msdf.scale / (self.cfg.msdf.kernel_size-1)), None, method=2)
+            ## Do the mapping: 0 -> -1; 1 -> 0; infty -> 1: contact = 1 - 2/(dist + 1)
+            ho_dist = ho_dist / self.cfg.msdf.scale # For grid-level contact
+            self.n_ho_dist = 1 - 2 / (ho_dist + 1)
             # ml_contact[mask, :, :, :, 0] = sdf_to_contact(ml_contact[mask, :, :, :, 0] / (self.cfg.msdf.scale / self.cfg.msdf.num_grids), None, method=0)
             self.ml_contact = torch.cat([ml_dist.unsqueeze(-1), ml_cse], dim=-1)
             self.normalized_coords = normalized_coords
             self.obj_pt_mask = mask
             self.hand_vert_mask = hand_vert_mask
+
+            ## For profiling
+            # self.normalized_coords = get_grid(kernel_size=self.cfg.msdf.kernel_size, device=self.device).reshape(-1, 3).float()
+            # self.n_ho_dist = torch.randn(self.batch_size, self.cfg.msdf.num_grids).to(self.device).float()
+            # self.ml_contact = torch.randn(self.batch_size, self.cfg.msdf.num_grids, self.cfg.msdf.kernel_size, self.cfg.msdf.kernel_size, self.cfg.msdf.kernel_size,
+            #                               1 + self.hand_cse.shape[1]).to(self.device).float()
+            # self.obj_pt_mask = torch.randint(0, 2, (self.batch_size, self.cfg.msdf.num_grids)).bool().to(self.device)
+            # self.hand_vert_mask = torch.randint(0, 2, (self.batch_size, self.cfg.msdf.num_grids, 778)).bool().to(self.device)
 
         elif self.contact_unit == 'point':
         ## Calculate contacts

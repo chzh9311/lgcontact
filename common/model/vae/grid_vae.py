@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from .pointnet_module import PointNet2cls, LatentEncoder, PointNet2seg, Pointnet
+from ..pointnet_module import PointNet2cls, LatentEncoder, PointNet2seg
 # from ..gridae.encoder import GridEncoder3D
 # from ..gridae.decoder import GridDecoder3D
 from ..gridae.gridae import GRIDAE

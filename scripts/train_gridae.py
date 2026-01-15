@@ -43,9 +43,27 @@ def main(cfg):
         filename=cfg.checkpoint.filename + '-{epoch:02d}-{val/total_loss:.4f}',
         save_top_k=cfg.checkpoint.save_top_k,
         mode='min',
+        save_last=True,
     )
     # input = torch.randn(3, cfg.ae.in_dim, 8, 8, 8)
     # embedding_loss, recon, perplexity = model(input, verbose=True)
+    print("="*50)
+    if cfg.train.get('pretrained_ckpt', None) is not None:
+        pretrained_ckpt = torch.load(cfg.train.pretrained_ckpt, weights_only=True)['state_dict']
+        new_state_dict = model.state_dict()
+        all_cnt, match_cnt = 0, 0
+        for k, v in pretrained_ckpt.items():
+            if k.startswith('model.'):
+                k = k[len('model.'):]
+                if k in new_state_dict and v.size() == new_state_dict[k].size():
+                    new_state_dict[k] = v
+                    match_cnt += 1
+                all_cnt += 1
+        print(f"Loaded {match_cnt}/{all_cnt} parameters from pretrained checkpoint.")
+        model.load_state_dict(new_state_dict, strict=True)
+    else:
+        print("Training from scratch.")
+
     data_module = LocalGridDataModule(cfg)
     if cfg.run_phase == 'train':
         pl_trainer = LGTrainer(model, cfg)

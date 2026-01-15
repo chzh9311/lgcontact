@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -5,40 +6,64 @@ from common.utils.pointnet2_utils import PointNetSetAbstraction, PointNetFeature
 from common.model.layers import ResnetBlockFC
 
 
-class Pointnet(nn.Module):
-    ''' PointNet-based encoder network
+class Pointnet_feat_net(nn.Module):
+    ''' Modified from PointNet semantic segmentation network
     Args:
         dim (int): input points dimension
         hidden_dim (int): hidden dimension of the network
         out_dim (int): dimension of output
     '''
-    def __init__(self, in_dim=3, hidden_dim=128, out_dim=3):
+    def __init__(self, in_dim=131, hidden_dim=128, feat_dim=512):
         super().__init__()
-        self.conv1 = torch.nn.Conv1d(in_dim, hidden_dim, 1)
-        self.conv2 = torch.nn.Conv1d(hidden_dim, 2 * hidden_dim, 1)
-        self.conv3 = torch.nn.Conv1d(2 * hidden_dim, 4 * hidden_dim, 1)
-        self.conv4 = torch.nn.Conv1d(4 * hidden_dim, out_dim, 1)
-        self.bn1 = nn.BatchNorm1d(hidden_dim)
-        self.bn2 = nn.BatchNorm1d(2 * hidden_dim)
-        self.bn3 = nn.BatchNorm1d(4 * hidden_dim)
-
-        def maxpool(x, dim=-1, keepdim=False):
-            out, _ = x.max(dim=dim, keepdim=keepdim)
-            return out
-
-        self.actvn = nn.ReLU()
-        self.pool = maxpool
+        self.feat_dim = feat_dim
+        self.feat = PointNetEncoder(channel=in_dim, hidden_dim=hidden_dim)
+        self.conv1 = torch.nn.Conv1d(hidden_dim*2 + 1024, self.feat_dim*2, 1)
+        self.conv2 = torch.nn.Conv1d(self.feat_dim*2, self.feat_dim, 1)
+        self.conv3 = torch.nn.Conv1d(self.feat_dim, self.feat_dim, 1)
+        self.conv4 = torch.nn.Conv1d(self.feat_dim, self.feat_dim, 1)
+        self.bn1 = nn.BatchNorm1d(self.feat_dim*2)
+        self.bn2 = nn.BatchNorm1d(self.feat_dim)
+        self.bn3 = nn.BatchNorm1d(self.feat_dim)
 
     def forward(self, x):
-        ## global_vec: b x 3
-        # x = x.permute(0, 2, 1) # b x c x 2048
+        batchsize = x.size()[0]
+        n_pts = x.size()[2]
+        x, glob_feat = self.feat(x)
+        gf_repeat = glob_feat.view(-1, 1024, 1).repeat(1, 1, n_pts)
+        x = torch.cat([x, gf_repeat], 1)
         x = F.relu(self.bn1(self.conv1(x)))
         x = F.relu(self.bn2(self.conv2(x)))
         x = F.relu(self.bn3(self.conv3(x)))
         x = self.conv4(x)
-        # x = x.permute(0, 2, 1)
+        # x = x.transpose(2,1).contiguous()
+        # x = F.log_softmax(x.view(-1, self.out_dim), dim=-1)
+        x = x.view(batchsize, self.feat_dim, n_pts)
+        return x, glob_feat
 
-        return self.pool(x, dim=2), x
+
+
+class PointNetEncoder(nn.Module):
+    """
+    PointNet Encocoder without transformations
+    """
+    def __init__(self, channel=131, hidden_dim=256):
+        super(PointNetEncoder, self).__init__()
+        # self.stn = STN3d(channel)
+        self.conv1 = torch.nn.Conv1d(channel, hidden_dim, 1)
+        self.conv2 = torch.nn.Conv1d(hidden_dim, hidden_dim*2, 1)
+        self.conv3 = torch.nn.Conv1d(hidden_dim*2, 1024, 1)
+        self.bn1 = nn.BatchNorm1d(hidden_dim)
+        self.bn2 = nn.BatchNorm1d(hidden_dim*2)
+        self.bn3 = nn.BatchNorm1d(1024)
+
+    def forward(self, x):
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        pointfeat = x
+        x = self.bn3(self.conv3(x))
+        x = torch.max(x, 2, keepdim=True)[0]
+        x = x.view(-1, 1024)
+        return pointfeat, x
 
 
 class PointNet2cls(nn.Module):

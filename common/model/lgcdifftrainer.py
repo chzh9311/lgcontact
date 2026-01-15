@@ -7,7 +7,7 @@ import open3d as o3d
 import trimesh
 from copy import copy
 import numpy as np
-from multiprocessing import Pool
+from concurrent.futures import ThreadPoolExecutor
 import wandb
 
 from common.manopth.manopth.manolayer import ManoLayer
@@ -15,18 +15,19 @@ from common.model.handobject import recover_hand_verts_from_contact
 from common.model.pose_optimizer import optimize_pose_wrt_local_grids
 from common.model.handobject import HandObject, recover_hand_verts_from_contact
 from common.model.hand_cse.hand_cse import HandCSE
-from common.utils.vis import o3dmesh_from_trimesh, visualize_local_grid_with_hand, geom_to_img, extract_masked_mesh_components
+from common.utils.vis import visualize_recon_hand_w_object, visualize_grid_contact
 from common.model.losses import masked_rec_loss, kl_div_normal_muvar
 from common.msdf.utils.msdf import get_grid
 from common.evaluation.eval_fns import calculate_metrics, calc_diversity
 
 
-class MLCTrainer(L.LightningModule):
+class LGCDiffTrainer(L.LightningModule):
     """
     The Lightning trainer interface to train Local-grid based contact autoencoder.
     """
-    def __init__(self, model, cfg):
+    def __init__(self, grid_ae, model, cfg):
         super().__init__()
+        self.grid_ae = grid_ae
         self.model = model
         self.cfg = cfg
         self.save_hyperparameters(cfg)
@@ -35,9 +36,10 @@ class MLCTrainer(L.LightningModule):
         self.msdf_k = cfg.msdf.kernel_size
         self.lr = cfg.train.lr
 
-        # KL annealing configuration
-        self.kl_anneal_enabled = cfg.train.loss_weights.get('kl_anneal', True)
-        self.kl_warmup_epochs = cfg.train.loss_weights.get('kl_warmup_epochs', 5)
+        ## Load and freeze autoencoder pretrained weights
+        self._load_ae_pretrained_weights(cfg.generator.get('ae_pretrained_weight', None))
+        self._freeze_pretrained_weights()
+
         self.mano_layer = ManoLayer(mano_root=cfg.data.mano_root, side='right',
                                     use_pca=True, ncomps=cfg.pose_optimizer.ncomps, flat_hand_mean=True)
         self.closed_mano_faces = np.load(osp.join('data', 'misc', 'closed_mano_r_faces.npy'))
@@ -50,6 +52,98 @@ class MLCTrainer(L.LightningModule):
         self.handcse.load_state_dict(cse_ckpt['state_dict'])
         self.handcse.eval()
         self.grid_coords = get_grid(self.cfg.msdf.kernel_size) * self.cfg.msdf.scale  # (K^3, 3)
+        self.pool = None
+
+    def _load_ae_pretrained_weights(self, checkpoint_path):
+        """
+        Load pretrained autoencoder weights from a Lightning checkpoint.
+        Only loads weights for layers that exist in both the checkpoint and current model.
+
+        Args:
+            checkpoint_path: Path to the Lightning checkpoint file
+        """
+        import os
+
+        if not os.path.exists(checkpoint_path):
+            print(f"Warning: Checkpoint file not found at {checkpoint_path}. Skipping weight initialization.")
+            return
+
+        print(f"Loading pretrained autoencoder weights from {checkpoint_path}")
+
+        # Load checkpoint
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+
+        # Extract state dict from Lightning checkpoint
+        if 'state_dict' in checkpoint:
+            state_dict = checkpoint['state_dict']
+        else:
+            state_dict = checkpoint
+
+        # Filter state dict to only include grid_ae parameters
+        # Lightning saves with 'model.' prefix, we need to extract grid_ae weights
+        ae_state_dict = {}
+        for key, value in state_dict.items():
+            # Look for keys like 'model.obj_encoder.xxx' or 'model.encoder.xxx' or 'model.decoder.xxx'
+            if key.startswith('model.'):
+                # Remove 'model.' prefix to get the actual model key
+                model_key = key[6:]  # Remove 'model.'
+                # Add 'grid_ae.' prefix to match our model structure
+                new_key = f'grid_ae.{model_key}'
+                ae_state_dict[new_key] = value
+
+        # Get current model state dict
+        current_state_dict = self.state_dict()
+
+        # Filter to only load weights that exist in current model (handle extra layers)
+        filtered_state_dict = {}
+        for key, value in ae_state_dict.items():
+            if key in current_state_dict:
+                # Check if shapes match
+                if current_state_dict[key].shape == value.shape:
+                    filtered_state_dict[key] = value
+                else:
+                    print(f"Warning: Shape mismatch for {key}. "
+                          f"Checkpoint: {value.shape}, Current: {current_state_dict[key].shape}. Skipping.")
+            else:
+                print(f"Info: {key} in checkpoint but not in current model. Skipping.")
+
+        # Load the filtered state dict
+        missing_keys, unexpected_keys = self.load_state_dict(filtered_state_dict, strict=False)
+
+        # Track which keys were successfully loaded
+        self.pretrained_keys = list(filtered_state_dict.keys())
+
+        # Count only missing keys in grid_ae
+        missing_grid_ae_keys = [k for k in missing_keys if k.startswith('grid_ae.')]
+
+        print(f"Successfully loaded {len(filtered_state_dict)} layers from pretrained checkpoint")
+        if missing_grid_ae_keys:
+            print(f"Missing grid_ae keys: {len(missing_grid_ae_keys)} keys")
+        if unexpected_keys:
+            print(f"Warning: Unexpected keys: {unexpected_keys}")
+    
+    def _freeze_pretrained_weights(self):
+        """
+        Freeze all parameters that were loaded from the pretrained checkpoint.
+        Also sets BatchNorm layers to eval mode to prevent running stats updates.
+        """
+        frozen_count = 0
+        for name, param in self.named_parameters():
+            if name in self.pretrained_keys:
+                param.requires_grad = False
+                frozen_count += 1
+
+        # Set grid_ae BatchNorm layers to eval mode to prevent running stats drift
+        bn_count = 0
+        for module in self.grid_ae.modules():
+            if isinstance(module, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d)):
+                module.eval()
+                # Disable running stats updates during forward pass
+                module.track_running_stats = False
+                bn_count += 1
+
+        print(f"Frozen {frozen_count} pretrained parameters in grid_ae")
+        print(f"Set {bn_count} BatchNorm layers to eval mode (prevents running stats drift)")
 
     def training_step(self, batch, batch_idx):
         total_loss = self.train_val_step(batch, batch_idx, stage='train')
@@ -62,34 +156,126 @@ class MLCTrainer(L.LightningModule):
     def train_val_step(self, batch, batch_idx, stage):
         self.grid_coords = self.grid_coords.view(-1, 3).to(self.device)
         obj_names = batch['objName']
-        simp_obj_mesh = getattr(self.trainer.datamodule, f'{stage}_set').simp_obj_mesh
-        obj_templates = [trimesh.Trimesh(simp_obj_mesh[name]['verts'], simp_obj_mesh[name]['faces'])
-                         for name in obj_names]
+        # simp_obj_mesh = getattr(self.trainer.datamodule, f'train_set').simp_obj_mesh
+        # obj_templates = [trimesh.Trimesh(simp_obj_mesh[name]['verts'], simp_obj_mesh[name]['faces'])
+        #                  for name in obj_names]
         handobject = HandObject(self.cfg.data, self.device, mano_layer=self.mano_layer)
-        handobject.load_from_batch(batch)
+        handobject.load_from_batch(batch, pool=self.pool)
         lg_contact = handobject.ml_contact
-        obj_msdf = handobject.obj_msdf[:, :, :self.msdf_k**3].view(-1, self.msdf_k, self.msdf_k, self.msdf_k)
+        batch_size, n_grids = lg_contact.shape[:2]
+        obj_msdf = handobject.obj_msdf[:, :, :self.msdf_k**3].view(-1, 1, self.msdf_k, self.msdf_k, self.msdf_k)
+        n_ho_dist = handobject.n_ho_dist
 
         obj_msdf_center = handobject.obj_msdf[:, :, self.msdf_k**3:] # B x 3
-        recon_lg_contact, mu, logvar = self.model(
-            lg_contact.permute(0, 1, 5, 2, 3, 4), obj_msdf=obj_msdf, msdf_center=obj_msdf_center)
-        recon_lg_contact = recon_lg_contact.permute(0, 1, 3, 4, 5, 2)  # B x N x K x K x K x (1 + cse_dim)
+        ## First process all grids separately using GRIDAE
+        lg_contact = lg_contact.view(-1, self.msdf_k, self.msdf_k, self.msdf_k, lg_contact.shape[-1]).permute(0, 4, 1, 2, 3)
+        posterior, obj_feat, multi_scale_obj_cond = self.grid_ae.encode(lg_contact, obj_msdf)
+        obj_pc = torch.cat([obj_msdf_center, obj_feat.view(batch_size, n_grids, -1)], dim=-1)
+        z = torch.cat([n_ho_dist.unsqueeze(-1), posterior.sample().view(batch_size, n_grids, -1)], dim=-1) # n_dim + 1
 
-        batch_size = handobject.batch_size
-        contact_hat, cse_hat = recon_lg_contact[..., 0], recon_lg_contact[..., 1:]
-        grid_coords = obj_msdf_center[:, :, None, :] + self.grid_coords[None, None, :, :]  # B x N x K^3 x 3
-        pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
-            self.handcse,
-            contact_hat.reshape(batch_size, -1),
-            cse_hat.reshape(batch_size, -1, self.cse_dim),
-            grid_coords=grid_coords.view(batch_size, -1, 3),
-            mask_th = 0.02
-        )
+        input_data = {'x': z, 'obj_pc': obj_pc.permute(0, 2, 1)}
+    
+        err = self.model(input_data)['err']
+        grid_loss = F.mse_loss(err[:, :, 0], torch.zeros_like(err[:, :, 0]), reduction='mean')  # only compute loss on n_ho_dist dimension
+        diff_loss = F.mse_loss(err[:, :, 1:], torch.zeros_like(err[:, :, 1:]), reduction='none')
+        obj_pt_mask = input_data['x'][:, :, 0:1] < 0
+        diff_loss = torch.sum(diff_loss * obj_pt_mask) / (torch.sum(obj_pt_mask) + 1e-6) / diff_loss.shape[2]
 
-        loss_dict = self.loss_net(recon_lg_contact, lg_contact, mu, logvar,
-                                  pred_hand_verts, handobject.hand_verts,
-                                  handobject.hand_vert_mask)
-                                #   pred_verts_mask)
+        loss_dict = {f'{stage}/grid_contact_loss': grid_loss,
+                     f'{stage}/latent_diff_loss': diff_loss,
+                     f'{stage}/total_loss': grid_loss + diff_loss}
+        if stage == 'val':
+            self.log_dict(loss_dict, prog_bar=False, sync_dist=True, on_step=False, on_epoch=True)
+        else:
+            self.log_dict(loss_dict, prog_bar=False, sync_dist=True)
+        ## Also sample and reconstruct
+        if batch_idx % self.cfg[stage].vis_every_n_batches == 0:
+            samples = self.model.sample(input_data, k=1)
+            vis_idx = 0
+            simp_obj_mesh = getattr(self.trainer.datamodule, f'{stage}_set').simp_obj_mesh
+            obj_templates = [trimesh.Trimesh(simp_obj_mesh[name]['verts'], simp_obj_mesh[name]['faces'])
+                            for name in batch['objName']]
+            sample_x = samples[:, 0, -1] ## 1 + latent
+            grid_contact, sample_latent = sample_x[:, :, 0], sample_x[:, :, 1:]
+            grid_contact = grid_contact < 0
+            pred_hand_verts, pred_verts_mask = self.reconstruct_from_latent(sample_latent, grid_contact, multi_scale_obj_cond, obj_msdf_center)
+
+            # gt_latent = input_data['x'][:, :, 1:]
+
+            # recon_lg_contact, z_e, obj_feat = self.grid_ae(
+            #     lg_contact, obj_msdf=obj_msdf, sample_posterior=False)
+            # recon_lg_contact = recon_lg_contact.permute(0, 2, 3, 4, 1)  # B x N x K x K x K x (1 + cse_dim)
+            # recon_lg_contact = recon_lg_contact.view(batch_size, 128, self.msdf_k, self.msdf_k, self.msdf_k, -1)
+            # # recon_lg_contact = recon_lg_contact.view(batch_size, n_grids, -1, self.msdf_k ** 3).permute(0, 1, 3, 2)
+            # recon_lg_contact = recon_lg_contact * handobject.obj_pt_mask[:, :, None, None, None, None]
+            # sample_contact = recon_lg_contact[..., 0].reshape(batch_size, -1)
+            # sample_cse = recon_lg_contact[..., 1:].reshape(batch_size, -1, self.cse_dim)
+            # grid_coords = obj_msdf_center[:, :, None, :] + self.grid_coords.view(-1, 3)[None, None, :, :]  # B x N x K^3 x 3
+
+            # pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
+            #     self.handcse, None,
+            #     sample_contact.reshape(batch_size, -1), sample_cse.reshape(batch_size, -1, self.cse_dim),
+            #     grid_coords=grid_coords.reshape(batch_size, -1, 3),
+            #     mask_th = 0.02
+            # )
+
+            # gt_rec_hand_verts, gt_rec_verts_mask = self.reconstruct_from_latent(gt_latent, handobject.obj_pt_mask, multi_scale_obj_cond, obj_msdf_center)
+
+            pred_contact_img, _ = visualize_grid_contact(contact_pts = obj_msdf_center[vis_idx].detach().cpu().numpy(),
+                                                    contact_pt_mask = grid_contact[vis_idx].detach().cpu().numpy(),
+                                                    grid_scale = self.cfg.msdf.scale,
+                                                    obj_mesh = obj_templates[vis_idx],
+                                                    w=400, h=400)
+
+            gt_contact_img, _ = visualize_grid_contact(contact_pts = obj_msdf_center[vis_idx].detach().cpu().numpy(),
+                                                    contact_pt_mask = handobject.obj_pt_mask[vis_idx].detach().cpu().numpy(),
+                                                    grid_scale = self.cfg.msdf.scale,
+                                                    obj_mesh = obj_templates[vis_idx],
+                                                    w=400, h=400)
+
+
+            pred_img, pred_geoms = visualize_recon_hand_w_object(hand_verts=pred_hand_verts[vis_idx].detach().cpu().numpy(),
+                                        hand_verts_mask=pred_verts_mask[vis_idx].detach().cpu().numpy(),
+                                        hand_faces=self.mano_layer.th_faces.detach().cpu().numpy(),
+                                        obj_mesh=obj_templates[vis_idx],
+                                        msdf_center=obj_msdf_center[vis_idx].detach().cpu().numpy(),
+                                        mesh_color=[0.8, 0.2, 0.2],
+                                        grid_scale=self.cfg.msdf.scale,
+                                        h=400, w=400)
+
+            # gt_rec_img, gt_rec_geoms = visualize_recon_hand_w_object(hand_verts=gt_rec_hand_verts[vis_idx].detach().cpu().numpy(),
+            #                             hand_verts_mask=gt_rec_verts_mask[vis_idx].detach().cpu().numpy(),
+            #                             hand_faces=self.mano_layer.th_faces.detach().cpu().numpy(),
+            #                             obj_mesh=obj_templates[vis_idx],
+            #                             mesh_color=[0.2, 0.4, 0.8],
+            #                             msdf_center=obj_msdf_center[vis_idx].detach().cpu().numpy(),
+            #                             grid_scale=self.cfg.msdf.scale,
+            #                             h=400, w=400)
+
+            gt_img, gt_geoms = visualize_recon_hand_w_object(hand_verts=handobject.hand_verts[vis_idx].detach().cpu().numpy(),
+                                        hand_verts_mask=handobject.hand_vert_mask[vis_idx].any(dim=0).detach().cpu().numpy(),
+                                        hand_faces=self.mano_layer.th_faces.detach().cpu().numpy(),
+                                        obj_mesh=obj_templates[vis_idx],
+                                        mesh_color=[0.2, 0.8, 0.4],
+                                        msdf_center=obj_msdf_center[vis_idx].detach().cpu().numpy(),
+                                        grid_scale=self.cfg.msdf.scale,
+                                        h=400, w=400)
+
+            contact_img = np.concatenate([gt_contact_img, pred_contact_img], axis=0)
+            img = np.concatenate([gt_img, pred_img], axis=0)
+            if hasattr(self.logger, 'experiment'):
+                if hasattr(self.logger.experiment, 'add_image'):
+                    # TensorBoardLogger
+                    global_step = self.current_epoch * len(eval(f'self.trainer.datamodule.{stage}_dataloader()')) + batch_idx
+                    self.logger.experiment.add_image(f'{stage}/GT_vs_sampled_contact', contact_img, global_step, dataformats='HWC')
+                    self.logger.experiment.add_image(f'{stage}/GT_vs_sampled_hand', img, global_step, dataformats='HWC')
+                elif hasattr(self.logger.experiment, 'log'):
+                    # WandbLogger
+                    import wandb
+                    self.logger.experiment.log({f'{stage}/GT_vs_sampled_contact': wandb.Image(contact_img)}, step=self.global_step)
+                    self.logger.experiment.log({f'{stage}/GT_vs_sampled_hand': wandb.Image(img)}, step=self.global_step)
+
+        return loss_dict[f'{stage}/total_loss']
                                   
         # recon_loss = F.mse_loss(recon_grid_contact, gt_grid_contact.permute(0, 4, 1, 2, 3))
         # loss_dict = {f'{stage}/embedding_loss': loss, f'{stage}/recon_loss': recon_loss, f'{stage}/perplexity': perplexity}
@@ -130,8 +316,26 @@ class MLCTrainer(L.LightningModule):
         self.log_dict(loss_dict, prog_bar=True, sync_dist=True)
         return loss_dict['total_loss']
     
+    def reconstruct_from_latent(self, latent, grid_contact_mask, multi_scale_obj_cond, obj_msdf_center):
+        batch_size, n_grids = latent.shape[:2]
+        latent = latent.reshape(batch_size*n_grids, -1)
+        recon_lg_contact = self.grid_ae.decode(latent, multi_scale_obj_cond)
+        recon_lg_contact = recon_lg_contact.view(batch_size, n_grids, -1, self.msdf_k ** 3).permute(0, 1, 3, 2)
+        sample_contact = recon_lg_contact[..., 0] * grid_contact_mask[:, :, None].float()
+        sample_cse = recon_lg_contact[..., 1:]
+        grid_coords = obj_msdf_center[:, :, None, :] + self.grid_coords.view(-1, 3)[None, None, :, :]  # B x N x K^3 x 3
+
+        pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
+            self.handcse, None,
+            sample_contact.reshape(batch_size, -1), sample_cse.reshape(batch_size, -1, self.cse_dim),
+            grid_coords=grid_coords.reshape(batch_size, -1, 3),
+            mask_th = 2
+        )
+
+        return pred_hand_verts, pred_verts_mask
+    
     def on_test_epoch_start(self):
-        self.pool = Pool(min(self.cfg.test.batch_size, 16))
+        self.pool = ThreadPoolExecutor(max_workers=min(self.cfg.test.batch_size, 16))
         self.all_results = []
         self.sample_joints = []
 
@@ -146,17 +350,20 @@ class MLCTrainer(L.LightningModule):
         Called at the start of each training epoch.
         Handles unfreezing pretrained weights at the specified epoch.
         """
-        # Check if model has unfreeze capability and if we've reached the unfreeze epoch
-        if hasattr(self.model, 'unfreeze_pretrained_weights') and hasattr(self.cfg.generator, 'ae_freeze_until_epoch'):
-            if self.current_epoch == self.cfg.generator.ae_freeze_until_epoch:
-                print(f"\n{'='*60}")
-                print(f"Epoch {self.current_epoch}: Unfreezing pretrained autoencoder weights")
-                print(f"{'='*60}\n")
-                self.model.unfreeze_pretrained_weights()
+        # self.pool = ThreadPoolExecutor(max_workers=min(self.cfg.train.batch_size, 16))
+        self.pool = None
 
-                # Recreate optimizer to include newly unfrozen parameters
-                self._recreate_optimizer()
-                print("Optimizer recreated with newly unfrozen parameters\n")
+    def on_validation_epoch_start(self):
+        # self.pool = ThreadPoolExecutor(max_workers=min(self.cfg.val.batch_size, 16))
+        self.pool = None
+
+    def on_train_epoch_end(self):
+        if self.pool is not None:
+            self.pool.shutdown(wait=True)
+
+    def on_validation_epoch_end(self):
+        if self.pool is not None:
+            self.pool.shutdown(wait=True)
 
     def test_step(self, batch, batch_idx):
         self.grid_coords = self.grid_coords.to(self.device)
@@ -185,25 +392,14 @@ class MLCTrainer(L.LightningModule):
             #     lg_contact.permute(0, 1, 5, 2, 3, 4), obj_msdf=obj_msdf, msdf_center=obj_msdf_center)
             recon_lg_contact, z_e, obj_feat = self.model.grid_ae(
                 lg_contact.view(batch_size*n_pts, self.msdf_k, self.msdf_k, self.msdf_k, -1).permute(0, 4, 1, 2, 3),
-                obj_msdf=obj_msdf.unsqueeze(1), sample_posterior=False)
+                obj_msdf=obj_msdf.unsqueeze(1))
             recon_lg_contact = recon_lg_contact.permute(0, 2, 3, 4, 1)  # B x N x K x K x K x (1 + cse_dim)
             recon_lg_contact = recon_lg_contact.view(batch_size, n_pts, self.msdf_k, self.msdf_k, self.msdf_k, -1)
             # recon_lg_contact = lg_contact
 
             ## If masked with GT pt mask
-            # recon_lg_contact = recon_lg_contact * handobject.obj_pt_mask[:, :, None, None, None, None]
+            recon_lg_contact = recon_lg_contact * handobject.obj_pt_mask[:, :, None, None, None, None]
 
-            recon_lg_contact = recon_lg_contact.view(batch_size, n_pts, self.msdf_k**3, -1)
-            sample_contact = recon_lg_contact[..., 0] * handobject.obj_pt_mask[:, :, None].float()
-            sample_cse = recon_lg_contact[..., 1:]
-            grid_coords = obj_msdf_center[:, :, None, :] + self.grid_coords.view(-1, 3)[None, None, :, :]  # B x N x K^3 x 3
-
-            pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
-                self.handcse, None,
-                sample_contact.reshape(batch_size, -1), sample_cse.reshape(batch_size, -1, self.cse_dim),
-                grid_coords=grid_coords.reshape(batch_size, -1, 3),
-                mask_th = 0.02
-            )
             # handobject.load_from_batch_object_only(batch)
             # obj_msdf = handobject.obj_msdf[:, :, :self.msdf_k**3].view(-1, self.msdf_k, self.msdf_k, self.msdf_k)
             # recon_lg_contact = self.model.sample(obj_msdf, obj_msdf_center).permute(0, 1, 3, 4, 5, 2)
@@ -308,30 +504,11 @@ class MLCTrainer(L.LightningModule):
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr)
 
-        # Cosine annealing scheduler with warmup for stable VAE training
-        # Warmup for first 5% of training, then cosine decay
-        max_epochs = self.cfg.trainer.max_epochs
-        warmup_epochs = max(1, int(0.05 * max_epochs))
-
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        # StepLR scheduler: decay LR by gamma every step_size epochs
+        scheduler = torch.optim.lr_scheduler.StepLR(
             optimizer,
-            T_max=max_epochs - warmup_epochs,
-            eta_min=self.lr * 0.01  # Decay to 1% of initial LR
-        )
-
-        # Linear warmup scheduler
-        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
-            optimizer,
-            start_factor=0.1,  # Start at 10% of lr
-            end_factor=1.0,    # Reach full lr
-            total_iters=warmup_epochs
-        )
-
-        # Sequential scheduler: warmup -> cosine annealing
-        scheduler = torch.optim.lr_scheduler.SequentialLR(
-            optimizer,
-            schedulers=[warmup_scheduler, scheduler],
-            milestones=[warmup_epochs]
+            step_size=10,
+            gamma=0.8
         )
 
         return {
@@ -433,76 +610,3 @@ class MLCTrainer(L.LightningModule):
 
         return loss_dict
     
-    @staticmethod
-    def visualize_recon_hand_w_object(hand_verts, hand_verts_mask, hand_faces, obj_mesh, msdf_center, grid_scale, mesh_color=[0.8, 0.7, 0.6], h=500, w=500):
-        masked_hand_geometries = extract_masked_mesh_components(
-            hand_verts=hand_verts,
-            hand_faces=hand_faces,
-            vertex_mask=hand_verts_mask,
-            create_geometries=True,
-            mesh_color=mesh_color
-        )
-        obj_o3d_mesh = o3dmesh_from_trimesh(obj_mesh, color=[0.7, 0.7, 0.7])
-
-        # Create bounding boxes for each MSDF center
-        bbox_geometries = []
-        for center in msdf_center:
-            # Define 8 corners of the bounding box
-            bbox_points = np.array([
-                center + grid_scale * np.array([-1, -1, -1]),
-                center + grid_scale * np.array([1, -1, -1]),
-                center + grid_scale * np.array([1, 1, -1]),
-                center + grid_scale * np.array([-1, 1, -1]),
-                center + grid_scale * np.array([-1, -1, 1]),
-                center + grid_scale * np.array([1, -1, 1]),
-                center + grid_scale * np.array([1, 1, 1]),
-                center + grid_scale * np.array([-1, 1, 1]),
-            ])
-
-            # Define edges of the bounding box
-            bbox_lines = [
-                [0, 1], [1, 2], [2, 3], [3, 0],  # Bottom face
-                [4, 5], [5, 6], [6, 7], [7, 4],  # Top face
-                [0, 4], [1, 5], [2, 6], [3, 7],  # Vertical edges
-            ]
-
-            # Create LineSet for bounding box
-            line_set = o3d.geometry.LineSet()
-            line_set.points = o3d.utility.Vector3dVector(bbox_points)
-            line_set.lines = o3d.utility.Vector2iVector(bbox_lines)
-            line_set.colors = o3d.utility.Vector3dVector([[0, 1, 0] for _ in bbox_lines])  # Green
-            bbox_geometries.append(line_set)
-
-        vis_geoms = masked_hand_geometries + [obj_o3d_mesh] + bbox_geometries
-        img = geom_to_img(vis_geoms, w=w, h=h, scale=0.5)
-        return img, vis_geoms
-    
-    @staticmethod
-    def vis_contact(obj_mesh, hand_mesh, obj_pts, obj_pt_mask):
-        hand_mesh = o3dmesh_from_trimesh(hand_mesh, color=[0.8, 0.7, 0.6])
-        obj_mesh = o3dmesh_from_trimesh(obj_mesh, color=[0.7, 0.7, 0.7])
-
-        # Convert obj_pts to numpy if it's a tensor
-        if isinstance(obj_pts, torch.Tensor):
-            obj_pts_np = obj_pts.cpu().numpy()
-        else:
-            obj_pts_np = obj_pts
-
-        # Convert obj_pt_mask to numpy if it's a tensor
-        if isinstance(obj_pt_mask, torch.Tensor):
-            obj_pt_mask_np = obj_pt_mask.cpu().numpy()
-        else:
-            obj_pt_mask_np = obj_pt_mask
-
-        # Create point cloud
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(obj_pts_np)
-
-        # Color points: red for masked (True), blue for rest (False)
-        colors = np.zeros((len(obj_pts_np), 3))
-        colors[obj_pt_mask_np] = [1.0, 0.0, 0.0]  # Red for selected points
-        colors[~obj_pt_mask_np] = [0.0, 0.0, 1.0]  # Blue for rest
-        pcd.colors = o3d.utility.Vector3dVector(colors)
-
-        # Visualize
-        o3d.visualization.draw_geometries([hand_mesh, obj_mesh, pcd])
