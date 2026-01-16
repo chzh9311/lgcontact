@@ -1,7 +1,7 @@
 defaults:
   - msdf: base
   - data: grab_local_grid
-  - ae: gridae_64latent
+  - ae: gridae_128latent
   - _self_
 
 training_stage: "ae"
@@ -50,8 +50,8 @@ trainer: ## For instantiating pytorch-lightning Trainer
   # limit_train_batches: 100
   # limit_val_batches: 50
 
-run_phase: train
-ckpt_path: null # logs/wandb_logs/LG3DContact/GRIDAE-${ae.obj_feat_dim}v1/checkpoints/last.ckpt
+run_phase: val
+ckpt_path: logs/checkpoints/gridae/128latent/best-epoch=16-val/total_loss=0.0948.ckpt
 
 hydra:
   job:

@@ -12,13 +12,6 @@ contact_unit: "grid"
 train:
   lr: 1e-4
   batch_size: 24
-  loss_weights:
-    w_contact: 4.0
-    w_cse: 1.0
-    w_kl: 0.000001
-    w_rec: 4.0
-    kl_anneal: true  # Enable KL weight annealing
-    kl_warmup_epochs: 5  # Linear warmup from 0 to w_kl over 5 epochs
   vis_every_n_batches: 200
 
 val:
@@ -53,8 +46,8 @@ trainer: ## For instantiating pytorch-lightning Trainer
   enable_progress_bar: true
   enable_model_summary: true
   profiler: simple
-  limit_train_batches: 10
-  limit_val_batches: 10
+  # limit_train_batches: 10
+  # limit_val_batches: 10
 
 run_phase: test
 test_gt: true

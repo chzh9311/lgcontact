@@ -8,8 +8,8 @@ MSDF_dir: data/preprocessed/grab_msdf
 
 contact_unit: ${contact_unit}
 downsample_rate: 
-  train: 5
-  val: 5
+  train: 4
+  val: 8
   test: 64
 
 msdf:
