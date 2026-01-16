@@ -70,6 +70,10 @@ def main(cfg):
         trainer = L.Trainer(**cfg.trainer, logger=logger, callbacks=[checkpoint_callback])
         # trainer.fit(pl_trainer, datamodule=data_module)
         trainer.fit(pl_trainer, datamodule=data_module, ckpt_path=cfg.train.get('resume_ckpt', None))
+    elif cfg.run_phase == 'val':
+        pl_trainer = LGTrainer.load_from_checkpoint(cfg.ckpt_path, model=model, cfg=cfg)
+        trainer = L.Trainer(**cfg.trainer, logger=logger)
+        trainer.validate(pl_trainer, datamodule=data_module)
     else:
         pl_trainer = LGTrainer.load_from_checkpoint(cfg.ckpt_path, model=model, cfg=cfg)
         trainer = L.Trainer(**cfg.trainer, logger=logger)

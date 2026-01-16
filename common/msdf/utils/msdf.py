@@ -332,7 +332,7 @@ def calc_local_grid_1pt(normalized_coords, obj_mesh, hand_mesh, kernel_size, gri
     return local_grid, verts_mask
 
 
-def calc_local_grid_all_pts(contact_points, normalized_coords, obj_mesh, hand_mesh, kernel_size, grid_scale, hand_cse, device='cpu'):
+def calc_local_grid_all_pts(contact_points, normalized_coords, obj_mesh, hand_mesh, kernel_size, grid_scale, hand_cse=None, device='cpu'):
     """
     Calculate local grids for all contact points using numpy on CPU.
 
@@ -354,8 +354,8 @@ def calc_local_grid_all_pts(contact_points, normalized_coords, obj_mesh, hand_me
     # Handle empty case
     hand_verts = hand_mesh.vertices
     if N == 0:
-        cse_dim = hand_cse.shape[-1]
-        return np.empty((0, kernel_size, kernel_size, kernel_size, 2 + cse_dim)), np.empty((0, hand_verts.shape[0]), dtype=bool)
+        # cse_dim = hand_cse.shape[-1]
+        return np.empty((0, kernel_size, kernel_size, kernel_size, 2)), np.empty((0, hand_verts.shape[0]), dtype=bool)
 
     # Scale and translate to world coordinates for all contact points
     # contact_points: (N, 3), normalized_coords: (K^3, 3)
@@ -369,7 +369,7 @@ def calc_local_grid_all_pts(contact_points, normalized_coords, obj_mesh, hand_me
     grid_mask = np.any(verts_mask, axis=1) # N
     M = np.sum(grid_mask)
 
-    ho_dist = np.min(ho_dist, axis=1)  # N
+    # ho_dist = np.min(ho_dist, axis=1)  # N
 
     grid_points_flat = contact_points[:, None, :] + normalized_coords[None, :, :] * grid_scale  # N x K^3 x 3
     grid_points_all = grid_points_flat[grid_mask].reshape(-1, 3)  # (M * K^3, 3)

@@ -7,7 +7,8 @@ import open3d as o3d
 import trimesh
 from copy import copy
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor
+# from concurrent.futures import ThreadPoolExecutor
+from multiprocessing.pool import Pool
 import wandb
 
 from common.manopth.manopth.manolayer import ManoLayer
@@ -32,7 +33,6 @@ class LGCDiffTrainer(L.LightningModule):
         self.cfg = cfg
         self.save_hyperparameters(cfg)
         self.debug = cfg.get('debug', False)
-        self.loss_weights = cfg.train.loss_weights
         self.msdf_k = cfg.msdf.kernel_size
         self.lr = cfg.train.lr
 
@@ -335,7 +335,7 @@ class LGCDiffTrainer(L.LightningModule):
         return pred_hand_verts, pred_verts_mask
     
     def on_test_epoch_start(self):
-        self.pool = ThreadPoolExecutor(max_workers=min(self.cfg.test.batch_size, 16))
+        self.pool = Pool(processes=min(self.cfg.test.batch_size, 16))
         self.all_results = []
         self.sample_joints = []
 
@@ -359,11 +359,15 @@ class LGCDiffTrainer(L.LightningModule):
 
     def on_train_epoch_end(self):
         if self.pool is not None:
-            self.pool.shutdown(wait=True)
+            # self.pool.shutdown(wait=True)
+            self.pool.close()
+            self.pool.join()
 
     def on_validation_epoch_end(self):
         if self.pool is not None:
-            self.pool.shutdown(wait=True)
+            # self.pool.shutdown(wait=True)
+            self.pool.close()
+            self.pool.join()
 
     def test_step(self, batch, batch_idx):
         self.grid_coords = self.grid_coords.to(self.device)
@@ -390,15 +394,16 @@ class LGCDiffTrainer(L.LightningModule):
             obj_msdf_center = handobject.obj_msdf[:, :, self.msdf_k**3:] # B x 3
             # recon_lg_contact, mu, logvar = self.model(
             #     lg_contact.permute(0, 1, 5, 2, 3, 4), obj_msdf=obj_msdf, msdf_center=obj_msdf_center)
-            recon_lg_contact, z_e, obj_feat = self.model.grid_ae(
+            recon_lg_contact, z_e, obj_feat = self.grid_ae(
                 lg_contact.view(batch_size*n_pts, self.msdf_k, self.msdf_k, self.msdf_k, -1).permute(0, 4, 1, 2, 3),
-                obj_msdf=obj_msdf.unsqueeze(1))
+                obj_msdf=obj_msdf.unsqueeze(1), sample_posterior=False)
             recon_lg_contact = recon_lg_contact.permute(0, 2, 3, 4, 1)  # B x N x K x K x K x (1 + cse_dim)
             recon_lg_contact = recon_lg_contact.view(batch_size, n_pts, self.msdf_k, self.msdf_k, self.msdf_k, -1)
             # recon_lg_contact = lg_contact
 
             ## If masked with GT pt mask
-            recon_lg_contact = recon_lg_contact * handobject.obj_pt_mask[:, :, None, None, None, None]
+            # recon_lg_contact = recon_lg_contact * handobject.obj_pt_mask[:, :, None, None, None, None]
+            recon_lg_contact[..., 0][recon_lg_contact[..., 0] < 0.03] = 0  ## maskout low contact prob
 
             # handobject.load_from_batch_object_only(batch)
             # obj_msdf = handobject.obj_msdf[:, :, :self.msdf_k**3].view(-1, self.msdf_k, self.msdf_k, self.msdf_k)
@@ -519,94 +524,3 @@ class LGCDiffTrainer(L.LightningModule):
                 'frequency': 1
             }
         }
-
-    def _recreate_optimizer(self):
-        """
-        Recreate the optimizer and scheduler to include newly unfrozen parameters.
-        This is necessary when parameters are unfrozen after optimizer initialization,
-        as PyTorch optimizers fix their parameter list at creation time.
-        """
-        # Get current optimizer state
-        old_optimizer = self.trainer.optimizers[0]
-
-        # Count trainable parameters before and for logging
-        trainable_params_before = sum(p.numel() for p in old_optimizer.param_groups[0]['params'] if p.requires_grad)
-        trainable_params_after = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-
-        # Create new optimizer with all currently trainable parameters
-        new_optimizer = torch.optim.AdamW(
-            filter(lambda p: p.requires_grad, self.model.parameters()),
-            lr=self.lr
-        )
-
-        # Recreate scheduler for the remaining epochs
-        max_epochs = self.cfg.trainer.max_epochs
-        remaining_epochs = max_epochs - self.current_epoch
-        warmup_epochs = max(1, int(0.05 * remaining_epochs))
-
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            new_optimizer,
-            T_max=remaining_epochs - warmup_epochs,
-            eta_min=self.lr * 0.01
-        )
-
-        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
-            new_optimizer,
-            start_factor=0.1,
-            end_factor=1.0,
-            total_iters=warmup_epochs
-        )
-
-        new_scheduler = torch.optim.lr_scheduler.SequentialLR(
-            new_optimizer,
-            schedulers=[warmup_scheduler, scheduler],
-            milestones=[warmup_epochs]
-        )
-
-        # Replace the optimizer and scheduler in Lightning's trainer
-        self.trainer.optimizers = [new_optimizer]
-        self.trainer.lr_scheduler_configs[0].scheduler = new_scheduler
-
-        print(f"Optimizer updated: {trainable_params_before:,} -> {trainable_params_after:,} trainable parameters")
-        print(f"Scheduler recreated for remaining {remaining_epochs} epochs")
-    
-    def get_kl_weight(self):
-        """
-        Compute dynamic KL weight with linear warmup annealing.
-        Gradually increases from 0 to target weight over kl_warmup_epochs.
-        """
-        if not self.kl_anneal_enabled or self.kl_warmup_epochs == 0:
-            return self.loss_weights.w_kl
-
-        # Linear warmup: w_kl/n -> w_kl over kl_warmup_epochs
-        warmup_progress = min(1.0, (self.current_epoch + 1) / self.kl_warmup_epochs)
-        return warmup_progress * self.loss_weights.w_kl
-
-    def loss_net(self, pred_lgc, gt_lgc, mu, logvar, pred_hand_verts, gt_hand_verts, contact_verts_mask):
-        """
-        Compute the loss for training the GRIDAE
-        1. Reconstruction loss between x and x_hat
-        2. KL-divergence loss on z_e with dynamic weighting (annealing)
-        """
-        pred_contact, pred_cse = pred_lgc[..., 0], pred_lgc[..., 1:]
-        gt_contact, gt_cse = gt_lgc[..., 0], gt_lgc[..., 1:]
-        contact_loss = F.mse_loss(pred_contact, gt_contact)
-        cse_loss = F.mse_loss(pred_cse, gt_cse).item()
-        kl_loss = kl_div_normal_muvar(mu, logvar).item()
-        hand_rec_loss = masked_rec_loss(pred_hand_verts, gt_hand_verts, contact_verts_mask).item()
-
-        # Dynamic KL weight with annealing
-        kl_weight = self.get_kl_weight()
-
-        loss_dict = {
-            'contact_loss': contact_loss,
-            'cse_loss': cse_loss,
-            'kl_loss': kl_loss,
-            'hand_rec_loss': hand_rec_loss,
-            'kl_weight': kl_weight,  # Log the current KL weight
-            'total_loss': self.loss_weights.w_contact * contact_loss + self.loss_weights.w_cse * cse_loss\
-                + kl_weight * kl_loss + self.loss_weights.w_rec * hand_rec_loss
-        }
-
-        return loss_dict
-    
