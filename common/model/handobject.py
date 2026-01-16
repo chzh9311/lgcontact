@@ -52,6 +52,7 @@ class HandObject:
         self.obj_com = None
         self.inv_obj_rot = cfg.dataset_name == 'grab'
         self.contact_unit = cfg.contact_unit
+        self.normalized_coords = get_grid(kernel_size=self.cfg.msdf.kernel_size, device=self.device).reshape(-1, 3).float()
 
     def __copy__(self):
         new_ho = HandObject(cfg=self.cfg, device=self.device, normalize=self.normalize)
@@ -191,19 +192,24 @@ class HandObject:
         ## Compute Local grid contact representation
         if self.contact_unit == 'grid':
             self.obj_msdf = batch['objMsdf'].clone().to(self.device).float()
-            ml_dist, ml_cse, mask, hand_vert_mask, ho_dist, normalized_coords = msdf2mlcontact(self.obj_msdf, self.hand_verts,
-                                                                                      self.hand_cse, self.cfg.msdf.kernel_size, self.cfg.msdf.scale,
-                                                                                      self.mano_layer.th_faces, pool=pool)
+            # ml_dist, ml_cse, mask, hand_vert_mask, ho_dist, normalized_coords = msdf2mlcontact(self.obj_msdf, self.hand_verts,
+            #                                                                           self.hand_cse, self.cfg.msdf.kernel_size, self.cfg.msdf.scale,
+            #                                                                           self.mano_layer.th_faces, pool=pool)
 
-            ml_dist[mask] = sdf_to_contact(ml_dist[mask] / (self.cfg.msdf.scale / (self.cfg.msdf.kernel_size-1)), None, method=2)
+            # ml_dist[mask] = sdf_to_contact(ml_dist[mask] / (self.cfg.msdf.scale / (self.cfg.msdf.kernel_size-1)), None, method=2)
             ## Do the mapping: 0 -> -1; 1 -> 0; infty -> 1: contact = 1 - 2/(dist + 1)
-            ho_dist = ho_dist / self.cfg.msdf.scale # For grid-level contact
-            self.n_ho_dist = 1 - 2 / (ho_dist + 1)
-            # ml_contact[mask, :, :, :, 0] = sdf_to_contact(ml_contact[mask, :, :, :, 0] / (self.cfg.msdf.scale / self.cfg.msdf.num_grids), None, method=0)
-            self.ml_contact = torch.cat([ml_dist.unsqueeze(-1), ml_cse], dim=-1)
-            self.normalized_coords = normalized_coords
-            self.obj_pt_mask = mask
-            self.hand_vert_mask = hand_vert_mask
+            # ho_dist = ho_dist / self.cfg.msdf.scale # For grid-level contact
+            # self.n_ho_dist = 1 - 2 / (ho_dist + 1)
+            # # ml_contact[mask, :, :, :, 0] = sdf_to_contact(ml_contact[mask, :, :, :, 0] / (self.cfg.msdf.scale / self.cfg.msdf.num_grids), None, method=0)
+            # self.ml_contact = torch.cat([ml_dist.unsqueeze(-1), ml_cse], dim=-1)
+            # self.normalized_coords = normalized_coords
+            # self.obj_pt_mask = mask
+            # self.hand_vert_mask = hand_vert_mask
+
+            self.n_ho_dist = batch['nHoDist'].clone().to(self.device).float()
+            self.ml_contact = torch.cat([batch['localGridContact'], batch['localGridCSE']], dim=-1).to(self.device).float()
+            self.obj_pt_mask = batch['objPtMask'].clone().to(self.device).bool()
+            self.hand_vert_mask = batch['handVertMask'].clone().to(self.device).bool()
 
             ## For profiling
             # self.normalized_coords = get_grid(kernel_size=self.cfg.msdf.kernel_size, device=self.device).reshape(-1, 3).float()

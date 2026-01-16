@@ -5,9 +5,10 @@ import torch
 import os.path as osp
 from torch.utils.data import Dataset
 
-from common.utils.geometry import transform_obj
+from common.utils.geometry import transform_obj, sdf_to_contact
 from common.utils.vis import o3dmesh_from_trimesh, o3dmesh
 from pytorch3d.transforms import axis_angle_to_matrix
+import h5py
 
 def get_kine_parent(idx):
     if idx in [1, 4, 7, 10, 13]:
@@ -20,7 +21,7 @@ kinetree = {'Index': [0, 1, 2, 3, 17], 'Middle': [0, 4, 5, 6, 18], 'Little': [0,
     
 
 class BaseHOIDataset(Dataset):
-    def __init__(self, cfg, split, load_msdf=False, test_gt=False):
+    def __init__(self, cfg, split, load_msdf=False, load_grid_contact=False, test_gt=False):
         super(BaseHOIDataset, self).__init__()
         self.data_dir = cfg.dataset_path
         self.preprocessed_dir = cfg.get('preprocessed_dir', 'data/preprocessed')
@@ -35,9 +36,10 @@ class BaseHOIDataset(Dataset):
             self.msdf_path = osp.join(self.preprocessed_dir, cfg.dataset_name,
                                     f'msdf_{cfg.msdf.num_grids}_{cfg.msdf.kernel_size}_{int(cfg.msdf.scale*1000):02d}mm')
             self.msdf_scale = cfg.msdf.scale
+            self.msdf_kernel_size = cfg.msdf.kernel_size
         else:
             self.msdf_path = None
-
+        
         self._load_data()
 
         if self.downsample_rate > 1:
@@ -48,9 +50,17 @@ class BaseHOIDataset(Dataset):
                 self.hand_sides = self.sample_frames(self.hand_sides)
                 self.lh_data = self.sample_frames(self.lh_data)
 
+        if load_grid_contact:
+            self.grid_contact_ds = osp.join(self.preprocessed_dir, cfg.dataset_name, split,
+                            f'hand_grid_contact_{cfg.msdf.num_grids}_{cfg.msdf.kernel_size}_{int(cfg.msdf.scale*1000):02d}mm_every{self.downsample_rate}.h5')
+        else:
+            self.grid_contact_ds = None
+
+
         if self.split == 'test' and not self.test_gt:
             self.num_samples = cfg.test_samples
 
+        self.hand_cse = torch.load(cfg.get('hand_cse_path', 'data/misc/hand_cse.ckpt'))['state_dict']['embedding_tensor'].detach().cpu().numpy()
         ## Calculate partitions
 
     def _load_data(self):
@@ -87,10 +97,13 @@ class BaseHOIDataset(Dataset):
             obj_trans = self.object_data['transl'][idx]
 
             ## Transform the vertices:
+            ## TODO: output the correct object rotations.
             objR = axis_angle_to_matrix(obj_rot).detach().cpu().numpy()
+            if self.dataset_name == 'grab':
+                objR = objR.T
             objt = obj_trans.detach().cpu().numpy()
-            obj_sample_pts = obj_sample_pts @ objR + objt
-            obj_sample_normals = obj_sample_normals @ objR
+            obj_sample_pts = obj_sample_pts @ objR.T + objt
+            obj_sample_normals = obj_sample_normals @ objR.T
 
             samples = {}
             if self.hand_sides is not None:
@@ -146,6 +159,41 @@ class BaseHOIDataset(Dataset):
                 'handPartIds': hand_part_ids,
                 'handNormals': np.stack(handN, axis=0),
             })
+            
+            if self.grid_contact_ds is not None:
+                with h5py.File(self.grid_contact_ds, 'r') as ds:
+                    ho_dist = ds['ho_dist'][idx]  # (n_grids, 778)
+                    contact_mask = ho_dist < self.msdf_scale
+                    grid_mask = np.any(contact_mask, axis=-1)
+                    local_grid_dist = ds['local_grid'][idx]
+                    sample['localGridContact'] = np.zeros_like(local_grid_dist)
+                    sample['localGridContact'][grid_mask] = sdf_to_contact(
+                        local_grid_dist[grid_mask] / (self.msdf_scale / (self.msdf_kernel_size-1)), dot_normal=None, method=2)
+                    nn_point = ds['nn_point'][idx][grid_mask].reshape(-1, self.msdf_kernel_size**3, 3)
+                    nn_face_idx = ds['nn_face_idx'][idx][grid_mask].reshape(-1, self.msdf_kernel_size**3)  # (M * K^3,)
+
+                ## Apply inverse transform to hand vertices
+                handV = (handV - objt[np.newaxis, :]) @ objR
+
+                nn_vert_idx = hmodels[sbj_id].th_faces[nn_face_idx]  # (M, K^3, 3)
+                face_verts = handV[nn_vert_idx]  # (M, K^3, 3, 3)
+                face_cse_t = self.hand_cse[nn_vert_idx]  # (M, K^3, 3, cse_dim)
+
+                # Calculate barycentric weights using matrix inversion (pure numpy operations)
+                face_verts_transposed = np.swapaxes(face_verts, -1, -2)  # (M, K^3, 3, 3)
+                w = np.linalg.inv(face_verts_transposed) @ nn_point[..., np.newaxis]  # (M, K^3, 3, 1)
+
+                # Make sure weights are all positive and normalized
+                w = np.clip(w, 0, 1)
+                w = w / (np.sum(w, axis=2, keepdims=True)+1e-8)  # (M, K^3, 3, 1)
+
+                grid_hand_cse = np.sum(face_cse_t * w, axis=2).reshape(-1, self.msdf_kernel_size, self.msdf_kernel_size, self.msdf_kernel_size, self.hand_cse.shape[1])  # (kernel_size, kernel_size, kernel_size, cse_dim)
+                sample['localGridCSE'] = np.zeros((local_grid_dist.shape[0], self.msdf_kernel_size, self.msdf_kernel_size, self.msdf_kernel_size, self.hand_cse.shape[1]), dtype=np.float32)
+                sample['localGridCSE'][grid_mask] = grid_hand_cse
+                sample['nHoDist'] = 1 - 2 / (np.min(ho_dist / self.msdf_scale, axis=-1) + 1)
+                sample['objPtMask'] = grid_mask
+                sample['handVertMask'] = contact_mask
+
         else:
             obj_name = self.test_objects[int(idx // self.num_samples)]
             obj_sample_pts = self.obj_info[obj_name]['samples'] # n_sample x 3

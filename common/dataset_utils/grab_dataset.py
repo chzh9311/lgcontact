@@ -114,10 +114,11 @@ def regularize_part_id(contacts: torch.Tensor, hand_side: str):
 
 
 class GRABDataset(BaseHOIDataset):
-    def __init__(self, cfg: edict, split: str, load_msdf: bool = False, test_gt: bool = False):
+    def __init__(self, cfg: edict, split: str, load_msdf: bool = False, load_grid_contact: bool = False, test_gt: bool = False):
         # self.part_samples = cfg.hand_part_samples
         self.obj_dir = cfg.dataset_path
-        super().__init__(cfg, split, load_msdf=load_msdf, test_gt=test_gt)
+        self.dataset_name = 'grab'
+        super().__init__(cfg, split, load_msdf=load_msdf, load_grid_contact=load_grid_contact, test_gt=test_gt)
     
     @staticmethod
     def load_mesh_info(data_dir, msdf_path=None):
