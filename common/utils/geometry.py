@@ -158,28 +158,46 @@ def calculate_penetration_cost(hand_verts, hand_normals, object_verts, object_no
     return pen_score
 
 
-def sdf_to_contact(sdf, dot_normal, method=0):
+def sdf_to_contact(sdf, dot_normal=None, method=0):
     """
     Transform normalized SDF into some contact value
-    :param sdf: NORMALIZED SDF, 1 is surface of object
+    :param sdf: NORMALIZED SDF, 1 is surface of object (torch.Tensor or np.ndarray)
+    :param dot_normal: dot product with normal (torch.Tensor or np.ndarray), required for method 4
     :param method: select method
     :return: contact (batch, S, 1)
     """
-    if method == 0:
-        c = 1 / (sdf + 0.0001)   # Exponential dropoff
-    elif method == 1:
-        c = -sdf + 2    # Linear dropoff
-    elif method == 2:
-        c = 1 / (sdf + 0.0001)   # Exponential dropoff
-        c = torch.pow(c, 2)
-    elif method == 3:
-        c = torch.sigmoid(-sdf + 2.5)
-    elif method == 4:
-        c = (-dot_normal/2+0.5) / (sdf + 0.0001)   # Exponential dropoff with sharp normal
-    elif method == 5:
-        c = 1 / (sdf + 0.0001)   # Proxy for other stuff
+    is_numpy = isinstance(sdf, np.ndarray)
 
-    return torch.clamp(c, 0.0, 1.0)
+    if is_numpy:
+        if method == 0:
+            c = 1 / (sdf + 0.0001)   # Exponential dropoff
+        elif method == 1:
+            c = -sdf + 2    # Linear dropoff
+        elif method == 2:
+            c = 1 / (sdf + 0.0001)   # Exponential dropoff
+            c = np.power(c, 2)
+        elif method == 3:
+            c = 1 / (1 + np.exp(-(-sdf + 2.5)))  # Sigmoid
+        elif method == 4:
+            c = (-dot_normal/2+0.5) / (sdf + 0.0001)   # Exponential dropoff with sharp normal
+        elif method == 5:
+            c = 1 / (sdf + 0.0001)   # Proxy for other stuff
+        return np.clip(c, 0.0, 1.0)
+    else:
+        if method == 0:
+            c = 1 / (sdf + 0.0001)   # Exponential dropoff
+        elif method == 1:
+            c = -sdf + 2    # Linear dropoff
+        elif method == 2:
+            c = 1 / (sdf + 0.0001)   # Exponential dropoff
+            c = torch.pow(c, 2)
+        elif method == 3:
+            c = torch.sigmoid(-sdf + 2.5)
+        elif method == 4:
+            c = (-dot_normal/2+0.5) / (sdf + 0.0001)   # Exponential dropoff with sharp normal
+        elif method == 5:
+            c = 1 / (sdf + 0.0001)   # Proxy for other stuff
+        return torch.clamp(c, 0.0, 1.0)
 
 
 def batched_index_select(t, dim, inds):
