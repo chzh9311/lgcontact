@@ -13,7 +13,7 @@ from omegaconf import OmegaConf
 
 OmegaConf.register_new_resolver("add", lambda x, y: x + y, replace=True)
 
-@hydra.main(config_path="../config", config_name="mlcontact_gen")
+@hydra.main(config_path="../config", config_name="mlcdiff")
 def vis_msdf_data_sample(cfg):
     dm = HOIDatasetModule(cfg)
 
@@ -62,12 +62,12 @@ def vis_local_grid_interact(cfg):
     mano_layer = ManoLayer(mano_root = cfg.data.mano_root, use_pca=False, side='right', flat_hand_mean=True, ncomps=45)
     hand_faces = mano_layer.th_faces.numpy()
     dm.prepare_data()
-    dm.setup('test')
+    dm.setup('validate')
     # train_loader = dm.train_dataloader()
-    # val_loader = dm.val_dataloader()
-    test_loader = dm.test_dataloader()
-    print(f"Testing dataset size: {len(dm.test_set)}")
-    for batch_idx, batch in tqdm(enumerate(test_loader), total=len(test_loader), desc="Visualizing testing data"):
+    val_loader = dm.val_dataloader()
+    # test_loader = dm.test_dataloader()
+    print(f"Validation dataset size: {len(dm.val_set)}")
+    for batch_idx, batch in tqdm(enumerate(val_loader), total=len(val_loader), desc="Visualizing validation data"):
         grid_data = batch['localGrid']  # (B, K, K, K, C)
         batch_size = grid_data.shape[0]
         for b in range(10):
@@ -81,13 +81,13 @@ def vis_local_grid_interact(cfg):
             obj_name = batch['obj_name'][b]
 
             # Reconstruct object mesh
-            obj_mesh_data = dm.test_set.simp_obj_mesh[obj_name]
+            obj_mesh_data = dm.val_set.simp_obj_mesh[obj_name]
             # Handle rotation - check if it's axis-angle or matrix
             if obj_rot.shape == (3,):
                 from pytorch3d.transforms import axis_angle_to_matrix
                 import torch
                 objR = axis_angle_to_matrix(torch.from_numpy(obj_rot)).numpy()
-                if dm.test_set.dataset_name == 'grab':
+                if dm.val_set.dataset_name == 'grab':
                     objR = objR.T
             else:
                 objR = obj_rot
@@ -98,7 +98,7 @@ def vis_local_grid_interact(cfg):
 
             # Visualize
             print(f"\nVisualizing sample {b} from batch {batch_idx} (object: {obj_name})")
-            geoms = visualize_local_grid_with_hand(local_grid, hand_verts, hand_faces, dm.test_set.hand_cse, cfg.msdf.kernel_size,
+            geoms = visualize_local_grid_with_hand(local_grid, hand_verts, hand_faces, dm.val_set.hand_cse, cfg.msdf.kernel_size,
                                            cfg.msdf.scale, contact_point=contact_point, obj_mesh=obj_mesh)
             o3d.visualization.draw_geometries(geoms)
             # break

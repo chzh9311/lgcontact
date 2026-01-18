@@ -4,7 +4,8 @@ model_name: latent_diffusion
 ae_pretrained_weight: ${ae.pretrained_weight}
 
 unet:
-  d_x: ${add:1,${ae.feat_dim}} # contact (1) + latent feat (${ae.feat_dim})
+  # d_x: ${add:1,${ae.feat_dim}} # contact (1) + latent feat (${ae.feat_dim})
+  d_x: ${ae.feat_dim} # latent feat (${ae.feat_dim})
   d_model: 512
   time_embed_mult: 2
   nblocks: 4
@@ -23,7 +24,7 @@ unet:
     feat_dim: ${generator.unet.context_dim}
 
 ddpm:
-  steps: 100
+  steps: 1000
   schedule_cfg:
     beta: [0.0001, 0.01]
     beta_schedule: 'linear'

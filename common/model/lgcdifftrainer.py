@@ -164,26 +164,33 @@ class LGCDiffTrainer(L.LightningModule):
         lg_contact = handobject.ml_contact
         batch_size, n_grids = lg_contact.shape[:2]
         obj_msdf = handobject.obj_msdf[:, :, :self.msdf_k**3].view(-1, 1, self.msdf_k, self.msdf_k, self.msdf_k)
-        n_ho_dist = handobject.n_ho_dist
+        # n_ho_dist = handobject.n_ho_dist
 
         obj_msdf_center = handobject.obj_msdf[:, :, self.msdf_k**3:] # B x 3
         ## First process all grids separately using GRIDAE
         lg_contact = lg_contact.view(-1, self.msdf_k, self.msdf_k, self.msdf_k, lg_contact.shape[-1]).permute(0, 4, 1, 2, 3)
         posterior, obj_feat, multi_scale_obj_cond = self.grid_ae.encode(lg_contact, obj_msdf)
         obj_pc = torch.cat([obj_msdf_center, obj_feat.view(batch_size, n_grids, -1)], dim=-1)
-        z = torch.cat([n_ho_dist.unsqueeze(-1), posterior.sample().view(batch_size, n_grids, -1)], dim=-1) # n_dim + 1
+        # z = torch.cat([n_ho_dist.unsqueeze(-1), posterior.sample().view(batch_size, n_grids, -1)], dim=-1) # n_dim + 1
+        z = posterior.sample().view(batch_size, n_grids, -1) # n_dim
 
         input_data = {'x': z, 'obj_pc': obj_pc.permute(0, 2, 1)}
-    
-        err = self.model(input_data)['err']
-        grid_loss = F.mse_loss(err[:, :, 0], torch.zeros_like(err[:, :, 0]), reduction='mean')  # only compute loss on n_ho_dist dimension
-        diff_loss = F.mse_loss(err[:, :, 1:], torch.zeros_like(err[:, :, 1:]), reduction='none')
-        obj_pt_mask = input_data['x'][:, :, 0:1] < 0
-        diff_loss = torch.sum(diff_loss * obj_pt_mask) / (torch.sum(obj_pt_mask) + 1e-6) / diff_loss.shape[2]
 
-        loss_dict = {f'{stage}/grid_contact_loss': grid_loss,
-                     f'{stage}/latent_diff_loss': diff_loss,
-                     f'{stage}/total_loss': grid_loss + diff_loss}
+        # Check for NaN in input data
+        for key, value in input_data.items():
+            if torch.isnan(value).any():
+                raise ValueError(f"NaN detected in input_data['{key}'] at batch_idx {batch_idx}")
+
+        loss = self.model(input_data)
+        # grid_loss = F.mse_loss(err[:, :, 0], torch.zeros_like(err[:, :, 0]), reduction='mean')  # only compute loss on n_ho_dist dimension
+        # diff_loss = F.mse_loss(err[:, :, 1:], torch.zeros_like(err[:, :, 1:]), reduction='none')
+        # obj_pt_mask = input_data['x'][:, :, 0:1] < 0
+        # diff_loss = torch.sum(diff_loss * obj_pt_mask) / (torch.sum(obj_pt_mask) + 1e-6) / diff_loss.shape[2]
+
+        # loss_dict = {f'{stage}/grid_contact_loss': grid_loss,
+        #              f'{stage}/latent_diff_loss': diff_loss,
+        #              f'{stage}/total_loss': grid_loss + diff_loss}
+        loss_dict = {f'{stage}/total_loss': loss}
         if stage == 'val':
             self.log_dict(loss_dict, prog_bar=False, sync_dist=True, on_step=False, on_epoch=True)
         else:
@@ -195,12 +202,12 @@ class LGCDiffTrainer(L.LightningModule):
             simp_obj_mesh = getattr(self.trainer.datamodule, f'{stage}_set').simp_obj_mesh
             obj_templates = [trimesh.Trimesh(simp_obj_mesh[name]['verts'], simp_obj_mesh[name]['faces'])
                             for name in batch['objName']]
-            sample_x = samples[:, 0, -1] ## 1 + latent
-            grid_contact, sample_latent = sample_x[:, :, 0], sample_x[:, :, 1:]
-            grid_contact = grid_contact < 0
-            pred_hand_verts, pred_verts_mask = self.reconstruct_from_latent(sample_latent, grid_contact, multi_scale_obj_cond, obj_msdf_center)
+            sample_latent = samples[:, 0, -1] ## 1 + latent
+            # grid_contact, sample_latent = sample_x[:, :, 0], sample_x[:, :, 1:]
+            # grid_contact = grid_contact < 0
+            pred_hand_verts, pred_verts_mask, pred_grid_contact = self.reconstruct_from_latent(sample_latent, multi_scale_obj_cond, obj_msdf_center)
 
-            # gt_latent = input_data['x'][:, :, 1:]
+            gt_latent = input_data['x']
 
             # recon_lg_contact, z_e, obj_feat = self.grid_ae(
             #     lg_contact, obj_msdf=obj_msdf, sample_posterior=False)
@@ -219,16 +226,21 @@ class LGCDiffTrainer(L.LightningModule):
             #     mask_th = 0.02
             # )
 
-            # gt_rec_hand_verts, gt_rec_verts_mask = self.reconstruct_from_latent(gt_latent, handobject.obj_pt_mask, multi_scale_obj_cond, obj_msdf_center)
+            gt_rec_hand_verts, gt_rec_verts_mask, gt_rec_grid_contact = self.reconstruct_from_latent(gt_latent, multi_scale_obj_cond, obj_msdf_center)
 
             pred_contact_img, _ = visualize_grid_contact(contact_pts = obj_msdf_center[vis_idx].detach().cpu().numpy(),
-                                                    contact_pt_mask = grid_contact[vis_idx].detach().cpu().numpy(),
+                                                    pt_contact = pred_grid_contact[vis_idx].detach().cpu().numpy(),
+                                                    grid_scale = self.cfg.msdf.scale,
+                                                    obj_mesh = obj_templates[vis_idx],
+                                                    w=400, h=400)
+            gt_rec_contact_img, _ = visualize_grid_contact(contact_pts = obj_msdf_center[vis_idx].detach().cpu().numpy(),
+                                                    pt_contact = gt_rec_grid_contact[vis_idx].detach().cpu().numpy(),
                                                     grid_scale = self.cfg.msdf.scale,
                                                     obj_mesh = obj_templates[vis_idx],
                                                     w=400, h=400)
 
             gt_contact_img, _ = visualize_grid_contact(contact_pts = obj_msdf_center[vis_idx].detach().cpu().numpy(),
-                                                    contact_pt_mask = handobject.obj_pt_mask[vis_idx].detach().cpu().numpy(),
+                                                    pt_contact = handobject.obj_pt_mask[vis_idx].detach().cpu().float().numpy(),
                                                     grid_scale = self.cfg.msdf.scale,
                                                     obj_mesh = obj_templates[vis_idx],
                                                     w=400, h=400)
@@ -243,14 +255,14 @@ class LGCDiffTrainer(L.LightningModule):
                                         grid_scale=self.cfg.msdf.scale,
                                         h=400, w=400)
 
-            # gt_rec_img, gt_rec_geoms = visualize_recon_hand_w_object(hand_verts=gt_rec_hand_verts[vis_idx].detach().cpu().numpy(),
-            #                             hand_verts_mask=gt_rec_verts_mask[vis_idx].detach().cpu().numpy(),
-            #                             hand_faces=self.mano_layer.th_faces.detach().cpu().numpy(),
-            #                             obj_mesh=obj_templates[vis_idx],
-            #                             mesh_color=[0.2, 0.4, 0.8],
-            #                             msdf_center=obj_msdf_center[vis_idx].detach().cpu().numpy(),
-            #                             grid_scale=self.cfg.msdf.scale,
-            #                             h=400, w=400)
+            gt_rec_img, gt_rec_geoms = visualize_recon_hand_w_object(hand_verts=gt_rec_hand_verts[vis_idx].detach().cpu().numpy(),
+                                        hand_verts_mask=gt_rec_verts_mask[vis_idx].detach().cpu().numpy(),
+                                        hand_faces=self.mano_layer.th_faces.detach().cpu().numpy(),
+                                        obj_mesh=obj_templates[vis_idx],
+                                        mesh_color=[0.2, 0.4, 0.8],
+                                        msdf_center=obj_msdf_center[vis_idx].detach().cpu().numpy(),
+                                        grid_scale=self.cfg.msdf.scale,
+                                        h=400, w=400)
 
             gt_img, gt_geoms = visualize_recon_hand_w_object(hand_verts=handobject.hand_verts[vis_idx].detach().cpu().numpy(),
                                         hand_verts_mask=handobject.hand_vert_mask[vis_idx].any(dim=0).detach().cpu().numpy(),
@@ -261,19 +273,19 @@ class LGCDiffTrainer(L.LightningModule):
                                         grid_scale=self.cfg.msdf.scale,
                                         h=400, w=400)
 
-            contact_img = np.concatenate([gt_contact_img, pred_contact_img], axis=0)
-            img = np.concatenate([gt_img, pred_img], axis=0)
+            contact_img = np.concatenate([gt_contact_img, gt_rec_contact_img, pred_contact_img], axis=0)
+            img = np.concatenate([gt_img, gt_rec_img, pred_img], axis=0)
             if hasattr(self.logger, 'experiment'):
                 if hasattr(self.logger.experiment, 'add_image'):
                     # TensorBoardLogger
                     global_step = self.current_epoch * len(eval(f'self.trainer.datamodule.{stage}_dataloader()')) + batch_idx
-                    self.logger.experiment.add_image(f'{stage}/GT_vs_sampled_contact', contact_img, global_step, dataformats='HWC')
-                    self.logger.experiment.add_image(f'{stage}/GT_vs_sampled_hand', img, global_step, dataformats='HWC')
+                    self.logger.experiment.add_image(f'{stage}/GT_vs_GTRec_vs_sampled_contact', contact_img, global_step, dataformats='HWC')
+                    self.logger.experiment.add_image(f'{stage}/GT_vs_GTRec_vs_sampled_hand', img, global_step, dataformats='HWC')
                 elif hasattr(self.logger.experiment, 'log'):
                     # WandbLogger
                     import wandb
-                    self.logger.experiment.log({f'{stage}/GT_vs_sampled_contact': wandb.Image(contact_img)}, step=self.global_step)
-                    self.logger.experiment.log({f'{stage}/GT_vs_sampled_hand': wandb.Image(img)}, step=self.global_step)
+                    self.logger.experiment.log({f'{stage}/GT_vs_GTRec_vs_sampled_contact': wandb.Image(contact_img)}, step=self.global_step)
+                    self.logger.experiment.log({f'{stage}/GT_vs_GTRec_vs_sampled_hand': wandb.Image(img)}, step=self.global_step)
 
         return loss_dict[f'{stage}/total_loss']
                                   
@@ -316,14 +328,15 @@ class LGCDiffTrainer(L.LightningModule):
         self.log_dict(loss_dict, prog_bar=True, sync_dist=True)
         return loss_dict['total_loss']
     
-    def reconstruct_from_latent(self, latent, grid_contact_mask, multi_scale_obj_cond, obj_msdf_center):
+    def reconstruct_from_latent(self, latent, multi_scale_obj_cond, obj_msdf_center):
         batch_size, n_grids = latent.shape[:2]
         latent = latent.reshape(batch_size*n_grids, -1)
         recon_lg_contact = self.grid_ae.decode(latent, multi_scale_obj_cond)
         recon_lg_contact = recon_lg_contact.view(batch_size, n_grids, -1, self.msdf_k ** 3).permute(0, 1, 3, 2)
-        sample_contact = recon_lg_contact[..., 0] * grid_contact_mask[:, :, None].float()
+        sample_contact = recon_lg_contact[..., 0] # * grid_contact_mask[:, :, None].float()
         sample_cse = recon_lg_contact[..., 1:]
         grid_coords = obj_msdf_center[:, :, None, :] + self.grid_coords.view(-1, 3)[None, None, :, :]  # B x N x K^3 x 3
+        sample_contact[sample_contact < 0.03] = 0  ## maskout low contact prob
 
         pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
             self.handcse, None,
@@ -332,7 +345,9 @@ class LGCDiffTrainer(L.LightningModule):
             mask_th = 2
         )
 
-        return pred_hand_verts, pred_verts_mask
+        grid_contact = sample_contact.max(dim=-1)[0]
+
+        return pred_hand_verts, pred_verts_mask, grid_contact
     
     def on_test_epoch_start(self):
         self.pool = Pool(processes=min(self.cfg.test.batch_size, 16))

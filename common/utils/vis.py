@@ -729,8 +729,8 @@ def visualize_local_grid(msdf, kernel_size, point_idx, obj_mesh):
     )
 
 
-def visualize_grid_contact(contact_pts, contact_pt_mask, grid_scale, obj_mesh, w, h, bbox_alpha=0.2):
-    bboxes = create_bbox_geomtries(contact_pts, grid_scale, contact_pt_mask, alpha=bbox_alpha)
+def visualize_grid_contact(contact_pts, pt_contact, grid_scale, obj_mesh, w, h, bbox_alpha=0.2):
+    bboxes = create_bbox_geomtries(contact_pts, grid_scale, pt_contact, alpha=bbox_alpha)
     obj_geom = o3dmesh_from_trimesh(obj_mesh, color=[0.7, 0.7, 0.7])
     # Wrap bboxes with alpha values
     bbox_geoms = [{'geometry': bbox, 'alpha': bbox_alpha} for bbox in bboxes]
@@ -739,9 +739,10 @@ def visualize_grid_contact(contact_pts, contact_pt_mask, grid_scale, obj_mesh, w
     return img, vis_geoms
 
 
-def create_bbox_geomtries(msdf_center, grid_scale, contact_mask=None, alpha=0.3):
+def create_bbox_geomtries(msdf_center, grid_scale, contact=None, alpha=0.3):
     # Create bounding boxes for each MSDF center using semi-transparent cubes
     bbox_geometries = []
+    inferno_cmap = plt.colormaps['inferno']
     for i, center in enumerate(msdf_center):
         # Create a box mesh centered at origin with size 2*grid_scale
         box = o3d.geometry.TriangleMesh.create_box(
@@ -754,8 +755,13 @@ def create_bbox_geomtries(msdf_center, grid_scale, contact_mask=None, alpha=0.3)
         # create_box creates box from (0,0,0) to (width, height, depth), so we need to center it
         box.translate(center - grid_scale * np.array([1, 1, 1]))
 
-        # Set color based on contact mask (blue for no contact, red for contact)
-        box_color = [0, 0, 1] if contact_mask is None or not contact_mask[i] else [1, 0, 0]
+        # Set color based on contact value using inferno colormap (0->blue, 1->red)
+        if contact is None:
+            box_color = [0, 0, 1]
+        else:
+            # Clamp value to [0, 1] and apply inferno colormap
+            value = np.clip(contact[i], 0, 1)
+            box_color = inferno_cmap(value)[:3]
         box.paint_uniform_color(box_color)
 
         bbox_geometries.append(box)

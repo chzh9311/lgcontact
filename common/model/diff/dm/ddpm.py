@@ -88,10 +88,11 @@ class DDPM(nn.Module):
         output = self.eps_model(x_t, ts, condtion)
 
         ## calculate loss
-        # loss = self.criterion(output, noise, reduction='none')
-        err = output - noise
+        loss = self.criterion(output, noise, reduction='mean')
+        # err = output - noise
+        return loss
 
-        return {'err': err}
+        # return {'err': err}
     
     def model_predict(self, x_t: torch.Tensor, t: torch.Tensor, cond: torch.Tensor) -> Tuple:
         """ Get and process model prediction

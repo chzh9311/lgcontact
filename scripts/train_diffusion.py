@@ -67,9 +67,11 @@ def main(cfg):
         pl_model = LGCDiffTrainer(gridae, model, cfg)
         trainer.fit(pl_model, datamodule=data_module, ckpt_path=cfg.train.get('resume_ckpt', None))
     elif cfg.run_phase == 'val':
-        pl_model = LGCDiffTrainer.load_from_checkpoint(cfg.val.get('ckpt_path', None), gridae, model, cfg)
+        pl_model = LGCDiffTrainer(gridae, model, cfg)
+        # pl_model = LGCDiffTrainer.load_from_checkpoint(cfg.val.get('ckpt_path', None), gridae, model, cfg)
         trainer.validate(pl_model, datamodule=data_module)
     else:
+        # pl_model = LGCDiffTrainer(gridae, model, cfg)
         pl_model = LGCDiffTrainer.load_from_checkpoint(cfg.ckpt_path, gridae, model, cfg)
         trainer.test(pl_model, datamodule=data_module)
 

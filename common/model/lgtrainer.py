@@ -56,6 +56,7 @@ class LGTrainer(L.LightningModule):
         recon_cgrid = recon_cgrid.permute(0, 2, 3, 4, 1)
         contact, contact_hat = gt_grid_contact[..., 0], recon_cgrid[..., 0]
         cse, cse_hat = gt_grid_contact[..., 1:], recon_cgrid[..., 1:]
+        self.check_latents(posterior)
 
         batch_size = grid_sdf.shape[0]
         pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
@@ -63,7 +64,7 @@ class LGTrainer(L.LightningModule):
             contact_hat.reshape(batch_size, -1),
             cse_hat.reshape(batch_size, -1, cse.shape[-1]),
             grid_coords=self.grid_coords.view(1, -1, 3).repeat(batch_size, 1, 1),
-            mask_th = 0.02
+            mask_th = 2
         )
         loss_dict = self.loss_net(gt_grid_contact, recon_cgrid, posterior, pred_hand_verts,
                                   batch['nHandVerts'], batch['handVertMask'], gt_face_idx=batch['face_idx'],
@@ -121,54 +122,64 @@ class LGTrainer(L.LightningModule):
     def test_step(self, batch, batch_idx):
         self.grid_coords = self.grid_coords.to(self.device)
         grid_sdf, gt_grid_contact = batch['localGrid'][..., 0], batch['localGrid'][..., 1:]
-        recon_grid_contact, z_e, obj_feat = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
-        recon_grid_contact = recon_grid_contact.permute(0, 2, 3, 4, 1)
+        recon_cgrid, posterior, obj_feat = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
+        # recon_grid_contact, z_e, obj_feat = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
+        recon_cgrid = recon_cgrid.permute(0, 2, 3, 4, 1)
         batch_size = grid_sdf.shape[0]
 
         gt_rec_hand_verts, gt_rec_verts_mask = recover_hand_verts_from_contact(
-            self.handcse,
+            self.handcse, batch['face_idx'],
             gt_grid_contact[..., 0].view(batch_size, -1), gt_grid_contact[..., 1:].view(batch_size, -1, gt_grid_contact.shape[-1]-1),
             grid_coords=self.grid_coords.view(1, -1, 3).repeat(batch_size, 1, 1),
-            mask_th = 0.02
+            mask_th = 2
         )
-        gt_geoms = self.visualize_grid_and_hand(
-            grid_coords=self.grid_coords.view(-1, 3),
-            grid_contact=gt_grid_contact[..., 0].view(batch_size, -1),
-            pred_hand_verts=gt_rec_hand_verts,
-            hand_faces=self.mano_layer.th_faces,
-            pred_mask=batch['handVertMask'],
-            # pred_mask=gt_rec_verts_mask,
-            gt_hand_verts=batch['nHandVerts'],
-            gt_mask=batch['handVertMask'],
-            batch_idx=0
-        )
+        # gt_geoms = self.visualize_grid_and_hand(
+        #     grid_coords=self.grid_coords.view(-1, 3),
+        #     grid_contact=gt_grid_contact[..., 0].view(batch_size, -1),
+        #     pred_hand_verts=gt_rec_hand_verts,
+        #     hand_faces=self.mano_layer.th_faces,
+        #     pred_mask=batch['handVertMask'],
+        #     gt_hand_verts=batch['nHandVerts'],
+        #     gt_mask=batch['handVertMask'],
+        #     batch_idx=0
+        # )
 
         gt_rec_error = masked_rec_loss(gt_rec_hand_verts, batch['nHandVerts'], gt_rec_verts_mask)
         pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
-            self.handcse,
-            recon_grid_contact[..., 0].reshape(batch_size, -1),
-            recon_grid_contact[..., 1:].reshape(batch_size, -1, gt_grid_contact.shape[-1] - 1),
+            self.handcse, None,
+            recon_cgrid[..., 0].reshape(batch_size, -1),
+            recon_cgrid[..., 1:].reshape(batch_size, -1, gt_grid_contact.shape[-1] - 1),
             grid_coords=self.grid_coords.view(1, -1, 3).repeat(batch_size, 1, 1),
-            mask_th=0.02
+            mask_th=2
         )
-        pred_geoms = self.visualize_grid_and_hand(
-            grid_coords=self.grid_coords.view(-1, 3),
-            grid_contact=recon_grid_contact[..., 0].view(batch_size, -1),
-            pred_hand_verts=pred_hand_verts,
-            hand_faces=self.mano_layer.th_faces,
-            pred_mask=batch['handVertMask'],
-            # pred_mask=pred_verts_mask,
-            gt_hand_verts=batch['nHandVerts'],
-            gt_mask=batch['handVertMask'],
-            batch_idx=0
-        )
-        all_geoms = gt_geoms + [g.translate((self.cfg.msdf.scale * 3, 0, 0)) for g in pred_geoms]
-        o3d.visualization.draw_geometries(all_geoms, window_name='GT and Pred Local Grid Visualization')
+        # pred_geoms = self.visualize_grid_and_hand(
+        #     grid_coords=self.grid_coords.view(-1, 3),
+        #     grid_contact=recon_cgrid[..., 0].view(batch_size, -1),
+        #     pred_hand_verts=pred_hand_verts,
+        #     hand_faces=self.mano_layer.th_faces,
+        #     pred_mask=batch['handVertMask'],
+        #     # pred_mask=pred_verts_mask,
+        #     gt_hand_verts=batch['nHandVerts'],
+        #     gt_mask=batch['handVertMask'],
+        #     batch_idx=0
+        # )
+        # all_geoms = gt_geoms + [g.translate((self.cfg.msdf.scale * 3, 0, 0)) for g in pred_geoms]
+        # o3d.visualization.draw_geometries(all_geoms, window_name='GT and Pred Local Grid Visualization')
 
         pred_rec_error = masked_rec_loss(pred_hand_verts, batch['nHandVerts'], pred_verts_mask)
         loss_dict = {'test/gt_rec_error': gt_rec_error,
                      'test/pred_rec_error': pred_rec_error}
-        self.log_dict(loss_dict, prog_bar=True)
+        ## Test zero-contact grid reconstruction
+        # gt_grid_contact[..., 0] = 0.0
+        gt_grid_contact[:] = 0
+        recon_cgrid, posterior, obj_feat = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
+        recon_cgrid = recon_cgrid.permute(0, 2, 3, 4, 1)
+        zero_contact_rec_error = F.l1_loss(recon_cgrid[..., 0], gt_grid_contact[..., 0])
+        loss_dict['test/zero_contact_rec_error'] = zero_contact_rec_error
+        loss_dict['test/zero_contact_rec_max'] = torch.max(torch.abs(recon_cgrid[..., 0]))
+        print(loss_dict)
+
+        self.log_dict(loss_dict, prog_bar=True, on_epoch=True)
 
         ## GT visualization
         # vis_idx = 0
@@ -337,3 +348,41 @@ class LGTrainer(L.LightningModule):
 
         # Visualize
         o3d.visualization.draw_geometries([hand_mesh, obj_mesh, pcd])
+
+
+    def check_latents(self, posterior):
+        """
+        Encodes an image and checks the VAE latents for outliers or NaNs.
+        """
+        with torch.no_grad():
+            # We sample from it (just like during training)
+            latents = posterior.sample()
+            
+            # CRITICAL: Apply the Scaling Factor
+            # SD 1.5/SDXL uses 0.18215. Without this, variance is too high.
+            # scaling_factor = 0.18215
+            scaling_factor = 1
+            scaled_latents = latents * scaling_factor
+
+        # 4. Statistical Analysis
+        l_min = scaled_latents.min().item()
+        l_max = scaled_latents.max().item()
+        l_mean = scaled_latents.mean().item()
+        l_std = scaled_latents.std().item()
+        
+        print(f"Latent Statistics (Scaled):")
+        print(f"  Min:  {l_min:.4f}")
+        print(f"  Max:  {l_max:.4f}")
+        print(f"  Mean: {l_mean:.4f} (Should be close to 0)")
+        print(f"  Std:  {l_std:.4f}  (Should be close to 1)")
+
+        # 5. Health Checks
+        if torch.isnan(scaled_latents).any():
+            print("❌ FAILURE: Latents contain NaNs!")
+        elif torch.isinf(scaled_latents).any():
+            print("❌ FAILURE: Latents contain Infinity!")
+        elif abs(l_max) > 15 or abs(l_min) > 15:
+            print("⚠️ WARNING: Extreme outliers detected. Max value > 15.")
+            print("   Action: These images might destabilize training. Consider removing or clamping.")
+        else:
+            print("✅ SUCCESS: Latents look healthy and stable.")
