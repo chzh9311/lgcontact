@@ -201,12 +201,18 @@ class BaseHOIDataset(Dataset):
             ## For testing, return object with random rotations. The rng is set to make sure
             ## each idx generates fixed rotation.
             # obj_rot = R.identity()
+
             sample = {
                 'objName': obj_name,
                 'objSamplePts': obj_sample_pts,
                 'objSampleNormals': obj_sample_normals,
                 # 'objRot': obj_rot.as_rotvec(),
             }
+
+            if self.msdf_path is not None:
+                obj_msdf = self.obj_info[obj_name]['msdf'].copy() ## K^3 + 3
+                obj_msdf[:, :-3] = obj_msdf[:, :-3] / self.msdf_scale / np.sqrt(3) # Normalize SDF
+                sample['objMsdf'] = obj_msdf
 
         return sample
 

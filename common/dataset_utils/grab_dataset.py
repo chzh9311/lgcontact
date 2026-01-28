@@ -36,6 +36,7 @@ jointsMapManoToSimple = [0,
 
 
 test_objects = ['wineglass', 'fryingpan', 'mug', 'toothpaste', 'camera', 'binoculars']
+train_objects_select = ['airplane', 'alarmclock', 'apple', 'cubemedium', 'mouse', 'watch']
 
 contact_ids={'Body': 1,
              'L_Thigh': 2,
@@ -164,6 +165,7 @@ class GRABDataset(BaseHOIDataset):
         }
         self.frame_names = np.array(frame_names, dtype=np.dtypes.StringDType())
         self.test_objects = test_objects
+        # self.test_objects = train_objects_select ## to see if overfitting happens
 
         with open(osp.join('data', 'preprocessed', 'grab', 'simplified_obj_mesh.pkl'), 'rb') as of:
             self.simp_obj_mesh = pickle.load(of)
