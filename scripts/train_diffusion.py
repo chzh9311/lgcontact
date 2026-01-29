@@ -1,3 +1,4 @@
+import torch
 import lightning as L
 import hydra
 from lightning.pytorch.loggers import WandbLogger, TensorBoardLogger
@@ -7,10 +8,11 @@ from omegaconf import OmegaConf
 from common.dataset_utils.datamodules import HOIDatasetModule
 # from common.model.mlctrainer import MLCTrainer
 from common.model.diff.dm.ddpm import DDPM
+from common.model.diff.mdm.gaussian_diffusion import GaussianDiffusion
 from common.model.diff.unet import UNetModel
 from common.model.gridae.gridae import GRIDAE
 from common.model.lgcdifftrainer import LGCDiffTrainer
-from common.utils.misc import set_seed
+from common.utils.misc import set_seed, load_pl_ckpt
 from lightning.pytorch.callbacks import ModelCheckpoint
 
 OmegaConf.register_new_resolver("add", lambda x, y: x + y, replace=True)
@@ -29,7 +31,10 @@ def main(cfg):
     # generator_module = importlib.import_module(f"common.model.{cfg.generator.model_type}.{cfg.generator.model_name}")
     # model = getattr(generator_module, cfg.generator.model_name.upper())(cfg)
     eps_model = UNetModel(cfg.generator.unet)
-    model = DDPM(eps_model, cfg.generator.ddpm)
+    if cfg.generator.model_type == 'mdm':
+        model = GaussianDiffusion(cfg.generator.ddpm)
+    else:
+        model = DDPM(cfg.generator.ddpm)
     gridae = GRIDAE(cfg.ae, obj_1d_feat=True)
     
     t = datetime.datetime.now()
@@ -67,12 +72,19 @@ def main(cfg):
         pl_model = LGCDiffTrainer(gridae, model, cfg)
         trainer.fit(pl_model, datamodule=data_module, ckpt_path=cfg.train.get('resume_ckpt', None))
     elif cfg.run_phase == 'val':
-        pl_model = LGCDiffTrainer(gridae, model, cfg)
-        # pl_model = LGCDiffTrainer.load_from_checkpoint(cfg.val.get('ckpt_path', None), gridae, model, cfg)
+        # pl_model = LGCDiffTrainer(gridae, model, cfg)
+        pl_model = LGCDiffTrainer.load_from_checkpoint(cfg.val.get('ckpt_path', None), gridae, model, cfg)
         trainer.validate(pl_model, datamodule=data_module)
     else:
-        # pl_model = LGCDiffTrainer(gridae, model, cfg)
-        pl_model = LGCDiffTrainer.load_from_checkpoint(cfg.ckpt_path, gridae, model, cfg)
+        sd = torch.load(cfg.ckpt_path, map_location='cpu')['state_dict']
+        print('total keys in ckpt:', len(sd.keys()))
+        load_pl_ckpt(gridae, sd, prefix='grid_ae.')
+        load_pl_ckpt(model, sd, prefix='model.')
+        unused_keys = [k for k in sd.keys() if not (k.startswith('grid_ae.') or k.startswith('model.'))]
+        print(f'Unused keys in ckpt: {unused_keys}')
+
+        pl_model = LGCDiffTrainer(gridae, model, cfg)
+        # pl_model = LGCDiffTrainer.load_from_checkpoint(cfg.ckpt_path, grid_ae=gridae, model=model, cfg=cfg)
         trainer.test(pl_model, datamodule=data_module)
 
 

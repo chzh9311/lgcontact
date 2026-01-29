@@ -17,7 +17,6 @@ from common.model.pose_optimizer import optimize_pose_wrt_local_grids
 from common.model.handobject import HandObject, recover_hand_verts_from_contact
 from common.model.hand_cse.hand_cse import HandCSE
 from common.utils.vis import visualize_recon_hand_w_object, visualize_grid_contact
-from common.model.losses import masked_rec_loss, kl_div_normal_muvar
 from common.msdf.utils.msdf import get_grid
 from common.evaluation.eval_fns import calculate_metrics, calc_diversity
 
@@ -26,10 +25,11 @@ class LGCDiffTrainer(L.LightningModule):
     """
     The Lightning trainer interface to train Local-grid based contact autoencoder.
     """
-    def __init__(self, grid_ae, model, cfg):
+    def __init__(self, grid_ae, model, diffusion, cfg):
         super().__init__()
         self.grid_ae = grid_ae
         self.model = model
+        self.diffusion = diffusion
         self.cfg = cfg
         self.save_hyperparameters(cfg)
         self.debug = cfg.get('debug', False)
@@ -189,7 +189,7 @@ class LGCDiffTrainer(L.LightningModule):
             if torch.isnan(value).any():
                 raise ValueError(f"NaN detected in input_data['{key}'] at batch_idx {batch_idx}")
 
-        loss = self.model(input_data)
+        loss = self.diffusion.training_loss(self.model, input_data)
         # grid_loss = F.mse_loss(err[:, :, 0], torch.zeros_like(err[:, :, 0]), reduction='mean')  # only compute loss on n_ho_dist dimension
         # diff_loss = F.mse_loss(err[:, :, 1:], torch.zeros_like(err[:, :, 1:]), reduction='none')
         # obj_pt_mask = input_data['x'][:, :, 0:1] < 0
@@ -205,7 +205,7 @@ class LGCDiffTrainer(L.LightningModule):
             self.log_dict(loss_dict, prog_bar=False, sync_dist=True)
         ## Also sample and reconstruct
         if batch_idx % self.cfg[stage].vis_every_n_batches == 0:
-            samples = self.model.sample(input_data, k=1)
+            samples = self.diffusion.sample(self.model, input_data, k=1)
             vis_idx = 0
             simp_obj_mesh = getattr(self.trainer.datamodule, f'{stage}_set').simp_obj_mesh
             obj_templates = [trimesh.Trimesh(simp_obj_mesh[name]['verts'], simp_obj_mesh[name]['faces'])
@@ -428,7 +428,7 @@ class LGCDiffTrainer(L.LightningModule):
 
             ## 'x' only indicates the latent shape; latents are sampled inside the model
             input_data = {'x': torch.zeros(batch_size, n_grids, self.cfg.ae.feat_dim), 'obj_pc': obj_pc.permute(0, 2, 1)}
-            samples = self.model.sample(input_data, k=self.cfg.test.n_samples)
+            samples = self.diffusion.sample(self.model, input_data, k=self.cfg.test.n_samples)
             sample_latent = samples[:, 0] ## B x latent
             latent = sample_latent.reshape(batch_size*n_grids, -1)
             recon_lg_contact = self.grid_ae.decode(latent, multi_scale_obj_cond)
