@@ -8,7 +8,7 @@ from omegaconf import OmegaConf
 from common.dataset_utils.datamodules import HOIDatasetModule
 # from common.model.mlctrainer import MLCTrainer
 from common.model.diff.dm.ddpm import DDPM
-from common.model.diff.mdm.gaussian_diffusion import GaussianDiffusion
+import common.model.diff.mdm.gaussian_diffusion as mdm_gd
 from common.model.diff.unet import UNetModel
 from common.model.gridae.gridae import GRIDAE
 from common.model.lgcdifftrainer import LGCDiffTrainer
@@ -30,11 +30,17 @@ def main(cfg):
     # Initialize the model, data module, and trainer
     # generator_module = importlib.import_module(f"common.model.{cfg.generator.model_type}.{cfg.generator.model_name}")
     # model = getattr(generator_module, cfg.generator.model_name.upper())(cfg)
-    eps_model = UNetModel(cfg.generator.unet)
+    model = UNetModel(cfg.generator.unet)
     if cfg.generator.model_type == 'mdm':
-        model = GaussianDiffusion(cfg.generator.ddpm)
+        betas = mdm_gd.get_named_beta_schedule(schedule_name=cfg.generator.scheduler.beta_schedule, num_diffusion_timesteps=cfg.generator.scheduler.steps,
+                                               beta_range=cfg.generator.scheduler.beta_range, scale_betas=cfg.generator.scheduler.scale_beta)
+        diffusion = mdm_gd.GaussianDiffusion(betas=betas,
+                                             model_mean_type=mdm_gd.ModelMeanType[cfg.generator.scheduler.model_mean_type.upper()],
+                                             model_var_type=mdm_gd.ModelVarType[cfg.generator.scheduler.model_var_type.upper()],
+                                             rand_t_type=cfg.generator.scheduler.rand_t_type,
+                                             msdf_cfg=cfg.msdf)
     else:
-        model = DDPM(cfg.generator.ddpm)
+        diffusion = DDPM(cfg.generator.ddpm) # The base version of diffusion.
     gridae = GRIDAE(cfg.ae, obj_1d_feat=True)
     
     t = datetime.datetime.now()
@@ -69,11 +75,11 @@ def main(cfg):
 
     # Start training
     if cfg.run_phase == 'train':
-        pl_model = LGCDiffTrainer(gridae, model, cfg)
+        pl_model = LGCDiffTrainer(gridae, model, diffusion, cfg)
         trainer.fit(pl_model, datamodule=data_module, ckpt_path=cfg.train.get('resume_ckpt', None))
     elif cfg.run_phase == 'val':
         # pl_model = LGCDiffTrainer(gridae, model, cfg)
-        pl_model = LGCDiffTrainer.load_from_checkpoint(cfg.val.get('ckpt_path', None), gridae, model, cfg)
+        pl_model = LGCDiffTrainer.load_from_checkpoint(cfg.val.get('ckpt_path', None), gridae, model, diffusion, cfg)
         trainer.validate(pl_model, datamodule=data_module)
     else:
         sd = torch.load(cfg.ckpt_path, map_location='cpu')['state_dict']
@@ -83,7 +89,7 @@ def main(cfg):
         unused_keys = [k for k in sd.keys() if not (k.startswith('grid_ae.') or k.startswith('model.'))]
         print(f'Unused keys in ckpt: {unused_keys}')
 
-        pl_model = LGCDiffTrainer(gridae, model, cfg)
+        pl_model = LGCDiffTrainer(gridae, model, diffusion, cfg)
         # pl_model = LGCDiffTrainer.load_from_checkpoint(cfg.ckpt_path, grid_ae=gridae, model=model, cfg=cfg)
         trainer.test(pl_model, datamodule=data_module)
 

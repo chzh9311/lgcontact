@@ -49,9 +49,9 @@ class LGCDiffTrainer(L.LightningModule):
         handF = self.mano_layer.th_faces
         # Initialize model and load state
         self.cse_dim = cse_ckpt['emb_dim']
-        self.handcse = HandCSE(n_verts=778, emb_dim=self.cse_dim, cano_faces=handF.cpu().numpy()).to(self.device)
-        self.handcse.load_state_dict(cse_ckpt['state_dict'])
-        self.handcse.eval()
+        self.hand_cse = HandCSE(n_verts=778, emb_dim=self.cse_dim, cano_faces=handF.cpu().numpy()).to(self.device)
+        self.hand_cse.load_state_dict(cse_ckpt['state_dict'])
+        self.hand_cse.eval()
         self.grid_coords = get_grid(self.cfg.msdf.kernel_size) * self.cfg.msdf.scale  # (K^3, 3)
         self.pool = None
 
@@ -189,7 +189,8 @@ class LGCDiffTrainer(L.LightningModule):
             if torch.isnan(value).any():
                 raise ValueError(f"NaN detected in input_data['{key}'] at batch_idx {batch_idx}")
 
-        loss = self.diffusion.training_loss(self.model, input_data)
+        loss = self.diffusion.training_losses(self.model, input_data, grid_ae=self.grid_ae, ms_obj_cond=multi_scale_obj_cond,
+                                              hand_cse=self.hand_cse)
         # grid_loss = F.mse_loss(err[:, :, 0], torch.zeros_like(err[:, :, 0]), reduction='mean')  # only compute loss on n_ho_dist dimension
         # diff_loss = F.mse_loss(err[:, :, 1:], torch.zeros_like(err[:, :, 1:]), reduction='none')
         # obj_pt_mask = input_data['x'][:, :, 0:1] < 0
@@ -205,12 +206,13 @@ class LGCDiffTrainer(L.LightningModule):
             self.log_dict(loss_dict, prog_bar=False, sync_dist=True)
         ## Also sample and reconstruct
         if batch_idx % self.cfg[stage].vis_every_n_batches == 0:
-            samples = self.diffusion.sample(self.model, input_data, k=1)
+            samples = self.diffusion.p_sample_loop(self.model, input_data['x'].shape, input_data['obj_pc'])
             vis_idx = 0
             simp_obj_mesh = getattr(self.trainer.datamodule, f'{stage}_set').simp_obj_mesh
             obj_templates = [trimesh.Trimesh(simp_obj_mesh[name]['verts'], simp_obj_mesh[name]['faces'])
                             for name in batch['objName']]
-            sample_latent = samples[:, 0] ## 1 + latent
+            # sample_latent = samples[:, 0] ## 1 + latent
+            sample_latent = samples  ## latent
             # grid_contact, sample_latent = sample_x[:, :, 0], sample_x[:, :, 1:]
             # grid_contact = grid_contact < 0
             pred_hand_verts, pred_verts_mask, pred_grid_contact = self.reconstruct_from_latent(sample_latent, multi_scale_obj_cond, obj_msdf_center)
@@ -228,7 +230,7 @@ class LGCDiffTrainer(L.LightningModule):
             # grid_coords = obj_msdf_center[:, :, None, :] + self.grid_coords.view(-1, 3)[None, None, :, :]  # B x N x K^3 x 3
 
             # pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
-            #     self.handcse, None,
+            #     self.hand_cse, None,
             #     sample_contact.reshape(batch_size, -1), sample_cse.reshape(batch_size, -1, self.cse_dim),
             #     grid_coords=grid_coords.reshape(batch_size, -1, 3),
             #     mask_th = 0.02
@@ -291,6 +293,7 @@ class LGCDiffTrainer(L.LightningModule):
                     self.logger.experiment.add_image(f'{stage}/GT_vs_GTRec_vs_sampled_hand', img, global_step, dataformats='HWC')
                 elif hasattr(self.logger.experiment, 'log'):
                     # WandbLogger
+                    import wandb
                     self.logger.experiment.log({f'{stage}/GT_vs_GTRec_vs_sampled_contact': wandb.Image(contact_img)}, step=self.global_step)
                     self.logger.experiment.log({f'{stage}/GT_vs_GTRec_vs_sampled_hand': wandb.Image(img)}, step=self.global_step)
 
@@ -346,7 +349,7 @@ class LGCDiffTrainer(L.LightningModule):
         sample_contact[sample_contact < 0.03] = 0  ## maskout low contact prob
 
         pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
-            self.handcse, None,
+            self.hand_cse, None,
             sample_contact.reshape(batch_size, -1), sample_cse.reshape(batch_size, -1, self.cse_dim),
             grid_coords=grid_coords.reshape(batch_size, -1, 3),
             mask_th = 2
@@ -453,7 +456,7 @@ class LGCDiffTrainer(L.LightningModule):
         pred_grid_contact = recon_lg_contact[..., 0].reshape(batch_size, -1)  # B x N x K^3
         grid_coords = obj_msdf_center[:, :, None, :] + self.grid_coords.view(-1, 3)[None, None, :, :]  # B x N x K^3 x 3
         pred_grid_cse = recon_lg_contact[..., 1:].reshape(batch_size, -1, self.cse_dim)
-        pred_targetWverts = self.handcse.emb2Wvert(pred_grid_cse.view(batch_size, -1, self.cse_dim))
+        pred_targetWverts = self.hand_cse.emb2Wvert(pred_grid_cse.view(batch_size, -1, self.cse_dim))
 
         with torch.enable_grad():
             global_pose, mano_pose, mano_shape, mano_trans = optimize_pose_wrt_local_grids(
@@ -502,7 +505,7 @@ class LGCDiffTrainer(L.LightningModule):
         pred_img = pred_ho.vis_img(idx=vis_idx, h=400, w=400, obj_templates=obj_meshes)
 
         pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
-            self.handcse, None,
+            self.hand_cse, None,
             pred_grid_contact.reshape(batch_size, -1),
             pred_grid_cse.reshape(batch_size, -1, self.cse_dim),
             grid_coords=grid_coords.reshape(batch_size, -1, 3),
@@ -577,7 +580,7 @@ class LGCDiffTrainer(L.LightningModule):
         # vis_idx = 0
         # gt_geoms = visualize_local_grid_with_hand(
         #         batch['localGrid'][vis_idx].cpu().numpy(), hand_verts=batch['nHandVerts'][vis_idx].cpu().numpy(),
-        #         hand_faces=self.mano_layer.th_faces.cpu().numpy(), hand_cse=self.handcse.embedding_tensor.detach().cpu().numpy(),
+        #         hand_faces=self.mano_layer.th_faces.cpu().numpy(), hand_cse=self.hand_cse.embedding_tensor.detach().cpu().numpy(),
         #         kernel_size=self.cfg.msdf.kernel_size, grid_scale=self.cfg.msdf.scale
         #     )
         # o3d.visualization.draw_geometries(gt_geoms, window_name='GT Local Grid Visualization')

@@ -59,6 +59,10 @@ class GRIDAE(nn.Module):
         posterior = DiagonalGaussianDistribution(z_e)
         return posterior, obj_feat, obj_cond
     
+    def encode_object(self, obj_msdf):
+        obj_feat, obj_cond = self.obj_encoder(obj_msdf)
+        return obj_feat, obj_cond
+    
     def decode(self, z, obj_cond):
         c_hat, cse_hat, _ = self.decoder(z, cond=obj_cond[::-1])
         x_hat = torch.cat([c_hat, cse_hat], dim=1)

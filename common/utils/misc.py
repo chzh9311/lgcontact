@@ -46,3 +46,24 @@ def linear_normalize(x: torch.Tensor, lower_bound: float, upper_bound:float, low
     x = lower_bound + x * (upper_bound - lower_bound)
 
     return x
+
+
+def load_pl_ckpt(model: torch.nn.Module, state_dict: str, prefix: str='model.') -> None:
+    """
+    Load a PyTorch Lightning checkpoint into a model, handling 'model.' prefix if present.
+    Args:
+        model: The model to load the state dict into.
+        state_dict: The state dictionary from the checkpoint.
+        prefix: The prefix to remove from the keys if present.
+    """
+    # Remove 'model.' prefix if it exists in the state dict keys
+    new_state_dict = {}
+    cnt = 0
+    for k, v in state_dict.items():
+        if k.startswith(prefix):
+            new_key = k[len(prefix):]
+            new_state_dict[new_key] = v
+            cnt += 1
+
+    model.load_state_dict(new_state_dict, strict=True)
+    print(f"Loaded checkpoint into model with prefix '{prefix}' handled, total {cnt} keys.")

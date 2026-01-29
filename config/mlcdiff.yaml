@@ -25,7 +25,7 @@ checkpoint:
 
 test:
   n_processes: 20
-  n_samples: 16
+  n_samples: 10
   batch_size: ${test.n_samples}
   base_criteria:
     - "Simulation Displacement"
@@ -45,12 +45,13 @@ trainer: ## For instantiating pytorch-lightning Trainer
   precision: 32
   enable_progress_bar: true
   enable_model_summary: true
-  profiler: simple
+  # profiler: simple
   # limit_train_batches: 10
   # limit_val_batches: 10
 
 run_phase: train
-test_gt: true
+test_gt: false
+ckpt_path: logs/checkpoints/mlcdiff/hybrid/best-epoch=63-val/total_loss=0.0244.ckpt
 
 debug: true
 

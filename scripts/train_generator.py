@@ -69,9 +69,8 @@ def main(cfg):
         pl_model = trainer_module(model, cfg)
         trainer.test(pl_model, datamodule=data_module)
     else:
-        # Make config temporarily writable for checkpoint loading
-        # pl_model = trainer_module.load_from_checkpoint(cfg.ckpt_path, model=model, cfg=cfg)
-        pl_model = trainer_module(model, cfg)
+        pl_model = trainer_module.load_from_checkpoint(cfg.ckpt_path, model=model, cfg=cfg)
+        # pl_model = trainer_module(model, cfg)
         trainer.test(pl_model, datamodule=data_module)
 
 
