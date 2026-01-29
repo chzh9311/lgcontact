@@ -1232,26 +1232,26 @@ class GaussianDiffusion:
         terms["latent_mse"] = F.mse_loss(model_output, target, reduction="mean")
 
         ## Reconstruction Loss
-        batch_size, n_grids = model_output.shape[:2]
-        latent = model_output.reshape(batch_size*n_grids, -1)
-        grid_ae = kwargs['grid_ae']
-        ms_obj_cond = kwargs['ms_obj_cond']
-        recon_lg_contact = grid_ae.decode(latent, ms_obj_cond)
-        recon_lg_contact = recon_lg_contact.view(batch_size, n_grids, -1, self.msdf_k ** 3).permute(0, 1, 3, 2)
-        recon_contact = recon_lg_contact[..., 0] # * grid_contact_mask[:, :, None].float()
-        recon_cse = recon_lg_contact[..., 1:]
+        # batch_size, n_grids = model_output.shape[:2]
+        # latent = model_output.reshape(batch_size*n_grids, -1)
+        # grid_ae = kwargs['grid_ae']
+        # ms_obj_cond = kwargs['ms_obj_cond']
+        # recon_lg_contact = grid_ae.decode(latent, ms_obj_cond)
+        # recon_lg_contact = recon_lg_contact.view(batch_size, n_grids, -1, self.msdf_k ** 3).permute(0, 1, 3, 2)
+        # recon_contact = recon_lg_contact[..., 0] # * grid_contact_mask[:, :, None].float()
+        # recon_cse = recon_lg_contact[..., 1:]
 
-        gt_contact, gt_cse = kwargs['gt_lg_contact'][..., 0], kwargs['gt_lg_contact'][..., 1:]
-        recon_loss_dict = self.recon_loss(recon_contact=recon_contact, recon_cse=recon_cse,
-                                          gt_contact=gt_contact, gt_cse=gt_cse)
-        terms.update(recon_loss_dict)
-        reach_loss_dict = self.reachability_loss(gt_hand_verts=data['hand_verts'],
-                                                 recon_contact=recon_contact, recon_cse=recon_cse,
-                                                 grid_points=kwargs['grid_points'],
-                                                 hand_cse=kwargs['hand_cse'])
-        terms.update(reach_loss_dict)
+        # gt_contact, gt_cse = kwargs['gt_lg_contact'][..., 0], kwargs['gt_lg_contact'][..., 1:]
+        # recon_loss_dict = self.recon_loss(recon_contact=recon_contact, recon_cse=recon_cse,
+        #                                   gt_contact=gt_contact, gt_cse=gt_cse)
+        # terms.update(recon_loss_dict)
+        # reach_loss_dict = self.reachability_loss(gt_hand_verts=data['hand_verts'],
+        #                                          recon_contact=recon_contact, recon_cse=recon_cse,
+        #                                          grid_points=kwargs['grid_points'],
+        #                                          hand_cse=kwargs['hand_cse'])
+        # terms.update(reach_loss_dict)
 
-        return terms
+        return terms['latent_mse']
     
 
     def recon_loss(self, recon_contact, recon_cse, gt_contact, gt_cse):

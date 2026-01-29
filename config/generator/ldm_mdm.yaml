@@ -30,7 +30,7 @@ scheduler:
     - 0.0001
     - 0.01
   beta_schedule: 'linear'
-  model_mean_type: 'START_X' # 'PREV_X', 'START_X', 'EPSILON'
+  model_mean_type: 'EPSILON' # 'PREV_X', 'START_X', 'EPSILON'
   model_var_type: 'FIXED_SMALL' # 'FIXED_LARGE', 'FIX
   s: 0.008
 
