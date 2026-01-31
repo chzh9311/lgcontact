@@ -1,10 +1,20 @@
 <a name="unreleased"></a>
 ## [Unreleased]
 
+
+<a name="v1.0.1"></a>
+## [v1.0.1] - 2026-01-31
 ### Bug Fixes
 - Fix missing attributes regarding msdf_path.
 
+### Code Refactoring
+- Make the test dataset only load one object at a time and sample in batches.
+
+### Code Synchronization
+- Testing epsilon in GaussianDiffusion to study the difference.
+
 ### Features
+- Add repulsive loss for grasp optimization.
 - Enable mdm-style diffusion training & inference.
 - Separate the UNet model with diffusion scheduler.
 - Enable sampling test.
@@ -59,7 +69,8 @@
 - Enable dumping local grids first.
 
 
-[Unreleased]: /compare/v1.0.0...HEAD
+[Unreleased]: /compare/v1.0.1...HEAD
+[v1.0.1]: /compare/v1.0.0...v1.0.1
 [v1.0.0]: /compare/v0.2.0...v1.0.0
 [v0.2.0]: /compare/v0.1.1...v0.2.0
 [v0.1.1]: /compare/v0.1.0...v0.1.1
