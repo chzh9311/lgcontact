@@ -549,12 +549,27 @@ class GaussianDiffusion:
                 )
         sample = out["mean"] + nonzero_mask * th.exp(0.5 * out["log_variance"]) * noise
         return {"sample": sample, "pred_xstart": out["pred_xstart"].detach()}
+    
+    def sample(self, model, input_data, k):
+        """
+        Generate samples from the model.
 
+        :param input_data: a dict containing:
+            - 'x': the tensor indicating the feature shape. 
+            - 'obj_pc': the object point cloud for conditioning.
+        :param k: the number of samples to generate.
+        :return: a non-differentiable batch of samples.
+        """
+        shape = (k, ) + input_data['x'].shape
+        condition = model.condition({'obj_pc': input_data['obj_pc']})
+        result = self.p_sample_loop(model, shape, condition.repeat(k, 1, 1))
+        return result
+    
     def p_sample_loop(
         self,
         model,
         shape,
-        obj_pc,
+        condition,
         noise=None,
         clip_denoised=True,
         denoised_fn=None,
@@ -592,8 +607,6 @@ class GaussianDiffusion:
         final = None
         if dump_steps is not None:
             dump = []
-        
-        condition = model.condition({'obj_pc': obj_pc})
         
         for i, sample in enumerate(self.p_sample_loop_progressive(
             model,

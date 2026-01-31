@@ -188,7 +188,7 @@ class DDPM(nn.Module):
         return pred_x
     
     @torch.no_grad()
-    def p_sample_loop(self, model: nn.Module, data: Dict) -> torch.Tensor:
+    def p_sample_loop(self, model: nn.Module, data: Dict, k: int=1) -> torch.Tensor:
         """ Reverse diffusion process loop, iteratively sampling
 
         Args:
@@ -198,11 +198,11 @@ class DDPM(nn.Module):
         Return:
             Sampled data, <B, T, ...>
         """
-        x_t = torch.randn_like(data['x'], device=self.device)
+        x_t = torch.randn((k, *data['x'].shape), device=self.device)
 
         ## precompute conditional feature, which will be used in every sampling step
         condition = model.condition(data)
-        data['cond'] = condition
+        data['cond'] = condition.repeat(k, 1, 1)
 
         ## iteratively sampling
         all_x_t = [x_t]
@@ -227,29 +227,9 @@ class DDPM(nn.Module):
         """
         ## TODO ddim sample function
         ksamples = []
-        for _ in range(k):
-            ## take only the last one
-            ksamples.append(self.p_sample_loop(model, data)[:, -1])
-        
-        ksamples = torch.stack(ksamples, dim=1)
-        
-        ## for sequence, normalize and convert repr
-        if 'normalizer' in data and data['normalizer'] is not None:
-            O = 0
-            if self.has_observation and 'start' in data:
-                ## the start observation frames are replace during sampling
-                _, O, _ = data['start'].shape
-            ksamples[..., O:, :] = data['normalizer'].unnormalize(ksamples[..., O:, :])
-        if 'repr_type' in data:
-            if data['repr_type'] == 'absolute':
-                pass
-            elif data['repr_type'] == 'relative':
-                O = 1
-                if self.has_observation and 'start' in data:
-                    _, O, _ = data['start'].shape
-                ksamples[..., O-1:, :] = torch.cumsum(ksamples[..., O-1:, :], dim=-2)
-            else:
-                raise Exception('Unsupported repr type.')
+        # for _ in range(k):
+        ## take only the last one
+        ksamples = self.p_sample_loop(model, data, k)[:, -1]
         
         return ksamples
     

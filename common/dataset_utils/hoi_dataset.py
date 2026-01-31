@@ -56,10 +56,6 @@ class BaseHOIDataset(Dataset):
         else:
             self.grid_contact_ds = None
 
-
-        if self.split == 'test' and not self.test_gt:
-            self.num_samples = cfg.test_samples
-
         self.hand_cse = torch.load(cfg.get('hand_cse_path', 'data/misc/hand_cse.ckpt'))['state_dict']['embedding_tensor'].detach().cpu().numpy()
         ## Calculate partitions
 
@@ -82,7 +78,7 @@ class BaseHOIDataset(Dataset):
     def __len__(self):
         # return 900
         if self.split == 'test' and not self.test_gt:
-            return len(self.test_objects) * self.num_samples
+            return len(self.test_objects)
         else:
             return len(self.frame_names)
 
@@ -195,7 +191,7 @@ class BaseHOIDataset(Dataset):
                 sample['handVertMask'] = contact_mask
 
         else:
-            obj_name = self.test_objects[int(idx // self.num_samples)]
+            obj_name = self.test_objects[idx]
             obj_sample_pts = self.obj_info[obj_name]['samples'] # n_sample x 3
             obj_sample_normals = self.obj_info[obj_name]['sample_normals'] # n_sample x 3
             ## For testing, return object with random rotations. The rng is set to make sure

@@ -402,5 +402,7 @@ class HOIDatasetModule(LightningDataModule):
         return DataLoader(self.val_set, batch_size=self.val_batch_size, shuffle=False, num_workers=self.cfg.num_workers)
 
     def test_dataloader(self):
-        return DataLoader(self.test_set, batch_size=self.test_batch_size, shuffle=False, num_workers=self.cfg.num_workers)
+        batch_size = self.test_batch_size if self.test_gt else 1
+        ## load only one object at a time for sample generation
+        return DataLoader(self.test_set, batch_size=batch_size, shuffle=False, num_workers=self.cfg.num_workers) 
 

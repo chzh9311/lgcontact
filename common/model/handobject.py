@@ -76,7 +76,7 @@ class HandObject:
         new_ho.obj_rot = copy(self.obj_rot)
         new_ho.obj_trans = copy(self.obj_trans)
         new_ho.obj_com = copy(self.obj_com)
-        new_ho.batch_size = self.batch_size
+        # new_ho.batch_size = self.batch_size
         return new_ho
 
     def load_from_batch(self, batch, obj_templates=None, obj_hulls=None, pool=None):
@@ -229,36 +229,35 @@ class HandObject:
             self.obj2hand_nn_idx = nn_idx.to(self.device)
 
 
-    def load_from_batch_obj_only(self, batch, obj_templates=None, obj_hulls=None):
+    def load_from_batch_obj_only(self, batch, obj_template=None, obj_hulls=None):
         """
         Load only object-related data from batched data. Used for testing.
         No hand-related variables are loaded - those will be generated later.
+        The batch size is 1: loading only one object each time.
         """
         self.obj_names = batch['objName']
         self.obj_verts = batch['objSamplePts'].clone().to(self.device).float()
         self.obj_normals = batch['objSampleNormals'].clone().to(self.device).float()
-        self.batch_size = self.obj_verts.shape[0]
 
         # Load object templates
-        if obj_templates is not None:
+        if obj_template is not None:
             self.obj_models = []
-            for b in range(self.batch_size):
-                obj_mesh = copy(obj_templates[b])
-                self.obj_models.append(obj_mesh)
+            obj_mesh = copy(obj_template)
+            self.obj_models.append(obj_mesh)
 
         # Load object hulls
         if obj_hulls is not None:
             self.obj_hulls = []
-            for b in range(self.batch_size):
-                ohs = []
-                for h in obj_hulls[b]:
-                    h0 = copy(h)
-                    ohs.append(h0)
-                self.obj_hulls.append(ohs)
+            ohs = []
+            for h in obj_hulls:
+                h0 = copy(h)
+                ohs.append(h0)
+            self.obj_hulls.append(ohs)
 
         # Center object at origin
         # self.obj_com = self.obj_verts.mean(dim=1, keepdim=True)
         # self.obj_verts = self.obj_verts - self.obj_com
+        self.obj_msdf = batch['objMsdf'].clone().to(self.device).float()
 
 
     def _load_templates(self, idx, obj_templates, obj_hull=None):
@@ -269,7 +268,7 @@ class HandObject:
 
         self.hand_models = []
         self.obj_models = []
-        for i in range(self.batch_size):
+        for i in range(len(obj_templates)):
             if not self.normalize:
                 objR = axis_angle_to_matrix(self.obj_rot[i]).detach().cpu().numpy()
                 objt = self.obj_trans[i].detach().cpu().numpy()
