@@ -187,7 +187,7 @@ def optimize_pose_wrt_local_grids(mano_layer, grid_centers, target_pts, target_W
             correct_mask = non_contact_grid_dist > grid_scale
             # increate the effect distance quickly beyond the grid scale
             non_contact_grid_dist[correct_mask] = (non_contact_grid_dist[correct_mask] - grid_scale + 0.5)**2 + grid_scale - 0.25
-            n_non_contact_grid_dist = non_contact_grid_dist / grid_scale * 2
+            n_non_contact_grid_dist = non_contact_grid_dist / grid_scale * 2 + 1
             n_non_contact_c = sdf_to_contact(n_non_contact_grid_dist, None, method=2)
             repulsive_loss = torch.sum(n_non_contact_c) / n_non_contact_grids 
             # repulsive_loss = torch.sum(non_contact_grid_dist[non_contact_grid_dist < grid_scale] / grid_scale) / n_non_contact_grids
