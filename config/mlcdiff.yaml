@@ -4,7 +4,7 @@ defaults:
   - data: grab_multi_contact
   - ae: gridae_128latent
   - generator: ldm
-  - pose_optimizer: base
+  - pose_optimizer: lg_base
 
 training_stage: "generator"
 contact_unit: "grid"
@@ -51,7 +51,7 @@ trainer: ## For instantiating pytorch-lightning Trainer
 
 run_phase: train
 test_gt: false
-ckpt_path: logs/checkpoints/mlcdiff/hybrid/best-epoch=63-val/total_loss=0.0244.ckpt
+ckpt_path: logs/checkpoints/mlcdiff/eps_model/best-epoch=63-val/total_loss=0.0244.ckpt
 
 debug: true
 

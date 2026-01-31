@@ -5,7 +5,7 @@ from copy import copy
 
 from pytorch3d.structures import Meshes
 from pytorch3d.transforms import matrix_to_axis_angle
-from manotorch.anchorlayer import AnchorLayer
+# from manotorch.anchorlayer import AnchorLayer
 from common.utils.geometry import (
         cp_match,
         cp_match_Ronly,
@@ -35,20 +35,20 @@ def optimize_pose_contactopt(mano_layer, obj_verts, obj_normals, obj_contact_tar
     hand_verts, hand_joints, _ = mano_layer(torch.cat([global_pose, mano_pose], dim=1),
                                             th_betas=mano_shape, th_trans=mano_trans)
     root = hand_joints[:, 0:1]
-    if partition_type == 'part':
-        anchor_layer = AnchorLayer("/home/zxc417/Downloads/Lib/manotorch/assets/anchor").to(device)
-        part_anchor_idx = [19, 7, 8, 9, 13, 14, 15, 27, 28, 29, 20, 21, 22, 0, 1, 2]
-        init_anchors = anchor_layer(hand_verts)[:, part_anchor_idx, :]  # (B, 16, 3)
-        part_weight = torch.stack([torch.sum(obj_contact_target * (obj_partition == i).float(), dim=1) for i in range(16)], dim=1) # (B, 16)
-        part_weight[:, 0] = 0
-        part_centers = [torch.sum(obj_verts * obj_contact_target.unsqueeze(-1) * (obj_partition == i).float().unsqueeze(-1), dim=1)
-                        / (torch.sum(obj_contact_target * (obj_partition == i).float(), dim=1, keepdim=True) + 1e-8) for i in range(16)]
-        part_centers = torch.stack(part_centers, dim=1)  # (B, 16, 3)
-        Rs, ts = cp_match(init_anchors - root, part_centers - root, part_weight.unsqueeze(-1))
-    elif partition_type == 'cse':
-        Wverts = hand_cse.emb2Wvert(obj_partition) # (B, N, 778)
-        target_hand_pts0 = Wverts @ hand_verts # (B, N, 3)
-        Rs, ts = cp_match(target_hand_pts0 - root, obj_verts - root, obj_contact_target.unsqueeze(-1))
+    # if partition_type == 'part':
+    #     anchor_layer = AnchorLayer("/home/zxc417/Downloads/Lib/manotorch/assets/anchor").to(device)
+    #     part_anchor_idx = [19, 7, 8, 9, 13, 14, 15, 27, 28, 29, 20, 21, 22, 0, 1, 2]
+    #     init_anchors = anchor_layer(hand_verts)[:, part_anchor_idx, :]  # (B, 16, 3)
+    #     part_weight = torch.stack([torch.sum(obj_contact_target * (obj_partition == i).float(), dim=1) for i in range(16)], dim=1) # (B, 16)
+    #     part_weight[:, 0] = 0
+    #     part_centers = [torch.sum(obj_verts * obj_contact_target.unsqueeze(-1) * (obj_partition == i).float().unsqueeze(-1), dim=1)
+    #                     / (torch.sum(obj_contact_target * (obj_partition == i).float(), dim=1, keepdim=True) + 1e-8) for i in range(16)]
+    #     part_centers = torch.stack(part_centers, dim=1)  # (B, 16, 3)
+    #     Rs, ts = cp_match(init_anchors - root, part_centers - root, part_weight.unsqueeze(-1))
+    # elif partition_type == 'cse':
+    Wverts = hand_cse.emb2Wvert(obj_partition) # (B, N, 778)
+    target_hand_pts0 = Wverts @ hand_verts # (B, N, 3)
+    Rs, ts = cp_match(target_hand_pts0 - root, obj_verts - root, obj_contact_target.unsqueeze(-1))
 
     global_pose = matrix_to_axis_angle(Rs).detach()
     mano_trans = ts.detach()
@@ -145,20 +145,25 @@ def optimize_pose_contactopt(mano_layer, obj_verts, obj_normals, obj_contact_tar
     return global_pose, mano_pose, mano_shape, mano_trans, init_pose
 
 
-def optimize_pose_wrt_local_grids(mano_layer, target_pts, target_W_verts, weights, n_iter=1200, lr=0.01):
+def optimize_pose_wrt_local_grids(mano_layer, grid_centers, target_pts, target_W_verts, weights, n_iter=1200, lr=0.01, grid_scale=0.01, w_repulsive=1.0):
     """
+    The loss used in pose optimization:
+     * L2 loss between weighted target points and hand vertices
+     * Repulsive loss from non-contact local grids (current version)
     :param mano_layer: Description
     :param target_pts: Description
     :param n_iter: Description
     :param lr: Description
     """
-    batch_size = target_pts.shape[0]
+    batch_size, num_grids = grid_centers.shape[:2]
     global_pose = torch.zeros((batch_size, 3), dtype=target_pts.dtype, device=target_pts.device)
     mano_trans = torch.zeros((batch_size, 3), dtype=target_pts.dtype, device=target_pts.device)
     
     mano_pose = torch.zeros((batch_size, mano_layer.ncomps), dtype=target_pts.dtype, device=target_pts.device)
     mano_shape = torch.zeros((batch_size, 10), dtype=target_pts.dtype, device=target_pts.device)
 
+    contact_grid_mask = (weights.view(batch_size, num_grids, -1) > 0).any(dim=-1) # B x num_grids
+    n_non_contact_grids = torch.sum(~contact_grid_mask).item()
     ## Initialization
     handV, handJ, _ = mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
     root = handJ[:, 0:1]
@@ -175,11 +180,24 @@ def optimize_pose_wrt_local_grids(mano_layer, target_pts, target_W_verts, weight
     for it in range(n_iter):
         handV, handJ, _ = mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
         optimizer.zero_grad()
-        loss = torch.mean(weights.unsqueeze(-1) * F.mse_loss(target_W_verts @ handV, target_pts, reduction='none')) * 10000
+        contact_loss = torch.mean(weights.unsqueeze(-1) * F.mse_loss(target_W_verts @ handV, target_pts, reduction='none')) * 10000
+        grid_dist = torch.cdist(grid_centers, handV)  # B x num_grids x num_hand_verts
+        if n_non_contact_grids > 0:
+            non_contact_grid_dist = grid_dist[~contact_grid_mask].min(-1)[0]
+            correct_mask = non_contact_grid_dist > grid_scale
+            # increate the effect distance quickly beyond the grid scale
+            non_contact_grid_dist[correct_mask] = (non_contact_grid_dist[correct_mask] - grid_scale + 0.5)**2 + grid_scale - 0.25
+            n_non_contact_grid_dist = non_contact_grid_dist / grid_scale * 2
+            n_non_contact_c = sdf_to_contact(n_non_contact_grid_dist, None, method=2)
+            repulsive_loss = torch.sum(n_non_contact_c) / n_non_contact_grids 
+            # repulsive_loss = torch.sum(non_contact_grid_dist[non_contact_grid_dist < grid_scale] / grid_scale) / n_non_contact_grids
+        else:
+            repulsive_loss = torch.tensor(0.0, device=target_pts.device)
+        loss = contact_loss + w_repulsive * repulsive_loss
         
         loss.backward()
         optimizer.step()
         if it % 100 == 99:
-            print(f"Iter {it} | Loss: {loss.item():.6f}")
+            print(f"Iter {it} | Loss: {loss.item():.6f} | Contact Loss: {contact_loss.item():.6f} | Repulsive Loss: {repulsive_loss.item():.6f}")
     
     return [p.detach() for p in hand_opt_params]
