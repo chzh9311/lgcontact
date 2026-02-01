@@ -21,8 +21,6 @@ from multiprocessing.pool import Pool
 from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
 from scipy.spatial.transform import Rotation
 
-from easydict import EasyDict as edict
-
 from common.manopth.manopth.manolayer import ManoLayer
 from .hoi_dataset import BaseHOIDataset, get_kine_parent, canonical_hand_parts
 from .local_grid_dataset import LocalGridDataset
@@ -115,7 +113,7 @@ def regularize_part_id(contacts: torch.Tensor, hand_side: str):
 
 
 class GRABDataset(BaseHOIDataset):
-    def __init__(self, cfg: edict, split: str, load_msdf: bool = False, load_grid_contact: bool = False, test_gt: bool = False):
+    def __init__(self, cfg, split: str, load_msdf: bool = False, load_grid_contact: bool = False, test_gt: bool = False):
         # self.part_samples = cfg.hand_part_samples
         self.obj_dir = cfg.dataset_path
         self.dataset_name = 'grab'

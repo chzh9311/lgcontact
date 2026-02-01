@@ -1,5 +1,5 @@
 dataset_name: grab
-mano_root: /home/zxc417/data/mano_v1_2/models
+mano_root: data/misc/mano_v1_2/models
 dataset_path: data/grab
 hand_cse_dim: 16
 hand_cse_path: common/model/hand_cse/hand_cse_${data.hand_cse_dim}.ckpt

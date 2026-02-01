@@ -46,19 +46,21 @@ def main(cfg):
     gridae = GRIDAE(cfg.ae, obj_1d_feat=True)
     
     t = datetime.datetime.now()
+    exp_name = cfg.generator.model_name + '-' + cfg.run_phase + '-' + t.strftime('%Y%m%d-%H%M%S')
     if cfg.debug:
-        logger = TensorBoardLogger(save_dir='logs/tb_logs')
+        logger = TensorBoardLogger(save_dir='logs/tb_logs', name=exp_name)
     else:
         import wandb
-        logger = WandbLogger(name=cfg.generator.model_name + '-' + cfg.run_phase + '-' + t.strftime('%Y%m%d-%H%M%S'),
+        logger = WandbLogger(name=exp_name,
                              project='LG3DContact',
                              log_model=True, save_dir='logs/wandb_logs')
+    ckpt_dir = logger.log_dir
 
     # Only disable inference_mode for testing (needed for pose optimization gradients)
     inference_mode = False if cfg.run_phase == 'test' else True
     checkpoint_callback = ModelCheckpoint(
         monitor='val/total_loss',
-        dirpath=cfg.checkpoint.dirpath,
+        dirpath=ckpt_dir,
         filename=cfg.checkpoint.filename + '-{epoch:02d}-{val/total_loss:.4f}',
         save_top_k=cfg.checkpoint.save_top_k,
         mode='min',

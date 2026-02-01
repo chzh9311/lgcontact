@@ -4,6 +4,7 @@
 checkpoints/**
 data/grab
 data/YCB_Video
+data/misc/mano_v1_2
 data/preprocessed/**
 data/mano_v1_2
 force_labels/grab/grab*

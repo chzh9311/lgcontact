@@ -19,7 +19,6 @@ val:
   vis_every_n_batches: 200
 
 checkpoint:
-  dirpath: logs/checkpoints/mlcdiff/hybrid/
   filename: best
   save_top_k: 3
 
