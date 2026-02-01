@@ -33,7 +33,7 @@ def main(cfg):
     model = UNetModel(cfg.generator.unet)
     # MDM GaussianDiffusion
     mdm_cfg = cfg.generator.mdm
-    diffusion0 = mdm_gd.GaussianDiffusion(
+    diffusion = mdm_gd.GaussianDiffusion(
         timesteps=mdm_cfg.timesteps,
         schedule_cfg=mdm_cfg.schedule_cfg,
         model_mean_type=mdm_gd.ModelMeanType[mdm_cfg.model_mean_type.upper()],
@@ -42,7 +42,7 @@ def main(cfg):
         rescale_timesteps=mdm_cfg.rescale_timesteps,
         msdf_cfg=cfg.msdf)
     # DDPM (the base version of diffusion)
-    diffusion1 = DDPM(cfg.generator.ddpm)
+    # diffusion1 = DDPM(cfg.generator.ddpm)
     gridae = GRIDAE(cfg.ae, obj_1d_feat=True)
     
     t = datetime.datetime.now()
@@ -91,7 +91,7 @@ def main(cfg):
         unused_keys = [k for k in sd.keys() if not (k.startswith('grid_ae.') or k.startswith('model.eps_model.'))]
         print(f'Unused keys in ckpt: {unused_keys}')
 
-        pl_model = LGCDiffTrainer(gridae, model, diffusion0, diffusion1, cfg)
+        pl_model = LGCDiffTrainer(gridae, model, diffusion, cfg)
         # pl_model = LGCDiffTrainer.load_from_checkpoint(cfg.ckpt_path, grid_ae=gridae, model=model, cfg=cfg)
         trainer.test(pl_model, datamodule=data_module)
 

@@ -46,6 +46,6 @@ mdm:
   timesteps: ${generator.diffusion.timesteps}
   schedule_cfg: ${generator.diffusion.schedule_cfg}
   rand_t_type: ${generator.diffusion.rand_t_type}
-  model_mean_type: 'EPSILON'  # 'PREVIOUS_X', 'START_X', 'EPSILON'
+  model_mean_type: 'START_X'  # 'PREVIOUS_X', 'START_X', 'EPSILON'
   model_var_type: 'FIXED_SMALL'  # 'LEARNED', 'FIXED_SMALL', 'FIXED_LARGE', 'LEARNED_RANGE'
   rescale_timesteps: false

@@ -19,19 +19,17 @@ from common.model.hand_cse.hand_cse import HandCSE
 from common.utils.vis import visualize_recon_hand_w_object, visualize_grid_contact
 from common.msdf.utils.msdf import get_grid
 from common.evaluation.eval_fns import calculate_metrics, calc_diversity
-from common.model.diff.diffusion_compare import compare_diffusion_sampling, print_comparison_report
 
 
 class LGCDiffTrainer(L.LightningModule):
     """
     The Lightning trainer interface to train Local-grid based contact autoencoder.
     """
-    def __init__(self, grid_ae, model, diffusion0, diffusion1, cfg):
+    def __init__(self, grid_ae, model, diffusion, cfg):
         super().__init__()
         self.grid_ae = grid_ae
         self.model = model
-        self.diffusion0 = diffusion0
-        self.diffusion1 = diffusion1
+        self.diffusion = diffusion
         self.cfg = cfg
         self.save_hyperparameters(cfg)
         self.debug = cfg.get('debug', False)
@@ -56,35 +54,6 @@ class LGCDiffTrainer(L.LightningModule):
         self.hand_cse.eval()
         self.grid_coords = get_grid(self.cfg.msdf.kernel_size) * self.cfg.msdf.scale  # (K^3, 3)
         self.pool = None
-
-    def compare_diffusions(self, input_data, seed=42, verbose=True):
-        """
-        Compare the two diffusion implementations (diffusion0 and diffusion1).
-
-        This method identifies differences in the denoising process between DDPM and
-        GaussianDiffusion when using the same model and input.
-
-        Args:
-            input_data: Dict with 'x' (starting noise) and 'obj_pc' (conditioning)
-            seed: Random seed for reproducibility
-            verbose: Whether to print detailed comparison info
-
-        Returns:
-            Dict with comparison results including schedule differences,
-            step-by-step records, and divergence summary.
-        """
-        results = compare_diffusion_sampling(
-            diffusion0=self.diffusion0,
-            diffusion1=self.diffusion1,
-            model=self.model,
-            input_data=input_data,
-            seed=seed,
-            compare_schedules=True,
-            verbose=verbose
-        )
-        if verbose:
-            print_comparison_report(results)
-        return results
 
     def transfer_batch_to_device(self, batch, device, dataloader_idx):
         batch = super().transfer_batch_to_device(batch, device, dataloader_idx)
@@ -237,7 +206,10 @@ class LGCDiffTrainer(L.LightningModule):
             self.log_dict(loss_dict, prog_bar=False, sync_dist=True)
         ## Also sample and reconstruct
         if batch_idx % self.cfg[stage].vis_every_n_batches == 0:
-            samples = self.diffusion.p_sample_loop(self.model, input_data['x'].shape, input_data['obj_pc'])
+            condition = self.model.condition({'obj_pc': input_data['obj_pc']})
+            samples = self.diffusion.p_sample_loop(self.model, input_data['x'].shape, condition, noise=input_data['x'],
+                                                   clip_denoised=False)
+            # samples = self.diffusion.p_sample_loop(self.model, input_data['x'].shape, input_data['obj_pc'])
             vis_idx = 0
             simp_obj_mesh = getattr(self.trainer.datamodule, f'{stage}_set').simp_obj_mesh
             obj_templates = [trimesh.Trimesh(simp_obj_mesh[name]['verts'], simp_obj_mesh[name]['faces'])
@@ -461,15 +433,8 @@ class LGCDiffTrainer(L.LightningModule):
 
             ## 'x' only indicates the latent shape; latents are sampled inside the model
             input_data = {'x': torch.randn(n_samples, n_grids, self.cfg.ae.feat_dim, device=self.device), 'obj_pc': obj_pc.permute(0, 2, 1).to(self.device)}
-            # self.diffusion1.to(self.device)
 
-            ## Optional: Compare diffusion implementations (set compare_diffusions=True in config to enable)
-            # if self.cfg.test.get('compare_diffusions', False):
-            self.compare_diffusions(input_data, seed=batch_idx, verbose=True)
-
-            samples0 = self.diffusion0.sample(self.model, input_data, k=n_samples)
-            samples1 = self.diffusion1.sample(self.model, input_data, k=n_samples)
-            samples = samples1
+            samples = self.diffusion.sample(self.model, input_data, k=n_samples)
             # sample_latent = samples ## B x latent
             latent = samples.reshape(n_samples*n_grids, -1)
             ## repeat the multi-scale obj cond here
