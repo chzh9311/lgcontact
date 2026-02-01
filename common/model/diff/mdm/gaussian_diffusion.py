@@ -9,11 +9,13 @@ import math
 import numpy as np
 import torch
 import torch as th
+import torch.nn as nn
 import torch.nn.functional as F
 from copy import deepcopy
 from .nn import mean_flat, sum_flat
 from .losses import normal_kl, discretized_gaussian_log_likelihood
 from common.utils.geometry import cp_match, sdf_to_contact
+from common.model.diff.dm.schedule import make_schedule_ddpm
 
 def get_named_beta_schedule(schedule_name, num_diffusion_timesteps, beta_range=[0.0001, 0.02], scale_betas=1.):
     """
@@ -98,18 +100,17 @@ class LossType(enum.Enum):
         return self == LossType.KL or self == LossType.RESCALED_KL
 
 
-class GaussianDiffusion:
+class GaussianDiffusion(nn.Module):
     """
     Utilities for training and sampling diffusion models.
 
     Ported directly from here, and then adapted over time to further experimentation.
     https://github.com/hojonathanho/diffusion/blob/1e0dceb3b3495bbe19116a5e1b3596cd0706c543/diffusion_tf/diffusion_utils_2.py#L42
 
-    :param betas: a 1-D numpy array of betas for each diffusion timestep,
-                  starting at T and going to 1.
+    :param timesteps: the number of diffusion timesteps.
+    :param schedule_cfg: a dict containing 'beta' (list of [beta_start, beta_end]) and 'beta_schedule' (str).
     :param model_mean_type: a ModelMeanType determining what the model outputs.
     :param model_var_type: a ModelVarType determining how variance is output.
-    :param loss_type: a LossType determining the loss function to use.
     :param rescale_timesteps: if True, pass floating point timesteps into the
                               model so that they are always scaled like in the
                               original paper (0 to 1000).
@@ -118,59 +119,34 @@ class GaussianDiffusion:
     def __init__(
         self,
         *,
-        betas,
+        timesteps,
+        schedule_cfg,
         model_mean_type,
         model_var_type,
         rescale_timesteps=False,
         rand_t_type='half',
         msdf_cfg,
     ):
+        super(GaussianDiffusion, self).__init__()
+
         self.model_mean_type = model_mean_type
         self.model_var_type = model_var_type
         self.rescale_timesteps = rescale_timesteps
         self.rand_t_type = rand_t_type
-        self.msdf_cfg = msdf_cfg 
+        self.msdf_cfg = msdf_cfg
+        self.num_timesteps = timesteps
 
-        # Use float64 for accuracy.
-        betas = np.array(betas, dtype=np.float64)
-        self.betas = betas
-        assert len(betas.shape) == 1, "betas must be 1-D"
-        assert (betas > 0).all() and (betas <= 1).all()
+        # Use make_schedule_ddpm to generate schedule parameters
+        for k, v in make_schedule_ddpm(timesteps, **schedule_cfg).items():
+            self.register_buffer(k, v)
 
-        self.num_timesteps = int(betas.shape[0])
+        # alphas_cumprod_next is needed for DDIM reverse sampling but not in make_schedule_ddpm
+        alphas_cumprod_next = torch.cat([self.alphas_cumprod[1:], torch.tensor([0.0])])
+        self.register_buffer('alphas_cumprod_next', alphas_cumprod_next)
 
-        alphas = 1.0 - betas
-        self.alphas_cumprod = np.cumprod(alphas, axis=0)
-        self.alphas_cumprod_prev = np.append(1.0, self.alphas_cumprod[:-1])
-        self.alphas_cumprod_next = np.append(self.alphas_cumprod[1:], 0.0)
-        assert self.alphas_cumprod_prev.shape == (self.num_timesteps,)
-
-        # calculations for diffusion q(x_t | x_{t-1}) and others
-        self.sqrt_alphas_cumprod = np.sqrt(self.alphas_cumprod)
-        self.sqrt_one_minus_alphas_cumprod = np.sqrt(1.0 - self.alphas_cumprod)
-        self.log_one_minus_alphas_cumprod = np.log(1.0 - self.alphas_cumprod)
-        self.sqrt_recip_alphas_cumprod = np.sqrt(1.0 / self.alphas_cumprod)
-        self.sqrt_recipm1_alphas_cumprod = np.sqrt(1.0 / self.alphas_cumprod - 1)
-
-        # calculations for posterior q(x_{t-1} | x_t, x_0)
-        self.posterior_variance = (
-            betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
-        )
-        # log calculation clipped because the posterior variance is 0 at the
-        # beginning of the diffusion chain.
-        self.posterior_log_variance_clipped = np.log(
-            np.append(self.posterior_variance[1], self.posterior_variance[1:])
-        )
-        self.posterior_mean_coef1 = (
-            betas * np.sqrt(self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
-        )
-        self.posterior_mean_coef2 = (
-            (1.0 - self.alphas_cumprod_prev)
-            * np.sqrt(alphas)
-            / (1.0 - self.alphas_cumprod)
-        )
-
-        # self.l2_loss = lambda a, b: (a - b) ** 2  # th.nn.MSELoss(reduction='none')  # must be None for handling mask later on.
+    @property
+    def device(self):
+        return self.betas.device
 
 
     def q_mean_variance(self, x_start, t):
@@ -274,24 +250,22 @@ class GaussianDiffusion:
                 min_log = _extract_into_tensor(
                     self.posterior_log_variance_clipped, t, x.shape
                 )
-                max_log = _extract_into_tensor(np.log(self.betas), t, x.shape)
+                max_log = _extract_into_tensor(th.log(self.betas), t, x.shape)
                 # The model_var_values is [-1, 1] for [min_var, max_var].
                 frac = (model_var_values + 1) / 2
                 model_log_variance = frac * max_log + (1 - frac) * min_log
                 model_variance = th.exp(model_log_variance)
         else:
-            model_variance, model_log_variance = {
+            if self.model_var_type == ModelVarType.FIXED_LARGE:
                 # for fixedlarge, we set the initial (log-)variance like so
                 # to get a better decoder log likelihood.
-                ModelVarType.FIXED_LARGE: (
-                    np.append(self.posterior_variance[1], self.betas[1:]),
-                    np.log(np.append(self.posterior_variance[1], self.betas[1:])),
-                ),
-                ModelVarType.FIXED_SMALL: (
-                    self.posterior_variance,
-                    self.posterior_log_variance_clipped,
-                ),
-            }[self.model_var_type]
+                model_variance = th.cat([self.posterior_variance[1:2], self.betas[1:]])
+                model_log_variance = th.log(model_variance)
+            elif self.model_var_type == ModelVarType.FIXED_SMALL:
+                model_variance = self.posterior_variance
+                model_log_variance = self.posterior_log_variance_clipped
+            else:
+                raise NotImplementedError(self.model_var_type)
             # print('model_variance', model_variance)
             # print('model_log_variance',model_log_variance)
             # print('self.posterior_variance', self.posterior_variance)
@@ -560,9 +534,10 @@ class GaussianDiffusion:
         :param k: the number of samples to generate.
         :return: a non-differentiable batch of samples.
         """
-        shape = (k, ) + input_data['x'].shape
+        shape = input_data['x'].shape
         condition = model.condition({'obj_pc': input_data['obj_pc']})
-        result = self.p_sample_loop(model, shape, condition.repeat(k, 1, 1))
+        result = self.p_sample_loop(model, shape, condition.repeat(k, 1, 1), noise=input_data['x'],
+                                    clip_denoised=False)
         return result
     
     def p_sample_loop(
@@ -1380,15 +1355,17 @@ class GaussianDiffusion:
 
 def _extract_into_tensor(arr, timesteps, broadcast_shape):
     """
-    Extract values from a 1-D numpy array for a batch of indices.
+    Extract values from a 1-D tensor for a batch of indices.
 
-    :param arr: the 1-D numpy array.
+    :param arr: the 1-D tensor (or numpy array for backwards compatibility).
     :param timesteps: a tensor of indices into the array to extract.
     :param broadcast_shape: a larger shape of K dimensions with the batch
                             dimension equal to the length of timesteps.
     :return: a tensor of shape [batch_size, 1, ...] where the shape has K dims.
     """
-    res = th.from_numpy(arr).to(device=timesteps.device)[timesteps].float()
+    if isinstance(arr, np.ndarray):
+        arr = th.from_numpy(arr)
+    res = arr.to(device=timesteps.device)[timesteps].float()
     while len(res.shape) < len(broadcast_shape):
         res = res[..., None]
     return res.expand(broadcast_shape)

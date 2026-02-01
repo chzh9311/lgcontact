@@ -198,7 +198,8 @@ class DDPM(nn.Module):
         Return:
             Sampled data, <B, T, ...>
         """
-        x_t = torch.randn((k, *data['x'].shape), device=self.device)
+        # x_t = torch.randn((k, *data['x'].shape), device=self.device)
+        x_t = data['x']
 
         ## precompute conditional feature, which will be used in every sampling step
         condition = model.condition(data)

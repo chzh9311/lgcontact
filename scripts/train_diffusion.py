@@ -31,16 +31,18 @@ def main(cfg):
     # generator_module = importlib.import_module(f"common.model.{cfg.generator.model_type}.{cfg.generator.model_name}")
     # model = getattr(generator_module, cfg.generator.model_name.upper())(cfg)
     model = UNetModel(cfg.generator.unet)
-    if cfg.generator.model_type == 'mdm':
-        betas = mdm_gd.get_named_beta_schedule(schedule_name=cfg.generator.scheduler.beta_schedule, num_diffusion_timesteps=cfg.generator.scheduler.steps,
-                                               beta_range=cfg.generator.scheduler.beta_range, scale_betas=cfg.generator.scheduler.scale_beta)
-        diffusion = mdm_gd.GaussianDiffusion(betas=betas,
-                                             model_mean_type=mdm_gd.ModelMeanType[cfg.generator.scheduler.model_mean_type.upper()],
-                                             model_var_type=mdm_gd.ModelVarType[cfg.generator.scheduler.model_var_type.upper()],
-                                             rand_t_type=cfg.generator.scheduler.rand_t_type,
-                                             msdf_cfg=cfg.msdf)
-    else:
-        diffusion = DDPM(cfg.generator.ddpm) # The base version of diffusion.
+    # MDM GaussianDiffusion
+    mdm_cfg = cfg.generator.mdm
+    diffusion0 = mdm_gd.GaussianDiffusion(
+        timesteps=mdm_cfg.timesteps,
+        schedule_cfg=mdm_cfg.schedule_cfg,
+        model_mean_type=mdm_gd.ModelMeanType[mdm_cfg.model_mean_type.upper()],
+        model_var_type=mdm_gd.ModelVarType[mdm_cfg.model_var_type.upper()],
+        rand_t_type=mdm_cfg.rand_t_type,
+        rescale_timesteps=mdm_cfg.rescale_timesteps,
+        msdf_cfg=cfg.msdf)
+    # DDPM (the base version of diffusion)
+    diffusion1 = DDPM(cfg.generator.ddpm)
     gridae = GRIDAE(cfg.ae, obj_1d_feat=True)
     
     t = datetime.datetime.now()
@@ -89,7 +91,7 @@ def main(cfg):
         unused_keys = [k for k in sd.keys() if not (k.startswith('grid_ae.') or k.startswith('model.eps_model.'))]
         print(f'Unused keys in ckpt: {unused_keys}')
 
-        pl_model = LGCDiffTrainer(gridae, model, diffusion, cfg)
+        pl_model = LGCDiffTrainer(gridae, model, diffusion0, diffusion1, cfg)
         # pl_model = LGCDiffTrainer.load_from_checkpoint(cfg.ckpt_path, grid_ae=gridae, model=model, cfg=cfg)
         trainer.test(pl_model, datamodule=data_module)
 
