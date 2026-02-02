@@ -56,7 +56,7 @@ trainer: ## For instantiating pytorch-lightning Trainer
 
 run_phase: train
 test_gt: false
-ckpt_path: logs/checkpoints/mlcdiff/eps_model/best-epoch=63-val/total_loss=0.0244.ckpt
+ckpt_path: logs/wandb_logs/LG3DContact/iv80cnn9/checkpoints/best-epoch=68-val/total_loss=0.0496.ckpt
 
 debug: true
 

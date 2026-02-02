@@ -89,8 +89,8 @@ def main(cfg):
         sd = torch.load(cfg.ckpt_path, map_location='cpu')['state_dict']
         print('total keys in ckpt:', len(sd.keys()))
         load_pl_ckpt(gridae, sd, prefix='grid_ae.')
-        load_pl_ckpt(model, sd, prefix='model.eps_model.')
-        unused_keys = [k for k in sd.keys() if not (k.startswith('grid_ae.') or k.startswith('model.eps_model.'))]
+        load_pl_ckpt(model, sd, prefix='model.')
+        unused_keys = [k for k in sd.keys() if not (k.startswith('grid_ae.') or k.startswith('model.'))]
         print(f'Unused keys in ckpt: {unused_keys}')
 
         pl_model = LGCDiffTrainer(gridae, model, diffusion, cfg)
