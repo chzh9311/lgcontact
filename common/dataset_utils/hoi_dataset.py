@@ -106,8 +106,8 @@ class BaseHOIDataset(Dataset):
 
             if self.augment:
                 objR = Rot @ objR
-                objt = Rot @ objt[:, np.newaxis]
-            obj_sample_pts = obj_sample_pts @ objR.T + objt.T
+                objt = (Rot @ objt[:, np.newaxis])[:, 0]
+            obj_sample_pts = obj_sample_pts @ objR.T + objt[np.newaxis, :]
             obj_sample_normals = obj_sample_normals @ objR.T
 
             samples = {}
@@ -131,7 +131,7 @@ class BaseHOIDataset(Dataset):
                 'sbjId': sbj_id,
                 'objSamplePts': obj_sample_pts,
                 'objSampleNormals': obj_sample_normals,
-                'objTrans': objt[:, 0],
+                'objTrans': objt,
                 'objRot': Rotation.from_matrix(objR).as_rotvec(),
                 'handSide': hand_side,
             }
@@ -179,6 +179,7 @@ class BaseHOIDataset(Dataset):
                 handN = handN @ Rot.T
                 hand_rot = Rotation.from_matrix(Rot @ Rotation.from_rotvec(hand_rot.detach().cpu().numpy()).as_matrix()).as_rotvec()
                 hand_trans = (Rot @ hand_trans.detach().cpu().numpy()[:, np.newaxis])[:, 0]
+                sample['aug_rot'] = Rot
 
             sample.update({
                 'handRot': hand_rot,
@@ -189,7 +190,6 @@ class BaseHOIDataset(Dataset):
                 'handPartT': part_T,
                 'handPartIds': hand_part_ids,
                 'handNormals': np.stack(handN, axis=0),
-                'aug_rot': Rot
             })
             
             if self.grid_contact_ds is not None:
@@ -213,7 +213,7 @@ class BaseHOIDataset(Dataset):
                     sample['localGridContact'][grid_mask] = self.grid_dist_to_contact(local_grid_dist[grid_mask])
 
                 ## Apply inverse transform to hand vertices
-                handV = (handV - objt[np.newaxis, :, 0]) @ objR
+                handV = (handV - objt[np.newaxis, :]) @ objR
 
                 nn_vert_idx = hmodels[sbj_id].th_faces[nn_face_idx]  # (M, K^3, 3)
                 face_verts = handV[nn_vert_idx]  # (M, K^3, 3, 3)
