@@ -226,6 +226,9 @@ class HOIDatasetModule(LightningDataModule):
                 msdf_path = osp.join(self.preprocessed_dir, self.cfg.dataset_name,
                                     f'msdf_{self.cfg.msdf.num_grids}_{self.cfg.msdf.kernel_size}_{int(self.cfg.msdf.scale*1000):02d}mm',
                                     f'{k}.npz')
+                adj_points_path = osp.join(self.preprocessed_dir, self.cfg.dataset_name,
+                                    f'msdf_adj_points_{self.cfg.msdf.num_grids}_{self.cfg.msdf.kernel_size}_{int(self.cfg.msdf.scale*1000):02d}mm',
+                                    f'{k}.npz')
                 if not osp.exists(osp.dirname(msdf_path)):
                     os.makedirs(osp.dirname(msdf_path))
                 if not osp.exists(msdf_path):
@@ -235,6 +238,15 @@ class HOIDatasetModule(LightningDataModule):
                                     
                     np.savez_compressed(msdf_path, msdf=msdf)
                     print('result saved to ', msdf_path)
+                if not osp.exists(osp.dirname(adj_points_path)):
+                    os.makedirs(osp.dirname(adj_points_path))
+                if not osp.exists(adj_points_path):
+                    print(f'Preprocessing adjacent point pairs for {k}...')
+                    msdf_data = np.load(msdf_path)
+                    msdf_points = msdf_data['msdf'][:, -3:]  # N x 3
+                    indices, distances = self._adjacent_point_pairs(msdf_points, self.normalized_coords.numpy() * self.cfg.msdf.scale, self.cfg.msdf.kernel_size, self.cfg.msdf.scale)
+                    np.savez_compressed(adj_points_path, indices=indices, distances=distances)
+                    print(f'Saved {len(indices)} point pairs to ', adj_points_path)
                 
             if hasattr(self.cfg, 'n_obj_samples'):
                 sample_path = osp.join(self.preprocessed_dir, self.cfg.dataset_name,
@@ -385,6 +397,94 @@ class HOIDatasetModule(LightningDataModule):
         full_nn_point[grid_mask] = nn_point
 
         return full_local_grid, ho_dist.astype(np.float32), full_nn_face_idx, full_nn_point
+    
+    @staticmethod
+    def _adjacent_point_pairs(grid_centres, grid_coords, msdf_k, msdf_scale):
+        """
+        Find the adjacent point pairs in the local grids.
+        :param grid_centres: N x 3
+        :param grid_coords: K^3 x 3
+        :param msdf_k: int, kernel size
+        :param msdf_scale: float, grid scale
+        :return: (indices (M x 2), distances (M)): the adjacent point pair indices (flattened) and their distances
+        """
+        N = grid_centres.shape[0]
+        K3 = msdf_k ** 3
+        pt_spacing = msdf_scale / (msdf_k - 1)  # spacing between adjacent grid points
+
+        # Step 1: Identify adjacent grid pairs (Chebyshev distance < 2*msdf_scale)
+        # grid_centres: N x 3
+        grid_centre_diff = grid_centres[:, None, :] - grid_centres[None, :, :]  # N x N x 3
+        chebyshev_dist = np.abs(grid_centre_diff).max(axis=-1)  # N x N
+
+        # Adjacent if Chebyshev distance < 2*msdf_scale (grids overlap or touch), exclude self
+        adj_mask = (chebyshev_dist < 2 * msdf_scale) & (chebyshev_dist > 0)
+        # Only keep unique pairs (i < j) to avoid double counting
+        triu_mask = np.triu(np.ones((N, N), dtype=bool), k=1)
+        adj_mask = adj_mask & triu_mask  # N x N
+
+        # Get adjacent grid pairs
+        adj_i, adj_j = np.where(adj_mask)  # pairs of adjacent grid indices
+
+        if len(adj_i) == 0:
+            return np.zeros((0, 2), dtype=np.int64), np.zeros((0,), dtype=np.float32)
+
+        # Step 2: Compute absolute coordinates of all grid points
+        # grid_pt_coords: N x K^3 x 3
+        grid_pt_coords = grid_centres[:, None, :] + grid_coords[None, :, :]  # N x K^3 x 3
+
+        # Step 3: For each adjacent grid pair, find adjacent point pairs
+        all_indices = []
+        all_distances = []
+
+        # Process in chunks for memory efficiency
+        chunk_size = max(1, 1024 // K3)
+
+        for chunk_start in range(0, len(adj_i), chunk_size):
+            chunk_end = min(chunk_start + chunk_size, len(adj_i))
+            chunk_adj_i = adj_i[chunk_start:chunk_end]
+            chunk_adj_j = adj_j[chunk_start:chunk_end]
+
+            # Get coordinates for points in grid i and grid j
+            pts_i = grid_pt_coords[chunk_adj_i]  # chunk x K^3 x 3
+            pts_j = grid_pt_coords[chunk_adj_j]  # chunk x K^3 x 3
+
+            # Compute pairwise L2 distances: chunk x K^3 x K^3
+            # pts_i[:, :, None, :] - pts_j[:, None, :, :] -> chunk x K^3 x K^3 x 3
+            diff = pts_i[:, :, None, :] - pts_j[:, None, :, :]  # chunk x K^3 x K^3 x 3
+            pt_dists = np.linalg.norm(diff, axis=-1)  # chunk x K^3 x K^3
+
+            # Adjacent points: distance < pt_spacing
+            adj_pt_mask = pt_dists < pt_spacing  # chunk x K^3 x K^3
+
+            # Get indices of adjacent point pairs
+            chunk_idx, pt_i_idx, pt_j_idx = np.where(adj_pt_mask)
+
+            if len(chunk_idx) == 0:
+                continue
+
+            # Get the actual grid indices for these point pairs
+            grid_i_idx = chunk_adj_i[chunk_idx]
+            grid_j_idx = chunk_adj_j[chunk_idx]
+
+            # Convert to flattened indices: grid_idx * K^3 + pt_idx
+            flat_idx_i = grid_i_idx * K3 + pt_i_idx
+            flat_idx_j = grid_j_idx * K3 + pt_j_idx
+
+            # Get distances for these pairs
+            distances = pt_dists[chunk_idx, pt_i_idx, pt_j_idx]
+
+            all_indices.append(np.stack([flat_idx_i, flat_idx_j], axis=1))
+            all_distances.append(distances)
+
+        if len(all_indices) == 0:
+            return np.zeros((0, 2), dtype=np.int64), np.zeros((0,), dtype=np.float32)
+
+        indices = np.concatenate(all_indices, axis=0).astype(np.int64)  # M x 2
+        distances = np.concatenate(all_distances, axis=0).astype(np.float32)  # M
+
+        return indices, distances
+    
 
     def setup(self, stage: str):
         if stage == 'fit':
@@ -395,14 +495,64 @@ class HOIDatasetModule(LightningDataModule):
         elif stage == 'test':
             self.test_set = self.dataset_class(self.cfg, 'test', load_msdf=True, load_grid_contact=self.test_gt, test_gt=self.test_gt)
 
+    @staticmethod
+    def collate_fn(batch):
+        """
+        Custom collate function to handle variable-length adj_pt_indices and adj_pt_distances.
+        Pads these tensors with -1 to match the maximum length in the batch.
+
+        :param batch: List of sample dicts from the dataset
+        :return: Batched dict with padded tensors
+        """
+        # Separate variable-length keys from fixed-length keys
+        var_length_keys = ['adjPointIndices', 'adjPointDistances']
+
+        # Initialize output dict
+        collated = {}
+
+        # Get all keys from the first sample
+        keys = batch[0].keys()
+
+        for key in keys:
+            if key in var_length_keys:
+                # Handle variable-length tensors by keeping them as a list
+                # The loss function expects a list of tensors per batch element
+                items = [sample[key] for sample in batch]
+
+                # Convert numpy arrays to tensors if needed
+                tensors = []
+                for item in items:
+                    if isinstance(item, np.ndarray):
+                        tensors.append(torch.from_numpy(item))
+                    elif isinstance(item, torch.Tensor):
+                        tensors.append(item)
+                    else:
+                        tensors.append(item)
+
+                collated[key] = tensors
+            else:
+                # Standard collation for fixed-length tensors
+                items = [sample[key] for sample in batch]
+                if isinstance(items[0], torch.Tensor):
+                    collated[key] = torch.stack(items, dim=0)
+                elif isinstance(items[0], np.ndarray):
+                    collated[key] = torch.from_numpy(np.stack(items, axis=0))
+                elif isinstance(items[0], (int, float)):
+                    collated[key] = torch.tensor(items)
+                else:
+                    # For other types (strings, etc.), keep as list
+                    collated[key] = items
+
+        return collated
+
     def train_dataloader(self):
-        return DataLoader(self.train_set, batch_size=self.train_batch_size, shuffle=True, num_workers=self.cfg.num_workers)
+        return DataLoader(self.train_set, batch_size=self.train_batch_size, shuffle=True, num_workers=self.cfg.num_workers, collate_fn=self.collate_fn)
 
     def val_dataloader(self):
-        return DataLoader(self.val_set, batch_size=self.val_batch_size, shuffle=False, num_workers=self.cfg.num_workers)
+        return DataLoader(self.val_set, batch_size=self.val_batch_size, shuffle=False, num_workers=self.cfg.num_workers, collate_fn=self.collate_fn)
 
     def test_dataloader(self):
         batch_size = self.test_batch_size if self.test_gt else 1
         ## load only one object at a time for sample generation
-        return DataLoader(self.test_set, batch_size=batch_size, shuffle=False, num_workers=self.cfg.num_workers) 
+        return DataLoader(self.test_set, batch_size=batch_size, shuffle=False, num_workers=self.cfg.num_workers, collate_fn=self.collate_fn) 
 

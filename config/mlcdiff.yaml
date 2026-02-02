@@ -17,8 +17,8 @@ train:
     latent_mse: 1.0
     # contact_loss: 1.0
     # cse_value_loss: 1.0
-    reach_contact_loss: 1.0
-    reach_cse_value_loss: 0.1
+    consistency_contact_loss: 5.0
+    consistency_cse_loss: 1.0
 
 val:
   batch_size: 16

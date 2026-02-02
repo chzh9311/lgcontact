@@ -193,10 +193,12 @@ class LGCDiffTrainer(L.LightningModule):
             if torch.isnan(value).any():
                 raise ValueError(f"NaN detected in input_data['{key}'] at batch_idx {batch_idx}")
 
-        grid_coords = obj_msdf_center[:, :, None, :] + self.grid_coords.view(-1, 3)[None, None, :, :]  # B x N x K^3 x 3
+        # grid_coords = obj_msdf_center[:, :, None, :] + self.grid_coords.view(-1, 3)[None, None, :, :]  # B x N x K^3 x 3
         losses = self.diffusion.training_losses(self.model, input_data, grid_ae=self.grid_ae, ms_obj_cond=multi_scale_obj_cond,
-                                              hand_cse=self.hand_cse, gt_lg_contact=flat_lg_contact, hand_verts=handobject.hand_verts,
-                                              msdf_scale=self.msdf_scale, msdf_k=self.msdf_k, grid_points=grid_coords)
+                                              hand_cse=self.hand_cse, msdf_k=self.msdf_k, grid_scale=self.msdf_scale,
+                                              gt_lg_contact=flat_lg_contact,
+                                              adj_pt_indices=batch['adjPointIndices'],
+                                              adj_pt_distances=batch['adjPointDistances'])
         total_loss = sum([losses[k] * self.loss_weights[k] for k in losses.keys()])
         losses['total_loss'] = total_loss
         # grid_loss = F.mse_loss(err[:, :, 0], torch.zeros_like(err[:, :, 0]), reduction='mean')  # only compute loss on n_ho_dist dimension

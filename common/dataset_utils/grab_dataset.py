@@ -135,10 +135,15 @@ class GRABDataset(BaseHOIDataset):
             v['sample_normals'] = mesh.vertex_normals[v['verts_sample_id']]
 
         if msdf_path is not None:
+            adj_point_path = msdf_path.replace('msdf', 'msdf_adj_points')
             for k, v in obj_info.items():
                 if os.path.exists(osp.join(msdf_path, f'{k}.npz')):
                     msdf_data = np.load(osp.join(msdf_path, f'{k}.npz'))
                     v['msdf'] = msdf_data['msdf']
+                if os.path.exists(osp.join(adj_point_path, f'{k}.npz')):
+                    adj_data = np.load(osp.join(adj_point_path, f'{k}.npz'))
+                    v['adj_indices'] = adj_data['indices']
+                    v['adj_distances'] = adj_data['distances']
         return obj_info
 
     def _load_data(self):

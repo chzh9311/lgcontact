@@ -133,6 +133,8 @@ class BaseHOIDataset(Dataset):
                 obj_msdf = self.obj_info[obj_name]['msdf'].copy() ## K^3 + 3
                 obj_msdf[:, :-3] = obj_msdf[:, :-3] / self.msdf_scale / np.sqrt(3) # Normalize SDF
                 sample['objMsdf'] = obj_msdf
+                sample['adjPointIndices'] = self.obj_info[obj_name].get('adj_indices', None)
+                sample['adjPointDistances'] = self.obj_info[obj_name].get('adj_distances', None)
 
             # hand_out = hmodels[sbj_id](
             #     global_orient=hdata['global_orient'][idx:idx+1],

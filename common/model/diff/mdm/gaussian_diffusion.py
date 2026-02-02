@@ -1235,12 +1235,19 @@ class GaussianDiffusion(nn.Module):
         # recon_loss_dict = self.recon_loss(recon_contact=recon_contact, recon_cse=recon_cse,
         #                                   gt_contact=gt_contact, gt_cse=gt_cse)
         # terms.update(recon_loss_dict)
-        reach_loss_dict = self.reachability_loss(gt_hand_verts=kwargs['hand_verts'],
-                                                 recon_contact=recon_contact, recon_cse=recon_cse,
-                                                 grid_points=kwargs['grid_points'],
-                                                 hand_cse=kwargs['hand_cse'],
-                                                 msdf_k=msdf_k, cse_dim=gt_cse.shape[-1])
-        terms.update(reach_loss_dict)
+        # reach_loss_dict = self.reachability_loss(gt_hand_verts=kwargs['hand_verts'],
+        #                                          recon_contact=recon_contact, recon_cse=recon_cse,
+        #                                         #  recon_contact=gt_contact, recon_cse=gt_cse,
+        #                                          grid_points=kwargs['grid_points'],
+        #                                          hand_cse=kwargs['hand_cse'],
+        #                                          msdf_k=msdf_k, cse_dim=recon_cse.shape[-1])
+        dist_th = kwargs['grid_scale'] / (msdf_k - 1)
+        consistency_loss_dict = self.consistency_loss(recon_contact=recon_contact,
+                                                      recon_cse=recon_cse,
+                                                      adj_pt_indices=kwargs['adj_pt_indices'],
+                                                      adj_pt_distances=kwargs['adj_pt_distances'],
+                                                      dist_th=dist_th)
+        terms.update(consistency_loss_dict)
 
         return terms
     
@@ -1251,6 +1258,66 @@ class GaussianDiffusion(nn.Module):
         loss_cse = torch.sum(loss_cse.sum(dim=-1) * gt_contact) / (torch.sum(gt_contact) + 1e-6)
 
         return {'contact_loss': loss_contact, 'cse_value_loss': loss_cse}
+    
+
+    def consistency_loss(self, recon_contact, recon_cse, adj_pt_indices, adj_pt_distances, dist_th=0.0014):
+        """
+        Nearby points from adjacent grids should have similar contact and cse values. This loss punishes the difference weighted by the actual spatial distance.
+
+        :param recon_contact: B x N x K^3 tensor of reconstructed contact values
+        :param recon_cse: B x N x K^3 x D tensor of reconstructed cse values
+        :param adj_pt_indices: List of length B, each element is a M_b x 2 tensor of flattened adjacent point indices
+        :param adj_pt_distances: List of length B, each element is a M_b tensor of adjacent point distances
+        """
+        B, N, K3 = recon_contact.shape
+        device = recon_contact.device
+
+        # Flatten recon_contact and recon_cse for easier indexing
+        recon_contact_flat = recon_contact.reshape(B, -1)  # B x (N * K^3)
+        recon_cse_flat = recon_cse.reshape(B, -1, recon_cse.shape[-1])  # B x (N * K^3) x D
+
+        total_contact_loss = torch.tensor(0.0, device=device)
+        total_cse_loss = torch.tensor(0.0, device=device)
+        total_weight = torch.tensor(0.0, device=device)
+
+        for b in range(B):
+            indices = adj_pt_indices[b]  # M_b x 2
+            distances = adj_pt_distances[b]  # M_b
+
+            if indices.shape[0] == 0:
+                continue
+
+            # Get flattened indices for both points in each pair
+            idx_i = indices[:, 0]  # M_b
+            idx_j = indices[:, 1]  # M_b
+
+            # Get contact and cse values for adjacent points
+            contact_i = recon_contact_flat[b, idx_i]  # M_b
+            contact_j = recon_contact_flat[b, idx_j]  # M_b
+            cse_i = recon_cse_flat[b, idx_i]  # M_b x D
+            cse_j = recon_cse_flat[b, idx_j]  # M_b x D
+
+            # Compute point-wise weights (leave as placeholder for different implementations)
+            # TODO: Implement custom weighting strategy
+            # Available: distances (M_b) - can be used for distance-based weighting
+            # weights = torch.ones_like(contact_i)  # M_b
+            weights = torch.cos(distances / dist_th * (np.pi / 2)).clamp(min=0.0)  # M_b
+
+            # Compute MSE losses weighted by point weights
+            contact_diff_sq = torch.abs(contact_i - contact_j)  # M_b
+            avg_contact = ((contact_i + contact_j) / 2.0).detach()
+            cse_diff_sq = (avg_contact.unsqueeze(-1) * torch.abs(cse_i - cse_j)).sum(dim=-1)  # M_b
+
+            total_contact_loss = total_contact_loss + (weights * contact_diff_sq).sum()
+            total_cse_loss = total_cse_loss + (weights * cse_diff_sq).sum()
+            total_weight = total_weight + weights.sum()
+
+        # Normalize by total weight
+        eps = 1e-6
+        consistency_contact_loss = total_contact_loss / (total_weight + eps)
+        consistency_cse_loss = total_cse_loss / (total_weight + eps)
+
+        return {'consistency_contact_loss': consistency_contact_loss, 'consistency_cse_loss': consistency_cse_loss}
     
 
     def reachability_loss(self, gt_hand_verts, recon_contact, recon_cse, grid_points, hand_cse, msdf_k, cse_dim):
