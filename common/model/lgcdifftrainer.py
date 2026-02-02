@@ -215,8 +215,7 @@ class LGCDiffTrainer(L.LightningModule):
         ## Also sample and reconstruct
         if batch_idx % self.cfg[stage].vis_every_n_batches == 0:
             condition = self.model.condition({'obj_pc': input_data['obj_pc']})
-            samples = self.diffusion.p_sample_loop(self.model, input_data['x'].shape, condition, noise=input_data['x'],
-                                                   clip_denoised=False)
+            samples = self.diffusion.p_sample_loop(self.model, input_data['x'].shape, condition, clip_denoised=False)
             # samples = self.diffusion.p_sample_loop(self.model, input_data['x'].shape, input_data['obj_pc'])
             vis_idx = 0
             simp_obj_mesh = getattr(self.trainer.datamodule, f'{stage}_set').simp_obj_mesh
