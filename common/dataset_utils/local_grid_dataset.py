@@ -14,7 +14,7 @@ from lightning import LightningDataModule
 from tqdm import tqdm
 import h5py
 
-from common.utils.geometry import sdf_to_contact
+from common.utils.geometry import GridDistanceToContact
 from common.msdf.utils.msdf import calc_local_grid_1pt
 
 
@@ -26,6 +26,7 @@ class LocalGridDataset(Dataset):
         super().__init__()
         self.grid_scale = cfg.msdf.scale
         self.kernel_size = cfg.msdf.kernel_size
+        self.grid_dist_to_contact = GridDistanceToContact.from_config(cfg.msdf, method=cfg.msdf.contact_method)
         self.dataset_name = cfg.dataset_name
         self.dataset_path = cfg.dataset_path
         self.mano_root = cfg.get('mano_root', 'data/mano')
@@ -130,7 +131,7 @@ class LocalGridDataset(Dataset):
         #                                         self.kernel_size, self.grid_scale, self.hand_cse)
         ## contact data
         grid_data = torch.from_numpy(grid_data).float()
-        grid_data[:, :, :, 1] = sdf_to_contact(grid_data[:, :, :, 1] / (self.grid_scale / (self.kernel_size-1)), None, method=2)
+        grid_data[:, :, :, 1] = self.grid_dist_to_contact(grid_data[:, :, :, 1])
         grid_data[:, :, :, 0] = grid_data[:, :, :, 0] / self.grid_scale / np.sqrt(3)  # Normalize SDF
         grid_data = torch.cat([grid_data, torch.from_numpy(grid_hand_cse).float()], dim=-1).numpy()
 

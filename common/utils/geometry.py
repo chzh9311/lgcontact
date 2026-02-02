@@ -200,6 +200,48 @@ def sdf_to_contact(sdf, dot_normal=None, method=0):
         return torch.clamp(c, 0.0, 1.0)
 
 
+class GridDistanceToContact:
+    """
+    Unified interface for transforming grid distances to contact values.
+
+    This class handles the normalization of distances based on grid scale and kernel size,
+    then transforms them to contact values using sdf_to_contact.
+
+    :param scale: The grid scale (physical size of the grid)
+    :param kernel_size: The kernel size (number of grid points along each dimension)
+    :param method: The contact transformation method (default: 2)
+    """
+
+    def __init__(self, scale: float, kernel_size: int, method: int = 2):
+        self.scale = scale
+        self.kernel_size = kernel_size
+        self.method = method
+        # Normalization factor: distance of 1 grid cell
+        self.norm_factor = scale / (kernel_size - 1)
+
+    def __call__(self, dist, dot_normal=None):
+        """
+        Transform grid distances to contact values.
+
+        :param dist: Raw distances (torch.Tensor or np.ndarray)
+        :param dot_normal: Optional dot product with normal for method 4
+        :return: Contact values in [0, 1]
+        """
+        normalized_dist = dist / self.norm_factor
+        return sdf_to_contact(normalized_dist, dot_normal, method=self.method)
+
+    @classmethod
+    def from_config(cls, cfg, method: int = 2):
+        """
+        Create a GridDistanceToContact instance from a config object.
+
+        :param cfg: Config object with 'scale' and 'kernel_size' attributes
+        :param method: The contact transformation method (default: 2)
+        :return: GridDistanceToContact instance
+        """
+        return cls(scale=cfg.scale, kernel_size=cfg.kernel_size, method=method)
+
+
 def batched_index_select(t, dim, inds):
     """
     Helper function to extract batch-varying indicies along array

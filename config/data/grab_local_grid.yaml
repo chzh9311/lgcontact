@@ -18,5 +18,6 @@ msdf:
   num_grids: ${msdf.num_grids}
   kernel_size: ${msdf.kernel_size}
   scale: ${msdf.scale}
+  contact_method: ${msdf.contact_method}
 
 num_workers: 16

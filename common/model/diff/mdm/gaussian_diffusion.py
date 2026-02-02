@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from copy import deepcopy
 from .nn import mean_flat, sum_flat
 from .losses import normal_kl, discretized_gaussian_log_likelihood
-from common.utils.geometry import cp_match, sdf_to_contact
+from common.utils.geometry import cp_match, GridDistanceToContact
 from common.model.diff.dm.schedule import make_schedule_ddpm
 
 def get_named_beta_schedule(schedule_name, num_diffusion_timesteps, beta_range=[0.0001, 0.02], scale_betas=1.):
@@ -135,6 +135,7 @@ class GaussianDiffusion(nn.Module):
         self.rand_t_type = rand_t_type
         self.msdf_cfg = msdf_cfg
         self.num_timesteps = timesteps
+        self.grid_dist_to_contact = GridDistanceToContact.from_config(msdf_cfg, method=msdf_cfg.contact_method)
 
         # Use make_schedule_ddpm to generate schedule parameters
         for k, v in make_schedule_ddpm(timesteps, **schedule_cfg).items():
@@ -1220,26 +1221,28 @@ class GaussianDiffusion(nn.Module):
         terms["latent_mse"] = F.mse_loss(model_output, target, reduction="mean")
 
         ## Reconstruction Loss
-        # batch_size, n_grids = model_output.shape[:2]
-        # latent = model_output.reshape(batch_size*n_grids, -1)
-        # grid_ae = kwargs['grid_ae']
-        # ms_obj_cond = kwargs['ms_obj_cond']
-        # recon_lg_contact = grid_ae.decode(latent, ms_obj_cond)
-        # recon_lg_contact = recon_lg_contact.view(batch_size, n_grids, -1, self.msdf_k ** 3).permute(0, 1, 3, 2)
-        # recon_contact = recon_lg_contact[..., 0] # * grid_contact_mask[:, :, None].float()
-        # recon_cse = recon_lg_contact[..., 1:]
+        batch_size, n_grids = model_output.shape[:2]
+        latent = model_output.reshape(batch_size*n_grids, -1)
+        grid_ae = kwargs['grid_ae']
+        ms_obj_cond = kwargs['ms_obj_cond']
+        recon_lg_contact = grid_ae.decode(latent, ms_obj_cond)
+        msdf_k = kwargs['msdf_k']
+        recon_lg_contact = recon_lg_contact.view(batch_size, n_grids, -1, msdf_k ** 3).permute(0, 1, 3, 2)
+        recon_contact = recon_lg_contact[..., 0] # * grid_contact_mask[:, :, None].float()
+        recon_cse = recon_lg_contact[..., 1:]
 
-        # gt_contact, gt_cse = kwargs['gt_lg_contact'][..., 0], kwargs['gt_lg_contact'][..., 1:]
+        gt_contact, gt_cse = kwargs['gt_lg_contact'][..., 0], kwargs['gt_lg_contact'][..., 1:]
         # recon_loss_dict = self.recon_loss(recon_contact=recon_contact, recon_cse=recon_cse,
         #                                   gt_contact=gt_contact, gt_cse=gt_cse)
         # terms.update(recon_loss_dict)
-        # reach_loss_dict = self.reachability_loss(gt_hand_verts=data['hand_verts'],
-        #                                          recon_contact=recon_contact, recon_cse=recon_cse,
-        #                                          grid_points=kwargs['grid_points'],
-        #                                          hand_cse=kwargs['hand_cse'])
-        # terms.update(reach_loss_dict)
+        reach_loss_dict = self.reachability_loss(gt_hand_verts=kwargs['hand_verts'],
+                                                 recon_contact=recon_contact, recon_cse=recon_cse,
+                                                 grid_points=kwargs['grid_points'],
+                                                 hand_cse=kwargs['hand_cse'],
+                                                 msdf_k=msdf_k, cse_dim=gt_cse.shape[-1])
+        terms.update(reach_loss_dict)
 
-        return terms['latent_mse']
+        return terms
     
 
     def recon_loss(self, recon_contact, recon_cse, gt_contact, gt_cse):
@@ -1247,33 +1250,33 @@ class GaussianDiffusion(nn.Module):
         loss_cse = F.mse_loss(recon_cse, gt_cse, reduction='none')
         loss_cse = torch.sum(loss_cse.sum(dim=-1) * gt_contact) / (torch.sum(gt_contact) + 1e-6)
 
-        return {'loss_contact': loss_contact, 'loss_cse_value': loss_cse}
+        return {'contact_loss': loss_contact, 'cse_value_loss': loss_cse}
     
 
-    def reachability_loss(self, gt_hand_verts, recon_contact, recon_cse, grid_points, hand_cse):
+    def reachability_loss(self, gt_hand_verts, recon_contact, recon_cse, grid_points, hand_cse, msdf_k, cse_dim):
         """
         Punish the reconstructed contact and cse values by how likely they lead to unreachable hand vertices.
-        
+
         :param gt_hand_verts: B x H x 3 tensor of ground truth hand vertices. Used as the template of hand mesh.
-        :param recon_contact: B x N x K x K x K tensor of reconstructed contact values
-        :param recon_cse: B x N x K x K x K x D tensor of reconstructed cse values
-        :param grid_points: B x N x K x K x K x 3 tensor of grid points (corresponding to recon_contact and recon_cse)
+        :param recon_contact: B x N x K^3 tensor of reconstructed contact values
+        :param recon_cse: B x N x K^3 x D tensor of reconstructed cse values
+        :param grid_points: B x N x K^3 x 3 tensor of grid points (corresponding to recon_contact and recon_cse)
         :param hand_cse: The CSE model of the hand surface.
         """
         batch_size, n_grids = recon_contact.shape[:2]
-        pred_targetWverts = hand_cse.emb2Wvert(recon_cse.view(batch_size, -1, self.cse_dim))
-        Rs, ts = cp_match(pred_targetWverts @ gt_hand_verts, grid_points, recon_contact.view(batch_size, -1))
+        pred_targetWverts = hand_cse.emb2Wvert(recon_cse.reshape(batch_size, -1, cse_dim))
+        Rs, ts = cp_match(pred_targetWverts @ gt_hand_verts, grid_points.view(batch_size, -1, 3), recon_contact.reshape(batch_size, -1, 1))
         aligned_handV = gt_hand_verts @ Rs.transpose(1, 2) + ts.unsqueeze(1)
         ## Next calculate the target contact & cse values; Use NN for faster speed 
 
         dists = torch.cdist(aligned_handV, grid_points.view(batch_size, -1, 3)) # B x H x (N * K^3)
-        nn_dists, nn_indices = torch.min(dists / self.msdf_cfg.scale, dim=1) # B x (N * K^3)
-        aligned_contact = sdf_to_contact(nn_dists, None, method=2)
-        aligned_cse = hand_cse.verts2emb(nn_indices)
+        nn_dists, nn_indices = torch.min(dists, dim=1) # B x (N * K^3)
+        aligned_contact = self.grid_dist_to_contact(nn_dists)
+        aligned_cse = hand_cse.vert2emb(nn_indices)
 
         loss_dict = self.recon_loss(recon_contact=recon_contact, recon_cse=recon_cse,
-                                    gt_contact=aligned_contact.view(batch_size, n_grids, self.msdf_k, self.msdf_k, self.msdf_k),
-                                    gt_cse=aligned_cse.view(batch_size, n_grids, self.msdf_k, self.msdf_k, self.msdf_k, self.cse_dim))
+                                    gt_contact=aligned_contact.view(batch_size, n_grids, msdf_k**3),
+                                    gt_cse=aligned_cse.view(batch_size, n_grids, msdf_k**3, cse_dim))
         loss_dict = {f'reach_{k}': v for k, v in loss_dict.items()}
         return loss_dict
 

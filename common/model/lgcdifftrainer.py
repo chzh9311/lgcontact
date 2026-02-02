@@ -19,6 +19,7 @@ from common.model.hand_cse.hand_cse import HandCSE
 from common.utils.vis import visualize_recon_hand_w_object, visualize_grid_contact
 from common.msdf.utils.msdf import get_grid
 from common.evaluation.eval_fns import calculate_metrics, calc_diversity
+from einops import rearrange
 
 
 class LGCDiffTrainer(L.LightningModule):
@@ -35,6 +36,7 @@ class LGCDiffTrainer(L.LightningModule):
         self.debug = cfg.get('debug', False)
         self.msdf_k = cfg.msdf.kernel_size
         self.lr = cfg.train.lr
+        self.loss_weights = cfg.train.get('loss_weights', {})
 
         ## Load and freeze autoencoder pretrained weights
         if cfg.run_phase == 'train':
@@ -53,6 +55,7 @@ class LGCDiffTrainer(L.LightningModule):
         self.hand_cse.load_state_dict(cse_ckpt['state_dict'])
         self.hand_cse.eval()
         self.grid_coords = get_grid(self.cfg.msdf.kernel_size) * self.cfg.msdf.scale  # (K^3, 3)
+        self.msdf_scale = self.cfg.msdf.scale
         self.pool = None
 
     def transfer_batch_to_device(self, batch, device, dataloader_idx):
@@ -176,7 +179,8 @@ class LGCDiffTrainer(L.LightningModule):
 
         obj_msdf_center = handobject.obj_msdf[:, :, self.msdf_k**3:] # B x 3
         ## First process all grids separately using GRIDAE
-        lg_contact = lg_contact.view(-1, self.msdf_k, self.msdf_k, self.msdf_k, lg_contact.shape[-1]).permute(0, 4, 1, 2, 3)
+        flat_lg_contact = rearrange(lg_contact, 'b n k1 k2 k3 c -> b n (k1 k2 k3) c')
+        lg_contact = rearrange(lg_contact, 'b n k1 k2 k3 c -> (b n) c k1 k2 k3')
         posterior, obj_feat, multi_scale_obj_cond = self.grid_ae.encode(lg_contact, obj_msdf)
         obj_pc = torch.cat([obj_msdf_center, obj_feat.view(batch_size, n_grids, -1)], dim=-1)
         # z = torch.cat([n_ho_dist.unsqueeze(-1), posterior.sample().view(batch_size, n_grids, -1)], dim=-1) # n_dim + 1
@@ -189,8 +193,12 @@ class LGCDiffTrainer(L.LightningModule):
             if torch.isnan(value).any():
                 raise ValueError(f"NaN detected in input_data['{key}'] at batch_idx {batch_idx}")
 
-        loss = self.diffusion.training_losses(self.model, input_data, grid_ae=self.grid_ae, ms_obj_cond=multi_scale_obj_cond,
-                                              hand_cse=self.hand_cse)
+        grid_coords = obj_msdf_center[:, :, None, :] + self.grid_coords.view(-1, 3)[None, None, :, :]  # B x N x K^3 x 3
+        losses = self.diffusion.training_losses(self.model, input_data, grid_ae=self.grid_ae, ms_obj_cond=multi_scale_obj_cond,
+                                              hand_cse=self.hand_cse, gt_lg_contact=flat_lg_contact, hand_verts=handobject.hand_verts,
+                                              msdf_scale=self.msdf_scale, msdf_k=self.msdf_k, grid_points=grid_coords)
+        total_loss = sum([losses[k] * self.loss_weights[k] for k in losses.keys()])
+        losses['total_loss'] = total_loss
         # grid_loss = F.mse_loss(err[:, :, 0], torch.zeros_like(err[:, :, 0]), reduction='mean')  # only compute loss on n_ho_dist dimension
         # diff_loss = F.mse_loss(err[:, :, 1:], torch.zeros_like(err[:, :, 1:]), reduction='none')
         # obj_pt_mask = input_data['x'][:, :, 0:1] < 0
@@ -199,11 +207,11 @@ class LGCDiffTrainer(L.LightningModule):
         # loss_dict = {f'{stage}/grid_contact_loss': grid_loss,
         #              f'{stage}/latent_diff_loss': diff_loss,
         #              f'{stage}/total_loss': grid_loss + diff_loss}
-        loss_dict = {f'{stage}/total_loss': loss}
+        loss_dict = {f'{stage}/{k}': v for k, v in losses.items()}
         if stage == 'val':
-            self.log_dict(loss_dict, prog_bar=False, sync_dist=True, on_step=False, on_epoch=True)
+            self.log_dict(loss_dict, prog_bar=True, sync_dist=True, on_step=False, on_epoch=True)
         else:
-            self.log_dict(loss_dict, prog_bar=False, sync_dist=True)
+            self.log_dict(loss_dict, prog_bar=True, sync_dist=True)
         ## Also sample and reconstruct
         if batch_idx % self.cfg[stage].vis_every_n_batches == 0:
             condition = self.model.condition({'obj_pc': input_data['obj_pc']})
@@ -300,7 +308,7 @@ class LGCDiffTrainer(L.LightningModule):
                     self.logger.experiment.log({f'{stage}/GT_vs_GTRec_vs_sampled_contact': wandb.Image(contact_img)}, step=self.global_step)
                     self.logger.experiment.log({f'{stage}/GT_vs_GTRec_vs_sampled_hand': wandb.Image(img)}, step=self.global_step)
 
-        return loss_dict[f'{stage}/total_loss']
+        return total_loss
                                   
         # recon_loss = F.mse_loss(recon_grid_contact, gt_grid_contact.permute(0, 4, 1, 2, 3))
         # loss_dict = {f'{stage}/embedding_loss': loss, f'{stage}/recon_loss': recon_loss, f'{stage}/perplexity': perplexity}

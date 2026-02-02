@@ -5,7 +5,7 @@ import torch
 import os.path as osp
 from torch.utils.data import Dataset
 
-from common.utils.geometry import transform_obj, sdf_to_contact
+from common.utils.geometry import transform_obj, GridDistanceToContact
 from common.utils.vis import o3dmesh_from_trimesh, o3dmesh
 from pytorch3d.transforms import axis_angle_to_matrix
 import h5py
@@ -37,8 +37,10 @@ class BaseHOIDataset(Dataset):
                                     f'msdf_{cfg.msdf.num_grids}_{cfg.msdf.kernel_size}_{int(cfg.msdf.scale*1000):02d}mm')
             self.msdf_scale = cfg.msdf.scale
             self.msdf_kernel_size = cfg.msdf.kernel_size
+            self.grid_dist_to_contact = GridDistanceToContact.from_config(cfg.msdf, method=cfg.msdf.contact_method)
         else:
             self.msdf_path = None
+            self.grid_dist_to_contact = None
         
         self._load_data()
 
@@ -163,8 +165,7 @@ class BaseHOIDataset(Dataset):
                     grid_mask = np.any(contact_mask, axis=-1)
                     local_grid_dist = ds['local_grid'][idx]
                     sample['localGridContact'] = np.zeros_like(local_grid_dist)
-                    sample['localGridContact'][grid_mask] = sdf_to_contact(
-                        local_grid_dist[grid_mask] / (self.msdf_scale / (self.msdf_kernel_size-1)), dot_normal=None, method=2)
+                    sample['localGridContact'][grid_mask] = self.grid_dist_to_contact(local_grid_dist[grid_mask])
                     nn_point = ds['nn_point'][idx][grid_mask].reshape(-1, self.msdf_kernel_size**3, 3)
                     nn_face_idx = ds['nn_face_idx'][idx][grid_mask].reshape(-1, self.msdf_kernel_size**3)  # (M * K^3,)
 

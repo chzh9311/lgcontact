@@ -13,6 +13,12 @@ train:
   lr: 1e-4
   batch_size: 16
   vis_every_n_batches: 500
+  loss_weights:
+    # contact_loss: 1.0
+    # cse_value_loss: 1.0
+    latent_mse: 1.0
+    reach_contact_loss: 1.0
+    reach_cse_value_loss: 0.1
 
 val:
   batch_size: 16
