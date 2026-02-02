@@ -13,6 +13,7 @@ train:
   lr: 1e-4
   batch_size: 16
   vis_every_n_batches: 500
+  augment: true
   loss_weights:
     latent_mse: 1.0
     # contact_loss: 1.0
@@ -22,7 +23,7 @@ train:
 
 val:
   batch_size: 16
-  vis_every_n_batches: 200
+  vis_every_n_batches: 50
 
 checkpoint:
   filename: best

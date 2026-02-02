@@ -4,10 +4,11 @@ import trimesh
 import torch
 import os.path as osp
 from torch.utils.data import Dataset
+from scipy.spatial.transform import Rotation
 
-from common.utils.geometry import transform_obj, GridDistanceToContact
+from common.utils.geometry import transform_obj, GridDistanceToContact, rodrigues_rot, grid_reorder_id_and_rot
 from common.utils.vis import o3dmesh_from_trimesh, o3dmesh
-from pytorch3d.transforms import axis_angle_to_matrix
+from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
 import h5py
 
 def get_kine_parent(idx):
@@ -29,6 +30,7 @@ class BaseHOIDataset(Dataset):
         self.split = split
         # self.n_obj_samples = cfg.object_sample
         self.mano_root = cfg.mano_root
+        self.augment = cfg.augment and (split == 'train')
         self.test_gt = test_gt
         self.hand_sides = None
         self.lh_data = None
@@ -85,6 +87,8 @@ class BaseHOIDataset(Dataset):
             return len(self.frame_names)
 
     def __getitem__(self, idx):
+        if self.augment:
+            reorder_id, Rot = grid_reorder_id_and_rot(self.msdf_kernel_size, np.random.randint(0, 12))
         if self.split in ['train', 'val'] or self.test_gt:
             fname_path = self.frame_names[idx].split('/')
             sbj_id = fname_path[2]
@@ -95,12 +99,15 @@ class BaseHOIDataset(Dataset):
             obj_trans = self.object_data['transl'][idx]
 
             ## Transform the vertices:
-            ## TODO: output the correct object rotations.
             objR = axis_angle_to_matrix(obj_rot).detach().cpu().numpy()
             if self.dataset_name == 'grab':
                 objR = objR.T
             objt = obj_trans.detach().cpu().numpy()
-            obj_sample_pts = obj_sample_pts @ objR.T + objt
+
+            if self.augment:
+                objR = Rot @ objR
+                objt = Rot @ objt[:, np.newaxis]
+            obj_sample_pts = obj_sample_pts @ objR.T + objt.T
             obj_sample_normals = obj_sample_normals @ objR.T
 
             samples = {}
@@ -124,8 +131,8 @@ class BaseHOIDataset(Dataset):
                 'sbjId': sbj_id,
                 'objSamplePts': obj_sample_pts,
                 'objSampleNormals': obj_sample_normals,
-                'objTrans': obj_trans,
-                'objRot': obj_rot,
+                'objTrans': objt[:, 0],
+                'objRot': Rotation.from_matrix(objR).as_rotvec(),
                 'handSide': hand_side,
             }
 
@@ -135,29 +142,54 @@ class BaseHOIDataset(Dataset):
                 sample['objMsdf'] = obj_msdf
                 sample['adjPointIndices'] = self.obj_info[obj_name].get('adj_indices', None)
                 sample['adjPointDistances'] = self.obj_info[obj_name].get('adj_distances', None)
+                if self.augment:
+                    obj_msdf_pts = obj_msdf[:, -3:] @ Rot.T
+                    obj_msdf[:, -3:] = obj_msdf_pts
+                    obj_msdf[:, :-3] = obj_msdf[:, :-3][:, reorder_id]
+                    sample['objMsdf'] = obj_msdf
+                    ## reorder adjacents
+                    adj_indices = sample['adjPointIndices']
+                    grid_id = adj_indices // (self.msdf_kernel_size ** 3)
+                    local_point_id = adj_indices % (self.msdf_kernel_size ** 3)
+                    new_local_point_id = reorder_id[local_point_id]
+                    new_adj_indices = grid_id * (self.msdf_kernel_size ** 3) + new_local_point_id
+                    sample['adjPointIndices'] = new_adj_indices
 
             # hand_out = hmodels[sbj_id](
             #     global_orient=hdata['global_orient'][idx:idx+1],
             #     hand_pose=hdata['fullpose'][idx:idx+1],
             #     transl=hdata['transl'][idx:idx+1])
             # handV, handJ = hand_out.vertices[0].detach().cpu().numpy(), hand_out.joints[0].detach().cpu().numpy()
+            hand_rot = hdata['global_orient'][idx]
+            hand_pose = hdata['fullpose'][idx].flatten()
+            hand_trans = hdata['transl'][idx]
             handV, handJ, part_T = hmodels[sbj_id](
-                th_pose_coeffs=torch.cat([hdata['global_orient'], hdata['fullpose'].view(-1, 45)], dim=1)[idx:idx+1],
-                th_trans=hdata['transl'][idx:idx+1])
+                th_pose_coeffs=torch.cat([hand_rot, hand_pose], dim=0).unsqueeze(0),
+                th_trans=hand_trans.unsqueeze(0))
             handV, handJ, part_T = handV[0].detach().cpu().numpy(), handJ[0].detach().cpu().numpy(), part_T[0].detach().cpu().numpy()
             # model = ManoLayer(mano_root=self.mano_root, flat_hand_mean=True)
             hand_part_ids = torch.argmax(hmodels[sbj_id].th_weights, dim=-1).detach().cpu().numpy()
 
             handN = trimesh.Trimesh(handV, hmodels[sbj_id].th_faces).vertex_normals
+
+            if self.augment:
+                handV = handV @ Rot.T
+                handJ = handJ @ Rot.T
+                part_T[:, :3, :3] = Rot @ part_T[:, :3, :3]
+                handN = handN @ Rot.T
+                hand_rot = Rotation.from_matrix(Rot @ Rotation.from_rotvec(hand_rot.detach().cpu().numpy()).as_matrix()).as_rotvec()
+                hand_trans = (Rot @ hand_trans.detach().cpu().numpy()[:, np.newaxis])[:, 0]
+
             sample.update({
-                'handRot': hdata['global_orient'][idx],
-                'handPose': hdata['fullpose'][idx],
-                'handTrans': hdata['transl'][idx],
+                'handRot': hand_rot,
+                'handPose': hand_pose,
+                'handTrans': hand_trans,
                 'handVerts': handV,
                 'handJoints': handJ,
                 'handPartT': part_T,
                 'handPartIds': hand_part_ids,
                 'handNormals': np.stack(handN, axis=0),
+                'aug_rot': Rot
             })
             
             if self.grid_contact_ds is not None:
@@ -166,13 +198,22 @@ class BaseHOIDataset(Dataset):
                     contact_mask = ho_dist < self.msdf_scale
                     grid_mask = np.any(contact_mask, axis=-1)
                     local_grid_dist = ds['local_grid'][idx]
-                    sample['localGridContact'] = np.zeros_like(local_grid_dist)
-                    sample['localGridContact'][grid_mask] = self.grid_dist_to_contact(local_grid_dist[grid_mask])
+
                     nn_point = ds['nn_point'][idx][grid_mask].reshape(-1, self.msdf_kernel_size**3, 3)
                     nn_face_idx = ds['nn_face_idx'][idx][grid_mask].reshape(-1, self.msdf_kernel_size**3)  # (M * K^3,)
 
+                    if self.augment:
+                        local_grid_dist = local_grid_dist.reshape(-1, self.msdf_kernel_size**3)[:, reorder_id].reshape(
+                            -1, self.msdf_kernel_size, self.msdf_kernel_size, self.msdf_kernel_size, 1)
+                        nn_point = nn_point @ (Rot.T)[np.newaxis, :, :]
+                        nn_point = nn_point[:, reorder_id, :]
+                        nn_face_idx = nn_face_idx[:, reorder_id]
+
+                    sample['localGridContact'] = np.zeros_like(local_grid_dist)
+                    sample['localGridContact'][grid_mask] = self.grid_dist_to_contact(local_grid_dist[grid_mask])
+
                 ## Apply inverse transform to hand vertices
-                handV = (handV - objt[np.newaxis, :]) @ objR
+                handV = (handV - objt[np.newaxis, :, 0]) @ objR
 
                 nn_vert_idx = hmodels[sbj_id].th_faces[nn_face_idx]  # (M, K^3, 3)
                 face_verts = handV[nn_vert_idx]  # (M, K^3, 3, 3)

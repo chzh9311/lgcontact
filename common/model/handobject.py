@@ -50,13 +50,11 @@ class HandObject:
         self.obj_trans = None
         self.normalize = normalize
         self.obj_com = None
-        self.inv_obj_rot = cfg.dataset_name == 'grab'
         self.contact_unit = cfg.contact_unit
         self.normalized_coords = get_grid(kernel_size=self.cfg.msdf.kernel_size, device=self.device).reshape(-1, 3).float()
 
     def __copy__(self):
         new_ho = HandObject(cfg=self.cfg, device=self.device, normalize=self.normalize)
-        new_ho.inv_obj_rot = self.inv_obj_rot
         new_ho.obj_names = self.obj_names
         new_ho.mano_layer = self.mano_layer
         new_ho.hand_part_ids = copy(self.hand_part_ids)
@@ -107,7 +105,7 @@ class HandObject:
         # Do transformations
         objT = torch.eye(4).to(self.device).unsqueeze(0).repeat(self.batch_size, 1, 1)
         objR = axis_angle_to_matrix(self.obj_rot)
-        objT[:, :3, :3] = objR.transpose(-1, -2) if self.inv_obj_rot else objR
+        objT[:, :3, :3] = objR
         objT[:, :3, 3] = self.obj_trans
 
         # Load object templates
@@ -273,7 +271,7 @@ class HandObject:
                 objR = axis_angle_to_matrix(self.obj_rot[i]).detach().cpu().numpy()
                 objt = self.obj_trans[i].detach().cpu().numpy()
                 T = np.eye(4)
-                T[:3, :3] = objR.T if self.inv_obj_rot else objR
+                T[:3, :3] = objR
                 T[:3, 3] = objt
                 obj_mesh = copy(obj_templates[i])
                 # if self.hand_sides[idx] == 'left':

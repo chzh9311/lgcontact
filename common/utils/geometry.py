@@ -1,4 +1,5 @@
 import os
+from itertools import product
 import numpy as np
 import torch
 import pytorch3d.ops
@@ -14,10 +15,15 @@ from pysdf import SDF
 
 def rodrigues_rot(axis, angle):
     """
-    axis: ... x 3
-    angle: ... x 1
+    axis: ... x 3 or (3,)
+    angle: ... x 1 or float/scalar
     """
-    angle = angle.reshape(angle.shape + (1,))
+    axis = np.asarray(axis)
+    angle = np.asarray(angle)
+    if angle.ndim == 0:
+        angle = angle.reshape(1)
+    else:
+        angle = angle.reshape(angle.shape + (1,))
     axx = np.zeros(axis.shape+(3,)) # ... x 3 x 3
     axx[..., [2, 0, 1], [1, 2, 0]] = axis
     axx[..., [1, 2, 0], [2, 0, 1]] = -axis
@@ -875,3 +881,88 @@ def compute_point_bps(hand_verts, half_size=0.5, resolution=64):
     point_bps = torch.clamp(point_bps, max=1.0)
     return point_bps, nearest_indices, grid_pts
 
+
+def grid_reorder_id_and_rot(kernel_size, id):
+    """
+    Reorder the 3D grid points according to the rotation along axis by angle.
+    :param k: int, the resolution of the grid
+    :param id: 0 - 11, the rotation id.
+    """
+    idxs = np.arange(kernel_size ** 3).reshape(kernel_size, kernel_size, kernel_size)
+    if id < 4:
+        R1 = np.eye(3)
+    if 4 <= id < 8:
+        idxs = reorder_3d(idxs, 1, 1) # First rotate 90 degree along y
+        R1 = rodrigues_rot(np.array([0, 1, 0]), np.pi / 2)
+    elif 8 <= id < 12:
+        idxs = reorder_3d(idxs, 2, 1) # First rotate 90 degree along z
+        R1 = rodrigues_rot(np.array([0, 0, 1]), np.pi / 2)
+
+    idxs = reorder_3d(idxs, 0, id % 4)
+    R = rodrigues_rot(np.array([1, 0, 0]), (id % 4) * np.pi / 2) @ R1
+
+    return idxs.reshape(-1), R
+
+
+def reorder_3d(input_array, axis_id, rot_id):
+    """
+    Reorder the 3D array according to the rotation around a specified axis.
+    :param input_array: K x K x K array (numpy or torch tensor)
+    :param axis_id: 0, 1, or 2 - the axis to rotate around (0: x, 1: y, 2: z)
+    :param rot_id: 0 - 3, the rotation angle (0: 0, 1: pi/2, 2: pi, 3: 3pi/2)
+    :return: output_array: K x K x K array (same type as input)
+    """
+    if rot_id == 0:
+        return input_array
+
+    # Check if input is numpy array or torch tensor
+    is_numpy = isinstance(input_array, np.ndarray)
+
+    # Define flip and transpose operations based on array type
+    if is_numpy:
+        def flip(arr, axis):
+            return np.flip(arr, axis=axis)
+        def transpose(arr, ax1, ax2):
+            axes = list(range(arr.ndim))
+            axes[ax1], axes[ax2] = axes[ax2], axes[ax1]
+            return np.transpose(arr, axes)
+    else:
+        def flip(arr, axis):
+            return torch.flip(arr, dims=[axis])
+        def transpose(arr, ax1, ax2):
+            return arr.transpose(ax1, ax2)
+
+    # Determine the two axes perpendicular to the rotation axis
+    # Rotation around axis_id affects the other two axes
+    # axis_id=0 (x): rotate in y-z plane (axes 1, 2)
+    # axis_id=1 (y): rotate in x-z plane (axes 0, 2)
+    # axis_id=2 (z): rotate in x-y plane (axes 0, 1)
+    if axis_id == 0:
+        # Rotate around x-axis: affects y (dim 1) and z (dim 2)
+        # Rotation matrix for angle theta around x: [[1,0,0], [0,cos,-sin], [0,sin,cos]]
+        if rot_id == 3:  # 90 degrees: y -> z, z -> -y
+            return flip(transpose(input_array, 1, 2), 2)
+        elif rot_id == 2:  # 180 degrees: y -> -y, z -> -z
+            return flip(flip(input_array, 1), 2)
+        elif rot_id == 1:  # 270 degrees: y -> -z, z -> y
+            return flip(transpose(input_array, 1, 2), 1)
+    elif axis_id == 1:
+        # Rotate around y-axis: affects x (dim 0) and z (dim 2)
+        # Rotation matrix for angle theta around y: [[cos,0,sin], [0,1,0], [-sin,0,cos]]
+        if rot_id == 3:  # 90 degrees: x -> -z, z -> x
+            return flip(transpose(input_array, 0, 2), 0)
+        elif rot_id == 2:  # 180 degrees: x -> -x, z -> -z
+            return flip(flip(input_array, 0), 2)
+        elif rot_id == 1:  # 270 degrees: x -> z, z -> -x
+            return flip(transpose(input_array, 0, 2), 2)
+    elif axis_id == 2:
+        # Rotate around z-axis: affects x (dim 0) and y (dim 1)
+        # Rotation matrix for angle theta around z: [[cos,-sin,0], [sin,cos,0], [0,0,1]]
+        if rot_id == 3:  # 90 degrees: x -> y, y -> -x
+            return flip(transpose(input_array, 0, 1), 1)
+        elif rot_id == 2:  # 180 degrees: x -> -x, y -> -y
+            return flip(flip(input_array, 0), 1)
+        elif rot_id == 1:  # 270 degrees: x -> -y, y -> x
+            return flip(transpose(input_array, 0, 1), 0)
+
+    raise ValueError('Unknown axis_id {:d} or rot_id {:d}'.format(axis_id, rot_id))

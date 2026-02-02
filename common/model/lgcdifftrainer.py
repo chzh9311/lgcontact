@@ -10,6 +10,7 @@ import numpy as np
 # from concurrent.futures import ThreadPoolExecutor
 from multiprocessing.pool import Pool
 import wandb
+from matplotlib import pyplot as plt
 
 from common.manopth.manopth.manolayer import ManoLayer
 from common.model.handobject import recover_hand_verts_from_contact
@@ -221,8 +222,9 @@ class LGCDiffTrainer(L.LightningModule):
             # samples = self.diffusion.p_sample_loop(self.model, input_data['x'].shape, input_data['obj_pc'])
             vis_idx = 0
             simp_obj_mesh = getattr(self.trainer.datamodule, f'{stage}_set').simp_obj_mesh
-            obj_templates = [trimesh.Trimesh(simp_obj_mesh[name]['verts'], simp_obj_mesh[name]['faces'])
-                            for name in batch['objName']]
+            rot = batch['aug_rot'][vis_idx].cpu().numpy() if 'aug_rot' in batch else np.eye(3)
+            obj_templates = [trimesh.Trimesh(simp_obj_mesh[name]['verts'] @ rot.T, simp_obj_mesh[name]['faces'])
+                            for i, name in enumerate(batch['objName'])]
             # sample_latent = samples[:, 0] ## 1 + latent
             sample_latent = samples  ## latent
             # grid_contact, sample_latent = sample_x[:, :, 0], sample_x[:, :, 1:]
@@ -286,7 +288,7 @@ class LGCDiffTrainer(L.LightningModule):
                                         grid_scale=self.cfg.msdf.scale,
                                         h=400, w=400)
 
-            gt_img, gt_geoms = visualize_recon_hand_w_object(hand_verts=handobject.hand_verts[vis_idx].detach().cpu().numpy(),
+            gt_img, gt_geoms = visualize_recon_hand_w_object(hand_verts=handobject.hand_verts[vis_idx].detach().cpu().numpy() @ rot.T,
                                         hand_verts_mask=handobject.hand_vert_mask[vis_idx].any(dim=0).detach().cpu().numpy(),
                                         hand_faces=self.mano_layer.th_faces.detach().cpu().numpy(),
                                         obj_mesh=obj_templates[vis_idx],
@@ -297,6 +299,9 @@ class LGCDiffTrainer(L.LightningModule):
 
             contact_img = np.concatenate([gt_contact_img, gt_rec_contact_img, pred_contact_img], axis=0)
             img = np.concatenate([gt_img, gt_rec_img, pred_img], axis=0)
+            plt.imsave(f'tmp/contact_vis_{batch_idx}.png', contact_img)
+            plt.imsave(f'tmp/rec_img_{batch_idx}.png', img)
+
             if hasattr(self.logger, 'experiment'):
                 if hasattr(self.logger.experiment, 'add_image'):
                     # TensorBoardLogger
