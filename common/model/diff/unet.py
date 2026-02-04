@@ -134,3 +134,33 @@ class UNetModel(nn.Module):
         obj_feat = torch.cat([local_obj_feat, glob_obj_feat.unsqueeze(2).repeat(1, 1, local_obj_feat.shape[2])], dim=1)
 
         return obj_feat
+
+
+class GraspUNetModel(UNetModel):
+    def __init__(self, cfg: DictConfig) -> None:
+        super(GraspUNetModel, self).__init__(cfg)
+        self.layers = nn.ModuleList()
+        time_embed_dim = self.d_model * cfg.time_embed_mult
+
+        for i in range(self.nblocks):
+            self.layers.append(
+                ResBlock(
+                    self.d_model,
+                    time_embed_dim,
+                    self.obj_feat_dim,
+                    self.resblock_dropout,
+                    self.d_model,
+                )
+            )
+            ## With cross Attention
+            self.layers.append(
+                SpatialTransformer(
+                    self.d_model, 
+                    self.transformer_num_heads, 
+                    self.transformer_dim_head, 
+                    depth=self.transformer_depth,
+                    dropout=self.transformer_dropout,
+                    mult_ff=self.transformer_mult_ff,
+                    context_dim=self.context_dim,
+                )
+            )

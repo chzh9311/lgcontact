@@ -142,7 +142,7 @@ class HandObject:
 
             ## Transform hand rotation & translation
             self.hand_root_rot = matrix_to_axis_angle(objT_inv[:, :3, :3] @ axis_angle_to_matrix(self.hand_root_rot))
-            self.hand_trans = self.hand_trans + objT_inv[:, :3, 3]
+            self.hand_trans = (objT_inv[:, :3, :3] @ self.hand_trans[:, :, None]).squeeze(-1) + objT_inv[:, :3, 3]
 
             # Compute and transform hand normals
             # self.hand_normals = torch.stack([
@@ -256,6 +256,16 @@ class HandObject:
         # self.obj_com = self.obj_verts.mean(dim=1, keepdim=True)
         # self.obj_verts = self.obj_verts - self.obj_com
         self.obj_msdf = batch['objMsdf'].clone().to(self.device).float()
+
+    def get_99_dim_mano_params(self):
+        """
+        The mano parameters are: 
+        3D translation (3) + 6D root rotation (6) + 6D hand pose (90) = 99D.
+        """
+        translation = self.hand_trans
+        rot6d = matrix_to_rotation_6d(axis_angle_to_matrix(self.hand_root_rot))
+        pose6d = matrix_to_rotation_6d(axis_angle_to_matrix(self.hand_pose.view(-1, 15, 3))).view(-1, 90)
+        return torch.cat([translation, rot6d, pose6d], dim=-1)
 
 
     def _load_templates(self, idx, obj_templates, obj_hull=None):

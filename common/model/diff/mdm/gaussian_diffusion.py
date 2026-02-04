@@ -1242,8 +1242,8 @@ class GaussianDiffusion(nn.Module):
         #                                          hand_cse=kwargs['hand_cse'],
         #                                          msdf_k=msdf_k, cse_dim=recon_cse.shape[-1])
         dist_th = kwargs['grid_scale'] / (msdf_k - 1)
-        consistency_loss_dict = self.consistency_loss(recon_contact=recon_contact,
-                                                      recon_cse=recon_cse,
+        consistency_loss_dict = self.consistency_loss(recon_contact=gt_contact,
+                                                      recon_cse=gt_cse,
                                                       adj_pt_indices=kwargs['adj_pt_indices'],
                                                       adj_pt_distances=kwargs['adj_pt_distances'],
                                                       dist_th=dist_th)
@@ -1301,12 +1301,16 @@ class GaussianDiffusion(nn.Module):
             # TODO: Implement custom weighting strategy
             # Available: distances (M_b) - can be used for distance-based weighting
             # weights = torch.ones_like(contact_i)  # M_b
-            weights = torch.cos(distances / dist_th * (np.pi / 2)).clamp(min=0.0)  # M_b
 
             # Compute MSE losses weighted by point weights
+            _contact = torch.maximum(contact_i, contact_j).detach()
             contact_diff_sq = torch.abs(contact_i - contact_j)  # M_b
-            avg_contact = ((contact_i + contact_j) / 2.0).detach()
-            cse_diff_sq = (avg_contact.unsqueeze(-1) * torch.abs(cse_i - cse_j)).sum(dim=-1)  # M_b
+            # cse_diff_sq = (_contact.unsqueeze(-1) * torch.abs(cse_i - cse_j)).sum(dim=-1)  # M_b
+            cse_diff_sq = torch.abs(cse_i - cse_j).sum(dim=-1)  # M_b
+
+            weights = torch.cos(distances / dist_th * (np.pi / 2)).clamp(min=0.0)  # M_b
+            weights = weights * _contact
+            ## Only supervise important contact
 
             total_contact_loss = total_contact_loss + (weights * contact_diff_sq).sum()
             total_cse_loss = total_cse_loss + (weights * cse_diff_sq).sum()

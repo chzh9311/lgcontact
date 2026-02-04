@@ -8,6 +8,7 @@ from common.dataset_utils.grab_dataset import GRABDataset
 from common.dataset_utils.datamodules import HOIDatasetModule, LocalGridDataModule
 from common.utils.vis import visualize_local_grid, visualize_local_grid_with_hand
 from common.msdf.utils.msdf import get_grid
+from common.dataset_utils.hoi4d_dataset import HOI4DHandDataModule
 # from common.model.vae.grid_vae import MLCVAE
 from tqdm import tqdm
 import numpy as np
@@ -228,9 +229,54 @@ def compare_ckpt():
     print(ckpt2)
 
 
+# Usage Example
+def test_hoi4d_datamodule():
+    from omegaconf import OmegaConf
+
+    # Example config
+    cfg = OmegaConf.create({
+        'data': {
+            'dataset_path': 'data/HOI4D',
+            'preprocessed_dir': 'data/preprocessed',
+            'release_file': 'release.txt',
+            'num_workers': 8,
+        },
+        'train': {'batch_size': 32},
+        'val': {'batch_size': 32},
+        'test': {'batch_size': 32},
+    })
+
+    # Create datamodule
+    dm = HOI4DHandDataModule(cfg)
+
+    # Run preprocessing
+    dm.prepare_data()
+
+    # Setup for training
+    dm.setup('fit')
+
+    print(f"Train set size: {len(dm.train_set)}")
+    print(f"Val set size: {len(dm.val_set)}")
+
+    # Load a sample
+    sample = dm.train_set[0]
+    print(f"Sample keys: {sample.keys()}")
+    print(f"Theta shape: {sample['theta'].shape}")
+    print(f"Beta shape: {sample['beta'].shape}")
+    print(f"Trans shape: {sample['trans'].shape}")
+    print(f"Side: {'right' if sample['side'] == 1 else 'left'}")
+
+
+@hydra.main(config_path="../config", config_name="handvae")
+def fit_mano_beta(cfg):
+    mano_layer = ManoLayer(mano_root = cfg.data.mano_root, use_pca=False, side='right', flat_hand_mean=True, ncomps=45)
+    train_set = GRABDataset(cfg.data, 'train', load_msdf=cfg.load_msdf, load_grid_contact=cfg.load_grid_contact)
+
+
 if __name__ == "__main__":
-    vis_msdf_data_sample()
+    # vis_msdf_data_sample()
     # test_obj()
     # vis_local_grid_interact()
     # test_pointvae()
     # compare_ckpt()
+    test_hoi4d_datamodule()

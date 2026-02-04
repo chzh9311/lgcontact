@@ -203,6 +203,8 @@ class HOIDatasetModule(LightningDataModule):
         self.val_batch_size = cfg.val.batch_size
         self.test_batch_size = cfg.test.batch_size
         self.dataset_name = cfg.data.dataset_name
+        self.load_msdf = cfg.data.load_msdf
+        self.load_grid_contact = cfg.data.load_grid_contact
         self.test_gt = cfg.get('test_gt', False)
         self.module = importlib.import_module(f'common.dataset_utils.{cfg.data.dataset_name}_dataset')
         self.dataset_class = getattr(self.module, cfg.data.dataset_name.upper() + 'Dataset')
@@ -222,7 +224,7 @@ class HOIDatasetModule(LightningDataModule):
         obj_info = self.dataset_class.load_mesh_info(self.data_dir)
         for k, v in obj_info.items():
             mesh = trimesh.Trimesh(v['verts'], v['faces'], process=False)
-            if 'msdf' in self.cfg:
+            if 'msdf' in self.cfg and self.load_msdf:
                 msdf_path = osp.join(self.preprocessed_dir, self.cfg.dataset_name,
                                     f'msdf_{self.cfg.msdf.num_grids}_{self.cfg.msdf.kernel_size}_{int(self.cfg.msdf.scale*1000):02d}mm',
                                     f'{k}.npz')
@@ -267,7 +269,7 @@ class HOIDatasetModule(LightningDataModule):
             self.base_dataset = getattr(self.module, self.dataset_name.upper() + 'Dataset')(data_cfg, split, load_msdf=True, test_gt=True)
             dataset_file = osp.join(self.preprocessed_dir, self.dataset_name, split, f'hand_grid_contact_{self.cfg.msdf.num_grids}_{self.cfg.msdf.kernel_size}_{int(self.cfg.msdf.scale*1000):02d}mm_every{self.cfg.downsample_rate[split]}.h5')
             loader = DataLoader(self.base_dataset, batch_size=20, shuffle=False, num_workers=8)
-            if not osp.exists(dataset_file):
+            if not osp.exists(dataset_file) and self.load_grid_contact:
                 pool = Pool(processes=20)
                 total_samples = len(self.base_dataset)
                 kernel_size = self.cfg.msdf.kernel_size
@@ -488,12 +490,12 @@ class HOIDatasetModule(LightningDataModule):
 
     def setup(self, stage: str):
         if stage == 'fit':
-            self.train_set = self.dataset_class(self.cfg, 'train', load_msdf=True, load_grid_contact=True)
-            self.val_set = self.dataset_class(self.cfg, 'val', load_msdf=True, load_grid_contact=True)
+            self.train_set = self.dataset_class(self.cfg, 'train', load_msdf=self.load_msdf, load_grid_contact=self.load_grid_contact)
+            self.val_set = self.dataset_class(self.cfg, 'val', load_msdf=self.load_msdf, load_grid_contact=self.load_grid_contact)
         elif stage == 'validate':
-            self.val_set = self.dataset_class(self.cfg, 'val', load_msdf=True, load_grid_contact=True)
+            self.val_set = self.dataset_class(self.cfg, 'val', load_msdf=self.load_msdf, load_grid_contact=self.load_grid_contact)
         elif stage == 'test':
-            self.test_set = self.dataset_class(self.cfg, 'test', load_msdf=True, load_grid_contact=self.test_gt, test_gt=self.test_gt)
+            self.test_set = self.dataset_class(self.cfg, 'test', load_msdf=self.load_msdf, load_grid_contact=self.load_grid_contact, test_gt=self.test_gt)
 
     @staticmethod
     def collate_fn(batch):

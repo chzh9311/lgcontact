@@ -20,6 +20,8 @@ train:
     # cse_value_loss: 1.0
     consistency_contact_loss: 5.0
     consistency_cse_loss: 1.0
+  
+  resume_ckpt: logs/checkpoints/mlcdiff/clean_pred/v1/last.ckpt
 
 val:
   batch_size: 16
@@ -57,7 +59,7 @@ trainer: ## For instantiating pytorch-lightning Trainer
 
 run_phase: train
 test_gt: false
-ckpt_path: logs/wandb_logs/LG3DContact/iv80cnn9/checkpoints/best-epoch=68-val/total_loss=0.0496.ckpt
+ckpt_path: logs/checkpoints/mlcdiff/clean_pred/v1/best.ckpt
 
 debug: true
 
