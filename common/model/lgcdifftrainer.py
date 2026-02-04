@@ -39,10 +39,9 @@ class LGCDiffTrainer(L.LightningModule):
         self.lr = cfg.train.lr
         self.loss_weights = cfg.train.get('loss_weights', {})
 
-        ## Load and freeze autoencoder pretrained weights
+        ## Load autoencoder pretrained weights (freezing is done in on_fit_start)
         if cfg.run_phase == 'train':
             self._load_ae_pretrained_weights(cfg.generator.get('ae_pretrained_weight', None))
-            self._freeze_pretrained_weights()
 
         self.mano_layer = ManoLayer(mano_root=cfg.data.mano_root, side='right',
                                     use_pca=True, ncomps=cfg.pose_optimizer.ncomps, flat_hand_mean=True)
@@ -156,6 +155,14 @@ class LGCDiffTrainer(L.LightningModule):
 
         print(f"Frozen {frozen_count} pretrained parameters in grid_ae")
         print(f"Set {bn_count} BatchNorm layers to eval mode (prevents running stats drift)")
+
+    def on_fit_start(self):
+        """
+        Called after checkpoint restoration but before training starts.
+        Freezes pretrained weights here to ensure they remain frozen even when resuming.
+        """
+        if self.cfg.run_phase == 'train' and hasattr(self, 'pretrained_keys'):
+            self._freeze_pretrained_weights()
 
     def training_step(self, batch, batch_idx):
         total_loss = self.train_val_step(batch, batch_idx, stage='train')
@@ -275,7 +282,7 @@ class LGCDiffTrainer(L.LightningModule):
                                         hand_faces=self.mano_layer.th_faces.detach().cpu().numpy(),
                                         obj_mesh=obj_templates[vis_idx],
                                         msdf_center=obj_msdf_center[vis_idx].detach().cpu().numpy(),
-                                        mesh_color=[0.8, 0.2, 0.2],
+                                        part_ids=handobject.hand_part_ids,
                                         grid_scale=self.cfg.msdf.scale,
                                         h=400, w=400)
 
@@ -283,7 +290,7 @@ class LGCDiffTrainer(L.LightningModule):
                                         hand_verts_mask=gt_rec_verts_mask[vis_idx].detach().cpu().numpy(),
                                         hand_faces=self.mano_layer.th_faces.detach().cpu().numpy(),
                                         obj_mesh=obj_templates[vis_idx],
-                                        mesh_color=[0.2, 0.4, 0.8],
+                                        part_ids=handobject.hand_part_ids,
                                         msdf_center=obj_msdf_center[vis_idx].detach().cpu().numpy(),
                                         grid_scale=self.cfg.msdf.scale,
                                         h=400, w=400)
@@ -292,15 +299,15 @@ class LGCDiffTrainer(L.LightningModule):
                                         hand_verts_mask=handobject.hand_vert_mask[vis_idx].any(dim=0).detach().cpu().numpy(),
                                         hand_faces=self.mano_layer.th_faces.detach().cpu().numpy(),
                                         obj_mesh=obj_templates[vis_idx],
-                                        mesh_color=[0.2, 0.8, 0.4],
+                                        part_ids=handobject.hand_part_ids,
                                         msdf_center=obj_msdf_center[vis_idx].detach().cpu().numpy(),
                                         grid_scale=self.cfg.msdf.scale,
                                         h=400, w=400)
 
             contact_img = np.concatenate([gt_contact_img, gt_rec_contact_img, pred_contact_img], axis=0)
             img = np.concatenate([gt_img, gt_rec_img, pred_img], axis=0)
-            plt.imsave(f'tmp/contact_vis_{batch_idx}.png', contact_img)
-            plt.imsave(f'tmp/rec_img_{batch_idx}.png', img)
+            # plt.imsave(f'tmp/contact_vis_{batch_idx}.png', contact_img)
+            # plt.imsave(f'tmp/rec_img_{batch_idx}.png', img)
 
             if hasattr(self.logger, 'experiment'):
                 if hasattr(self.logger.experiment, 'add_image'):
@@ -384,8 +391,10 @@ class LGCDiffTrainer(L.LightningModule):
         ## Testing metrics
         self.runtime = 0
         if not self.debug:
-            for metric in self.cfg.test.criteria:
-                wandb.define_metric(metric, summary='mean')
+            # Access logger.experiment to trigger WandbLogger's lazy wandb.init()
+            # _ = self.logger.experiment
+            # for metric in self.cfg.test.criteria:
+            #     wandb.define_metric(metric, summary='mean')
             # Initialize W&B table for test images
             self.test_images_table = wandb.Table(columns=[
                 "batch_idx", "obj_name", "surrounding_hands", "sampled_grasp",
@@ -516,7 +525,6 @@ class LGCDiffTrainer(L.LightningModule):
             # wandb.log({f"test_metrics_batch_{batch_idx}": table})
         ## Visualization
         # for vis_idx in range(handV.shape[0]):
-        vis_idx = 0
         # gt_geoms = handobject.get_vis_geoms(idx=vis_idx, obj_templates=obj_meshes)
         obj_meshes = [obj_mesh for _ in range(n_samples)]
         pred_ho = copy(handobject)
@@ -530,34 +538,47 @@ class LGCDiffTrainer(L.LightningModule):
             grid_coords=grid_coords.reshape(1, -1, 3).repeat(n_samples, 1, 1),
             mask_th = 2
         )
-        recon_img, pred_geoms = visualize_recon_hand_w_object(hand_verts=pred_hand_verts[vis_idx].detach().cpu().numpy(),
-                                    hand_verts_mask=pred_verts_mask[vis_idx].detach().cpu().numpy(),
-                                    hand_faces=self.mano_layer.th_faces.detach().cpu().numpy(),
-                                    obj_mesh=obj_meshes[vis_idx],
-                                    msdf_center=obj_msdf_center[vis_idx].detach().cpu().numpy(),
-                                    mesh_color=[0.8, 0.2, 0.2],
-                                    grid_scale=self.cfg.msdf.scale,
-                                    h=400, w=400)
 
-        if self.debug:
-            ho_geoms = pred_ho.get_vis_geoms(idx=vis_idx, obj_templates=obj_meshes)
-            o3d.visualization.draw_geometries(pred_geoms + [g['geometry'].translate((0, 0.25, 0)) if 'geometry' in g else g.translate((0, 0.25, 0)) for g in ho_geoms], window_name='Predicted Hand-Object')
-        else:
-            pred_img = pred_ho.vis_img(idx=vis_idx, h=400, w=400, obj_templates=obj_meshes)
+        # Visualize all samples
+        recon_imgs = []
+        pred_imgs = []
+        for vis_idx in range(n_samples):
+            recon_img, pred_geoms = visualize_recon_hand_w_object(
+                hand_verts=pred_hand_verts[vis_idx].detach().cpu().numpy(),
+                hand_verts_mask=pred_verts_mask[vis_idx].detach().cpu().numpy(),
+                hand_faces=self.mano_layer.th_faces.detach().cpu().numpy(),
+                obj_mesh=obj_meshes[vis_idx],
+                part_ids=handobject.hand_part_ids,
+                msdf_center=obj_msdf_center[0].detach().cpu().numpy(),
+                grid_scale=self.cfg.msdf.scale,
+                h=400, w=400)
+            recon_imgs.append(recon_img)
+
+            if self.debug:
+                ho_geoms = pred_ho.get_vis_geoms(idx=vis_idx, obj_templates=obj_meshes)
+                o3d.visualization.draw_geometries(pred_geoms + [g['geometry'].translate((0, 0.25, 0)) if 'geometry' in g else g.translate((0, 0.25, 0)) for g in ho_geoms], window_name='Predicted Hand-Object')
+            else:
+                pred_img = pred_ho.vis_img(idx=vis_idx, h=400, w=400, obj_templates=obj_meshes)
+                pred_imgs.append(pred_img)
+
+        # Concatenate all sample images horizontally
+        recon_img_grid = np.concatenate(recon_imgs, axis=0)
+        if not self.debug:
+            pred_img_grid = np.concatenate(pred_imgs, axis=0)
 
         if hasattr(self.logger, 'experiment'):
             if hasattr(self.logger.experiment, 'add_image'):
                 # TensorBoardLogger
                 global_step = self.current_epoch * len(eval(f'self.trainer.datamodule.test_dataloader()')) + batch_idx
-                self.logger.experiment.add_image(f'test/Surrounding_hands', recon_img, global_step, dataformats='HWC')
-                self.logger.experiment.add_image(f'test/Sampled_grasp', pred_img, global_step, dataformats='HWC')
+                self.logger.experiment.add_image(f'test/Surrounding_hands', recon_img_grid, global_step, dataformats='HWC')
+                self.logger.experiment.add_image(f'test/Sampled_grasp', pred_img_grid, global_step, dataformats='HWC')
             elif hasattr(self.logger.experiment, 'log') and not self.debug:
                 # WandbLogger - add row to table
                 self.test_images_table.add_data(
                     batch_idx,
                     obj_name,
-                    wandb.Image(recon_img),
-                    wandb.Image(pred_img),
+                    wandb.Image(recon_img_grid),
+                    wandb.Image(pred_img_grid),
                     float(np.mean(result.get("Simulation Displacement", [0]))),
                     float(np.mean(result.get("Penetration Depth", [0]))),
                     float(np.mean(result.get("Intersection Volume", [0])))
