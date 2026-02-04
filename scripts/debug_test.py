@@ -1,15 +1,105 @@
 import torch
 import trimesh
 import hydra
-import open3d as o3d    
+import open3d as o3d
+from matplotlib import pyplot as plt
 from common.manopth.manopth.manolayer import ManoLayer
 from common.dataset_utils.grab_dataset import GRABDataset
 from common.dataset_utils.datamodules import HOIDatasetModule, LocalGridDataModule
 from common.utils.vis import visualize_local_grid, visualize_local_grid_with_hand
+from common.msdf.utils.msdf import get_grid
 # from common.model.vae.grid_vae import MLCVAE
 from tqdm import tqdm
 import numpy as np
 from omegaconf import OmegaConf
+
+
+def visualize_grid_sdf(batch, cfg, dm):
+    """
+    Visualize grid SDFs from batch['objMsdf'] along with the object mesh.
+
+    The objMsdf tensor has shape (B, N, K^3 + 3) where:
+    - First K^3 dimensions are SDF values of the local grid
+    - Last 3 dimensions are the grid centers
+
+    Args:
+        batch: dict containing 'objMsdf' tensor
+        cfg: config with msdf.kernel_size and msdf.scale
+        dm: datamodule with access to object mesh info
+    """
+    obj_msdf = batch['objMsdf']  # (B, N, K^3 + 3)
+    kernel_size = cfg.msdf.kernel_size
+    scale = cfg.msdf.scale
+
+    B, N, _ = obj_msdf.shape
+    k3 = kernel_size ** 3
+
+    # Get normalized grid coordinates from get_grid function
+    normalized_coords = get_grid(kernel_size).reshape(-1, 3).numpy()  # (K^3, 3)
+
+    # Use colormap for SDF values
+    cmap = plt.colormaps['coolwarm']
+
+    for b in range(min(B, 1)):  # Visualize first sample in batch
+        sdf_values = obj_msdf[b, :, :k3].cpu().numpy()  # (N, K^3)
+        grid_centers = obj_msdf[b, :, k3:].cpu().numpy()  # (N, 3)
+
+        # Collect all points and their SDF values
+        all_points = []
+        all_sdf = []
+
+        for i in range(N):
+            # Scale and translate grid points to world coordinates
+            grid_points = grid_centers[i] + normalized_coords * scale  # (K^3, 3)
+            all_points.append(grid_points)
+            all_sdf.append(sdf_values[i])
+
+        all_points = np.concatenate(all_points, axis=0)  # (N * K^3, 3)
+        all_sdf = np.concatenate(all_sdf, axis=0)  # (N * K^3,)
+
+        # Normalize SDF values for coloring (clip to reasonable range)
+        sdf_min, sdf_max = np.percentile(all_sdf, [5, 95])
+        sdf_normalized = np.clip((all_sdf - sdf_min) / (sdf_max - sdf_min + 1e-8), 0, 1)
+
+        # Apply colormap
+        colors = cmap(sdf_normalized)[:, :3]  # (N * K^3, 3)
+
+        # Create Open3D point cloud
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(all_points)
+        pcd.colors = o3d.utility.Vector3dVector(colors)
+
+        # Also create point cloud for grid centers
+        centers_pcd = o3d.geometry.PointCloud()
+        centers_pcd.points = o3d.utility.Vector3dVector(grid_centers)
+        centers_pcd.paint_uniform_color([0, 1, 0])  # Green for centers
+
+        # Create object mesh
+        obj_name = batch['objName'][b]
+        obj_verts = dm.val_set.obj_info[obj_name]['verts'].copy()
+        obj_faces = dm.val_set.obj_info[obj_name]['faces']
+
+        # Apply aug_rot if present
+        if 'aug_rot' in batch:
+            aug_rot = batch['aug_rot'][b].cpu().numpy()  # (3, 3)
+            obj_verts = obj_verts @ aug_rot.T
+
+        obj_mesh = o3d.geometry.TriangleMesh()
+        obj_mesh.vertices = o3d.utility.Vector3dVector(obj_verts)
+        obj_mesh.triangles = o3d.utility.Vector3iVector(obj_faces)
+        obj_mesh.compute_vertex_normals()
+        obj_mesh.paint_uniform_color([0.7, 0.7, 0.7])  # Gray color
+
+        print(f"\nVisualizing sample {b} (object: {obj_name}):")
+        print(f"  Total grid points: {all_points.shape[0]}")
+        print(f"  Number of grids: {N}")
+        print(f"  SDF range: [{all_sdf.min():.4f}, {all_sdf.max():.4f}]")
+        print(f"  Color range (clipped): [{sdf_min:.4f}, {sdf_max:.4f}]")
+        print("  Blue = negative SDF (inside), Red = positive SDF (outside)")
+        print("  Green points = grid centers, Gray mesh = object")
+
+        o3d.visualization.draw_geometries([pcd, centers_pcd, obj_mesh],
+                                          window_name=f"Grid SDF Visualization - Sample {b} ({obj_name})")
 
 OmegaConf.register_new_resolver("add", lambda x, y: x + y, replace=True)
 
@@ -46,6 +136,9 @@ def vis_msdf_data_sample(cfg):
                 print(f"  {key}: list with {len(value)} items")
             else:
                 print(f"  {key}: {value}")
+
+        # Visualize grid SDFs with object mesh
+        visualize_grid_sdf(batch, cfg, dm)
 
         # Test first 5 batches only
         if batch_idx >= 4:
@@ -136,8 +229,8 @@ def compare_ckpt():
 
 
 if __name__ == "__main__":
-    # vis_msdf_data_sample()
+    vis_msdf_data_sample()
     # test_obj()
-    vis_local_grid_interact()
+    # vis_local_grid_interact()
     # test_pointvae()
     # compare_ckpt()

@@ -115,19 +115,18 @@ def o3d_point(pos, radius, color=None):
     return pt
 
 
-def extract_masked_mesh_components(hand_verts, hand_faces, vertex_mask,
-                                   create_geometries=True, mesh_color=None, isolated_color=None):
+def extract_masked_mesh_components(hand_verts, hand_faces, vertex_mask, part_ids,
+                                   create_geometries=True):
     """
     Extract masked faces and isolated vertices from a hand mesh based on a vertex mask.
-    Optionally create Open3D geometries for visualization.
+    Optionally create Open3D geometries for visualization, colored by part_ids.
 
     Args:
         hand_verts: numpy array of shape (N, 3), hand vertex positions
         hand_faces: numpy array of shape (F, 3), hand face indices
         vertex_mask: numpy array of shape (N,), boolean mask indicating which vertices are active
+        part_ids: numpy array of shape (N,), part IDs for each vertex (used for coloring with hsv colormap)
         create_geometries: bool, if True, create Open3D geometries for the mesh and isolated points
-        mesh_color: list/array of [R, G, B], color for the mesh (default: [0.8, 0.6, 0.4] skin color)
-        isolated_color: list/array of [R, G, B], color for isolated points (default: [1.0, 0.0, 0.0] red)
 
     Returns:
         If create_geometries is False:
@@ -136,7 +135,7 @@ def extract_masked_mesh_components(hand_verts, hand_faces, vertex_mask,
             isolated_vert_indices: numpy array of vertex indices that are masked but not in any face
 
         If create_geometries is True:
-            geometries: list of Open3D geometries (mesh and/or point cloud)
+            geometries: list of Open3D geometries (mesh and/or point cloud), colored by part_ids
     """
     # Find faces where all vertices are masked
     face_mask = vertex_mask[hand_faces].all(axis=1)  # (F,) boolean array
@@ -155,18 +154,16 @@ def extract_masked_mesh_components(hand_verts, hand_faces, vertex_mask,
     # Create Open3D geometries
     geometries = []
 
-    # Default colors
-    if mesh_color is None:
-        mesh_color = [0.8, 0.6, 0.4]  # Skin color
-    if isolated_color is None:
-        isolated_color = [1.0, 0.0, 0.0]  # Red
+    # Color vertices by part_ids using hsv colormap (same as handobject.py)
+    part_cmap = plt.colormaps['hsv']
+    vertex_colors = part_cmap(part_ids / 16)[:, :3]
 
     # Create mesh with only masked faces
     if len(masked_faces) > 0:
         hand_mesh = o3d.geometry.TriangleMesh()
         hand_mesh.vertices = o3d.utility.Vector3dVector(hand_verts)
         hand_mesh.triangles = o3d.utility.Vector3iVector(masked_faces)
-        hand_mesh.paint_uniform_color(mesh_color)
+        hand_mesh.vertex_colors = o3d.utility.Vector3dVector(vertex_colors)
         hand_mesh.compute_vertex_normals()
         geometries.append(hand_mesh)
 
@@ -174,7 +171,7 @@ def extract_masked_mesh_components(hand_verts, hand_faces, vertex_mask,
     if len(isolated_vert_indices) > 0:
         isolated_pcd = o3d.geometry.PointCloud()
         isolated_pcd.points = o3d.utility.Vector3dVector(hand_verts[isolated_vert_indices])
-        isolated_pcd.paint_uniform_color(isolated_color)
+        isolated_pcd.colors = o3d.utility.Vector3dVector(vertex_colors[isolated_vert_indices])
         geometries.append(isolated_pcd)
 
     return geometries
@@ -769,13 +766,13 @@ def create_bbox_geomtries(msdf_center, grid_scale, contact=None, alpha=0.3):
     return bbox_geometries
 
 
-def visualize_recon_hand_w_object(hand_verts, hand_verts_mask, hand_faces, obj_mesh, msdf_center, grid_scale, mesh_color=[0.8, 0.7, 0.6], h=500, w=500):
+def visualize_recon_hand_w_object(hand_verts, hand_verts_mask, hand_faces, obj_mesh, part_ids, msdf_center, grid_scale, h=500, w=500):
     masked_hand_geometries = extract_masked_mesh_components(
         hand_verts=hand_verts,
         hand_faces=hand_faces,
         vertex_mask=hand_verts_mask,
+        part_ids=part_ids,
         create_geometries=True,
-        mesh_color=mesh_color
     )
     obj_o3d_mesh = o3dmesh_from_trimesh(obj_mesh, color=[0.7, 0.7, 0.7])
 

@@ -377,7 +377,7 @@ class HandObject:
         hand_verts = recon_hand_verts[vis_idx].detach().cpu().numpy()
         hand_mask = self.hand_vert_mask[vis_idx].detach().cpu().numpy()
         geometries = extract_masked_mesh_components(hand_verts, self.closed_hand_faces, hand_mask,
-                                                    create_geometries=True)
+                                                    self.hand_part_ids, create_geometries=True)
         return geometries
     
 
