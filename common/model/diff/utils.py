@@ -64,10 +64,11 @@ class ResBlock(nn.Module):
             nn.Linear(self.emb_channels, self.out_channels)
         )
         
-        self.obj_emb_layers = nn.Sequential(
-            nn.SiLU(),
-            nn.Conv1d(self.obj_feat_dim, self.out_channels, 1)
-        )
+        if self.obj_feat_dim > 0:
+            self.obj_emb_layers = nn.Sequential(
+                nn.SiLU(),
+                nn.Conv1d(self.obj_feat_dim, self.out_channels, 1)
+            )
 
         self.out_layers = nn.Sequential(
             nn.GroupNorm(32, self.out_channels),
@@ -81,7 +82,7 @@ class ResBlock(nn.Module):
         else:
             self.skip_connection = nn.Conv1d(self.in_channels, self.out_channels, 1)
 
-    def forward(self, x, emb, obj_emb):
+    def forward(self, x, emb, obj_emb=None):
         """
         Apply the block to a Tensor, conditioned on a timestep embedding.
         :param x: an [N x C x ...] Tensor of features.
@@ -89,12 +90,15 @@ class ResBlock(nn.Module):
         :param obj_emb: an [N x obj_feat_dim*2] Tensor of object embeddings.
         :return: an [N x C x ...] Tensor of outputs.
         """
-        h = self.in_layers(x) + self.obj_emb_layers(obj_emb)
+        if self.obj_feat_dim > 0:
+            obj_feat = self.obj_emb_layers(obj_emb)
+        else:
+            obj_feat = 0
+        h = self.in_layers(x) + obj_feat
         emb_out = self.emb_layers(emb)
         h = h + emb_out.unsqueeze(-1)
         h = self.out_layers(h)
         return self.skip_connection(x) + h
-
 
 
 def exists(val):
@@ -279,6 +283,24 @@ class BasicTransformerBlock(nn.Module):
         x = self.ff(self.norm2(x)) + x
         return x
 
+
+class CrossTransformerBlock(nn.Module):
+    def __init__(self, dim, n_heads, d_head, dropout=0., context_dim=None, gated_ff=True, mult_ff=2):
+        super().__init__()
+        self.attn1 = CrossAttention(query_dim=dim, heads=n_heads, dim_head=d_head, dropout=dropout)  # is a self-attention
+        self.ff = FeedForward(dim, dropout=dropout, glu=gated_ff, mult=mult_ff)
+        self.attn2 = CrossAttention(query_dim=dim, context_dim=context_dim,
+                                    heads=n_heads, dim_head=d_head, dropout=dropout)  # is self-attn if context is none
+        self.norm1 = nn.LayerNorm(dim)
+        self.norm2 = nn.LayerNorm(dim)
+        self.norm3 = nn.LayerNorm(dim)
+
+    def forward(self, x, context=None):
+        x = self.attn1(self.norm1(x)) + x
+        x = self.attn2(self.norm2(x), context=context) + x
+        x = self.ff(self.norm3(x)) + x
+        return x
+
 class SpatialTransformer(nn.Module):
     """
     Transformer block for sequential data.
@@ -323,6 +345,18 @@ class SpatialTransformer(nn.Module):
         x = rearrange(x, 'b l c -> b c l')
         x = self.proj_out(x)
         return x + x_in
+
+
+class CrossSpatialTransformer(SpatialTransformer):
+    def __init__(self, in_channels, n_heads=8, d_head=64,
+                 depth=1, dropout=0., context_dim=None, mult_ff=2):
+        super().__init__(in_channels, n_heads, d_head, depth, dropout, context_dim, mult_ff)
+        inner_dim = n_heads * d_head
+        self.transformer_blocks = nn.ModuleList(
+            [CrossTransformerBlock(inner_dim, n_heads, d_head, dropout=dropout, context_dim=context_dim, mult_ff=mult_ff)
+                for d in range(depth)]
+        )
+
 
 if __name__ == '__main__':
     st = SpatialTransformer(256, 8, 64, 6, context_dim=768)

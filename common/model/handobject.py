@@ -96,6 +96,7 @@ class HandObject:
         self.hand_joints = batch['handJoints'].clone().to(self.device).float()
         self.obj_verts = batch['objSamplePts'].clone().to(self.device).float()
         self.obj_normals = batch['objSampleNormals'].clone().to(self.device).float()
+        self.cano_joints = batch['canoJoints'].clone().to(self.device).float()
         self.batch_size = self.obj_rot.shape[0]
         # handV, handJ = batch['handVerts'].clone().cpu().numpy(), batch['handJoints'][:, :16].clone().cpu().numpy()
         # self.hand_models = [trimesh.Trimesh(handV[i], self.closed_hand_faces.copy()) for i in range(handV.shape[0])]
@@ -140,9 +141,11 @@ class HandObject:
             homo_hand_joints = F.pad(self.hand_joints, (0, 1), 'constant', 1)
             self.hand_joints = (objT_inv.unsqueeze(1) @ homo_hand_joints.unsqueeze(-1))[:, :, :3, 0]
 
+            root_j = self.cano_joints[:, 0]
             ## Transform hand rotation & translation
             self.hand_root_rot = matrix_to_axis_angle(objT_inv[:, :3, :3] @ axis_angle_to_matrix(self.hand_root_rot))
-            self.hand_trans = (objT_inv[:, :3, :3] @ self.hand_trans[:, :, None]).squeeze(-1) + objT_inv[:, :3, 3]
+            self.hand_trans = (objT_inv[:, :3, :3] @ (self.hand_trans + root_j).unsqueeze(-1)).squeeze(-1) + objT[:, :3, 3] - root_j
+            # self.hand_trans = (objT_inv[:, :3, :3] @ self.hand_trans[:, :, None]).squeeze(-1) + objT_inv[:, :3, 3]
 
             # Compute and transform hand normals
             # self.hand_normals = torch.stack([

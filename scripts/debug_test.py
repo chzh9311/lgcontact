@@ -6,9 +6,10 @@ from matplotlib import pyplot as plt
 from common.manopth.manopth.manolayer import ManoLayer
 from common.dataset_utils.grab_dataset import GRABDataset
 from common.dataset_utils.datamodules import HOIDatasetModule, LocalGridDataModule
-from common.utils.vis import visualize_local_grid, visualize_local_grid_with_hand
+from common.utils.vis import visualize_local_grid, visualize_local_grid_with_hand, o3dmesh
 from common.msdf.utils.msdf import get_grid
 from common.dataset_utils.hoi4d_dataset import HOI4DHandDataModule
+from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
 # from common.model.vae.grid_vae import MLCVAE
 from tqdm import tqdm
 import numpy as np
@@ -229,6 +230,30 @@ def compare_ckpt():
     print(ckpt2)
 
 
+def test_manolayer():
+    mano_layer = ManoLayer(mano_root = 'data/misc/mano_v1_2/models', use_pca=False, side='right', flat_hand_mean=True, ncomps=45)
+    thetas = torch.randn(1, 48)
+    betas = torch.randn(1, 10)
+    trans = torch.randn(1, 3)
+    faces = mano_layer.th_faces.detach().cpu().numpy()
+    _, cano_joints, _ = mano_layer(torch.zeros_like(thetas), th_betas=betas)
+    verts, joints, _ = mano_layer(thetas, th_betas=betas, th_trans=trans)
+    # root_j = joints[:, 0]
+    targetR = axis_angle_to_matrix(torch.randn(1, 3))
+    targett = torch.randn(1, 3)
+    verts = verts @ targetR.transpose(-1, -2) + targett.unsqueeze(1)
+    root_rot = axis_angle_to_matrix(thetas[:, :3])
+    new_root_rot = matrix_to_axis_angle(targetR @ root_rot)
+    thetas[:, :3] = new_root_rot
+    new_trans = (targetR @ trans.unsqueeze(-1) + targetR @ root_j.unsqueeze(-1)).squeeze(-1) + targett - root_j
+    new_verts, new_joints, _ = mano_layer(thetas, th_betas=betas, th_trans=new_trans)
+
+    ori_mesh = o3dmesh(verts[0].cpu().numpy(), faces, color=[0, 0, 1]) # blue
+    new_mesh = o3dmesh(new_verts[0].cpu().numpy(), faces, color=[1, 0, 0]) # red
+    coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+    o3d.visualization.draw_geometries([ori_mesh, new_mesh, coord_frame])
+
+
 # Usage Example
 def test_hoi4d_datamodule():
     from omegaconf import OmegaConf
@@ -279,4 +304,5 @@ if __name__ == "__main__":
     # vis_local_grid_interact()
     # test_pointvae()
     # compare_ckpt()
-    test_hoi4d_datamodule()
+    # test_hoi4d_datamodule()
+    test_manolayer()

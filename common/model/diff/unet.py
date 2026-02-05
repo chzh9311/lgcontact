@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from omegaconf import DictConfig
 
 from .utils import timestep_embedding
-from .utils import ResBlock, SpatialTransformer
+from .utils import ResBlock, SpatialTransformer, CrossSpatialTransformer
 from common.model.pointnet_module import Pointnet_feat_net
 # from .scene_model import create_scene_model
 
@@ -136,14 +136,47 @@ class UNetModel(nn.Module):
         return obj_feat
 
 
-class GraspUNetModel(UNetModel):
+class DualUNetModel(nn.Module):
+    """
+    Dual diffusion UNet model that separately processes local and global features, with cross attention to fuse them.
+    """
     def __init__(self, cfg: DictConfig) -> None:
-        super(GraspUNetModel, self).__init__(cfg)
-        self.layers = nn.ModuleList()
+        super(DualUNetModel, self).__init__()
+
+        self.d_x = cfg.d_x
+        self.d_model = cfg.d_model
+        self.nblocks = cfg.nblocks
+        self.resblock_dropout = cfg.resblock_dropout
+        self.transformer_num_heads = cfg.transformer_num_heads
+        self.transformer_dim_head = cfg.transformer_dim_head
+        self.transformer_dropout = cfg.transformer_dropout
+        self.transformer_depth = cfg.transformer_depth
+        self.transformer_mult_ff = cfg.transformer_mult_ff
+        self.context_dim = cfg.context_dim
+        self.obj_feat_dim = cfg.obj_feat_dim
+        self.use_position_embedding = cfg.use_position_embedding # for input sequence x
+
+        ## create scene model from config
+        # self.scene_model = create_scene_model(cfg.scene_model.name, **scene_model_args)
+        self.obj_feat_net = Pointnet_feat_net(**cfg.obj_encoder)
+
+        time_embed_dim = self.d_model * cfg.time_embed_mult
+        self.time_embed = nn.Sequential(
+            nn.Linear(self.d_model, time_embed_dim),
+            nn.SiLU(),
+            nn.Linear(time_embed_dim, time_embed_dim),
+        )
+        
+        self.in_layers = nn.Sequential(
+            nn.Conv1d(self.d_x, self.d_model, 1)
+        )
+        self.local_layers = nn.ModuleList()
+        self.global_layers = nn.ModuleList()
+        self.cross_layers = nn.ModuleList()
         time_embed_dim = self.d_model * cfg.time_embed_mult
 
         for i in range(self.nblocks):
-            self.layers.append(
+            self.local_layers.append(
                 ResBlock(
                     self.d_model,
                     time_embed_dim,
@@ -152,9 +185,18 @@ class GraspUNetModel(UNetModel):
                     self.d_model,
                 )
             )
+            self.global_layers.append(
+                ResBlock(
+                    self.d_model,
+                    time_embed_dim,
+                    0, # no object feature here
+                    self.resblock_dropout,
+                    self.d_model,
+                )
+            )
             ## With cross Attention
-            self.layers.append(
-                SpatialTransformer(
+            self.cross_layers.append(
+                CrossSpatialTransformer(
                     self.d_model, 
                     self.transformer_num_heads, 
                     self.transformer_dim_head, 
@@ -164,3 +206,70 @@ class GraspUNetModel(UNetModel):
                     context_dim=self.context_dim,
                 )
             )
+
+        self.local_out_layers = nn.Sequential(
+            nn.GroupNorm(32, self.d_model),
+            nn.SiLU(),
+            nn.Conv1d(self.d_model, self.d_x, 1),
+        )
+
+        self.global_out_layers = nn.Sequential(
+            nn.GroupNorm(32, self.d_model),
+            nn.SiLU(),
+            nn.Conv1d(self.d_model, self.d_y, 1),
+        )
+
+
+    def forward(self, x_t: torch.Tensor, y_t: torch.Tensor, ts: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        """ Apply the model to an input batch
+
+        Args:
+            x_t: the input local data, <B, L, C>
+            y_t: the input global data, <B, C>
+            ts: timestep, 1-D batch of timesteps
+            cond: condition feature
+        
+        Return:
+            the denoised target data, i.e., $x_{t-1}$
+        """
+        x_in_shape = len(x_t.shape)
+        if x_in_shape == 2:
+            x_t = x_t.unsqueeze(1)
+        assert len(x_t.shape) == 3
+
+        y_in_shape = len(y_t.shape)
+        if y_in_shape == 2:
+            y_t = y_t.unsqueeze(1)
+        assert len(y_t.shape) == 3
+
+        ## time embedding
+        t_emb = timestep_embedding(ts, self.d_model)
+        t_emb = self.time_embed(t_emb)
+
+        h = rearrange(x_t, 'b l c -> b c l')
+        h = self.in_layers(h) # <B, d_model, L>
+        # print(h.shape, cond.shape) # <B, d_model, L>, <B, T , c_dim>
+
+        ## prepare position embedding for input x
+        if self.use_position_embedding:
+            B, DX, TX = h.shape
+            pos_Q = torch.arange(TX, dtype=h.dtype, device=h.device)
+            pos_embedding_Q = timestep_embedding(pos_Q, DX) # <L, d_model>
+            h = h + pos_embedding_Q.permute(1, 0) # <B, d_model, L>
+
+        for i in range(self.nblocks):
+            h_local = self.local_layers[i](h, t_emb, cond)
+            h_global = self.global_layers[i](h, t_emb)
+            h = self.cross_layers[i](h_global, h_local)
+        h_local = self.local_out_layers(h)
+        h_global = self.global_out_layers(h_global)
+        h_local = rearrange(h_local, 'b c l -> b l c')
+        h_global = rearrange(h_global, 'b c l -> b l c')
+
+        ## reverse to original shape
+        if x_in_shape == 2:
+            h_local = h_local.squeeze(1)
+
+        if y_in_shape == 2:
+            h_global = h_global.squeeze(1)
+        return h_local, h_global

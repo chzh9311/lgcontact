@@ -33,7 +33,7 @@ checkpoint:
 
 test:
   n_processes: 20
-  n_samples: 10
+  n_samples: 20
   batch_size: ${test.n_samples}
   base_criteria:
     - "Simulation Displacement"

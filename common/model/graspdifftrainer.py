@@ -21,8 +21,9 @@ class GraspDiffTrainer(LGCDiffTrainer):
     """
     The Lightning trainer interface to train Local-grid based contact autoencoder.
     """
-    def __init__(self, grid_ae, model, diffusion, cfg):
+    def __init__(self, grid_ae, hand_ae, model, diffusion, cfg):
         super(GraspDiffTrainer, self).__init__(grid_ae=grid_ae, model=model, diffusion=diffusion, cfg=cfg)
+        self.hand_ae = hand_ae
     
     def train_val_step(self, batch, batch_idx, stage):
         self.grid_coords = self.grid_coords.view(-1, 3).to(self.device)
@@ -39,15 +40,17 @@ class GraspDiffTrainer(LGCDiffTrainer):
         lg_contact = rearrange(lg_contact, 'b n k1 k2 k3 c -> (b n) c k1 k2 k3')
         posterior, obj_feat, multi_scale_obj_cond = self.grid_ae.encode(lg_contact, obj_msdf)
         # z = torch.cat([n_ho_dist.unsqueeze(-1), posterior.sample().view(batch_size, n_grids, -1)], dim=-1) # n_dim + 1
-        z = posterior.sample().view(batch_size, n_grids, -1) # n_dim
-        obj_pc = torch.cat([obj_msdf_center, obj_feat.view(batch_size, n_grids, -1), z], dim=-1)
+        contact_latent = posterior.sample().view(batch_size, n_grids, -1) # n_dim
+        obj_pc = torch.cat([obj_msdf_center, obj_feat.view(batch_size, n_grids, -1)], dim=-1)
+        hand_z = self.hand_ae.encode(handobject.hand_verts)
+        hand_latent = hand_z.sample()
 
         ## Pad the shape params with 0
-        betas = torch.zeros(batch_size, 10, device=self.device)
-        mano_param_vec = handobject.get_99_dim_mano_params()  # B x 99
-        mano_param_vec = torch.cat([mano_param_vec, betas], dim=-1) # B x 109
+        # betas = torch.zeros(batch_size, 10, device=self.device)
+        # mano_param_vec = handobject.get_99_dim_mano_params()  # B x 99
+        # mano_param_vec = torch.cat([mano_param_vec, betas], dim=-1) # B x 109
 
-        input_data = {'x': mano_param_vec, 'obj_pc': obj_pc.permute(0, 2, 1)}
+        input_data = {'x': contact_latent, 'y': hand_latent, 'obj_pc': obj_pc.permute(0, 2, 1)}
 
         # Check for NaN in input data
         for key, value in input_data.items():

@@ -43,8 +43,8 @@ def main(cfg):
         save_last=True,
     )
 
-    # data_module = HOIDatasetModule(cfg)
-    data_module = HOI4DHandDataModule(cfg)
+    data_module = HOIDatasetModule(cfg)
+    # data_module = HOI4DHandDataModule(cfg)
     if cfg.run_phase == 'train':
         pl_trainer = HandVAETrainer(model, cfg)
         trainer = L.Trainer(**cfg.trainer, logger=logger, callbacks=[checkpoint_callback])

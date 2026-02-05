@@ -163,7 +163,6 @@ class HandVAETrainer(LightningModule):
         super(HandVAETrainer, self).__init__()
         self.model = model
         self.criterion = nn.L1Loss()
-        self.param_guided_epoch = cfg.train.param_guided_epoch
         self.cfg = cfg
 
     def training_step(self, batch, batch_idx):
@@ -173,21 +172,24 @@ class HandVAETrainer(LightningModule):
         return self.train_val_step(batch, batch_idx, stage='val')
     
     def train_val_step(self, batch, batch_idx, stage):
-        thetas = batch['theta']
-        betas = batch['beta']
-        ## Augment the betas by adding noise.
-        betas = betas + torch.randn_like(betas) * 0.1
-        pose_6d = matrix_to_rotation_6d(axis_angle_to_matrix(thetas[:, 3:].view(-1, 15, 3))).view(-1, 15*6)
-        nhandV_gt, nhandJ_gt, _ = self.model.mano_layer(
-            torch.cat([torch.zeros(thetas.shape[0], 3, device=self.device), thetas[:, 3:]], dim=-1),
-            th_betas=betas)
+        # thetas = batch['theta']
+        # betas = batch['beta']
+        # ## Augment the betas by adding noise.
+        # betas = betas + torch.randn_like(betas) * 0.1
+        # pose_6d = matrix_to_rotation_6d(axis_angle_to_matrix(thetas[:, 3:].view(-1, 15, 3))).view(-1, 15*6)
+        # nhandV_gt, nhandJ_gt, _ = self.model.mano_layer(
+        #     torch.cat([torch.zeros(thetas.shape[0], 3, device=self.device), thetas[:, 3:]], dim=-1),
+        #     th_betas=betas)
 
-        hand_param = torch.cat([pose_6d, betas], dim=-1)
-        # handobject = HandObject(self.cfg.data, self.device, mano_layer=self.model.mano_layer, normalize=False)
-        # handobject.load_from_batch(batch)
-        # hand_param = handobject.get_99_dim_mano_params()  # B x 99
-        # handV_gt = handobject.hand_verts
-        # handJ_gt = handobject.hand_joints
+        handobject = HandObject(self.cfg.data, self.device, mano_layer=self.model.mano_layer, normalize=False)
+        handobject.load_from_batch(batch)
+        handV_gt = handobject.hand_verts
+        handJ_gt = handobject.hand_joints
+        root_j = handobject.cano_joints[:, 0]
+        hand_root_R = axis_angle_to_matrix(handobject.hand_root_rot)
+        hand_trans = handobject.hand_trans
+        nhandV_gt = (handV_gt - root_j.unsqueeze(1) - hand_trans.unsqueeze(1)) @ hand_root_R + root_j.unsqueeze(1)
+        nhandJ_gt = (handJ_gt - root_j.unsqueeze(1) - hand_trans.unsqueeze(1)) @ hand_root_R + root_j.unsqueeze(1)
 
         # Verify that hand_param and handV_gt match
         # if batch_idx == 0:
@@ -205,18 +207,18 @@ class HandVAETrainer(LightningModule):
         #             print(f"[Warning] Hand param and vertices mismatch!")
 
         recon_param, handV_pred, handJ_pred, posterior = self.model(nhandV_gt.permute(0, 2, 1))
-        param_loss = self.criterion(recon_param, hand_param) # Ignore the shape param here.
+        # param_loss = self.criterion(recon_param, hand_param) # Ignore the shape param here.
 
-        w_param = self.cfg.train.loss_weights.w_param 
+        # w_param = self.cfg.train.loss_weights.w_param 
             # print(f"Epoch {self.current_epoch}: Switching to reconstruction + KL loss.")
 
         recon_loss = self.criterion(handV_pred, nhandV_gt) + self.criterion(handJ_pred, nhandJ_gt)
         kld_loss = posterior.kl().mean()
-        loss = w_param * param_loss + self.cfg.train.loss_weights.w_recon * recon_loss + self.cfg.train.loss_weights.w_kl * kld_loss
+        loss = self.cfg.train.loss_weights.w_recon * recon_loss + self.cfg.train.loss_weights.w_kl * kld_loss
 
         loss_dict = {
             f'{stage}/total_loss': loss,
-            f'{stage}/param_loss': param_loss,
+            # f'{stage}/param_loss': param_loss,
             f'{stage}/recon_loss': recon_loss,
             f'{stage}/kld_loss': kld_loss
         }
@@ -242,6 +244,36 @@ class HandVAETrainer(LightningModule):
                     self.logger.experiment.log({f'{stage}/hand_recon': wandb.Image(vis_img)}, step=self.global_step)
 
         return loss
+    
+    def on_test_batch_start(self, batch, batch_idx):
+        self.recon_err_list = []
+
+    def test_step(self, batch, batch_idx):
+        thetas = batch['theta']
+        betas = batch['beta']
+        ## Augment the betas by adding noise.
+        betas = betas + torch.randn_like(betas)
+        pose_6d = matrix_to_rotation_6d(axis_angle_to_matrix(thetas[:, 3:].view(-1, 15, 3))).view(-1, 15*6)
+        nhandV_gt, nhandJ_gt, _ = self.model.mano_layer(
+            torch.cat([torch.zeros(thetas.shape[0], 3, device=self.device), thetas[:, 3:]], dim=-1),
+            th_betas=betas)
+            
+        # handobject = HandObject(self.cfg.data, self.device, mano_layer=self.model.mano_layer, normalize=False)
+        # handobject.load_from_batch(batch)
+        # handV_gt = handobject.hand_verts
+        # handJ_gt = handobject.hand_joints
+        # root_j = handobject.cano_joints[:, 0]
+        # hand_root_R = axis_angle_to_matrix(handobject.hand_root_rot)
+        # hand_trans = handobject.hand_trans
+        # nhandV = (handV_gt - root_j.unsqueeze(1) - hand_trans.unsqueeze(1)) @ hand_root_R + root_j.unsqueeze(1)
+        recon_param, handV_pred, handJ_pred, posterior = self.model(nhandV_gt.permute(0, 2, 1))
+        recon_error = torch.norm(handV_pred - nhandV_gt, dim=-1).mean(dim=-1)  # B
+        self.recon_err_list.append(recon_error.detach().cpu().numpy())
+    
+    def on_test_epoch_end(self):
+        avg_recon_err = np.concatenate(self.recon_err_list, axis=0).mean() * 1000
+        print(f"Average hand vertex reconstruction error: {avg_recon_err:.6f} mm")
+
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.cfg.train.lr)
