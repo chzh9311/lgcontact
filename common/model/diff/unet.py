@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from omegaconf import DictConfig
 
 from .utils import timestep_embedding
-from .utils import ResBlock, SpatialTransformer, CrossSpatialTransformer
+from .utils import ResBlock, SpatialTransformer, DualSpatialTransformer
 from common.model.pointnet_module import Pointnet_feat_net
 # from .scene_model import create_scene_model
 
@@ -144,6 +144,8 @@ class DualUNetModel(nn.Module):
         super(DualUNetModel, self).__init__()
 
         self.d_x = cfg.d_x
+        self.d_y = cfg.d_y
+        self.n_pts = cfg.n_pts
         self.d_model = cfg.d_model
         self.nblocks = cfg.nblocks
         self.resblock_dropout = cfg.resblock_dropout
@@ -167,8 +169,12 @@ class DualUNetModel(nn.Module):
             nn.Linear(time_embed_dim, time_embed_dim),
         )
         
-        self.in_layers = nn.Sequential(
+        self.local_in_layers = nn.Sequential(
             nn.Conv1d(self.d_x, self.d_model, 1)
+        )
+
+        self.global_in_layers = nn.Sequential(
+            nn.Conv1d(self.d_y, self.d_model, 1)
         )
         self.local_layers = nn.ModuleList()
         self.global_layers = nn.ModuleList()
@@ -196,7 +202,7 @@ class DualUNetModel(nn.Module):
             )
             ## With cross Attention
             self.cross_layers.append(
-                CrossSpatialTransformer(
+                DualSpatialTransformer(
                     self.d_model, 
                     self.transformer_num_heads, 
                     self.transformer_dim_head, 
@@ -220,18 +226,19 @@ class DualUNetModel(nn.Module):
         )
 
 
-    def forward(self, x_t: torch.Tensor, y_t: torch.Tensor, ts: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_t: torch.Tensor,  ts: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
         """ Apply the model to an input batch
 
         Args:
-            x_t: the input local data, <B, L, C>
-            y_t: the input global data, <B, C>
+            x_t: the input latent, <B, C_global+C_local>
             ts: timestep, 1-D batch of timesteps
             cond: condition feature
         
         Return:
             the denoised target data, i.e., $x_{t-1}$
         """
+        y_t, x_t = torch.split(x_t, [self.d_y, self.d_x * self.n_pts], dim=-1)
+        x_t = x_t.view(y_t.shape[0], self.n_pts, self.d_x)
         x_in_shape = len(x_t.shape)
         if x_in_shape == 2:
             x_t = x_t.unsqueeze(1)
@@ -246,22 +253,24 @@ class DualUNetModel(nn.Module):
         t_emb = timestep_embedding(ts, self.d_model)
         t_emb = self.time_embed(t_emb)
 
-        h = rearrange(x_t, 'b l c -> b c l')
-        h = self.in_layers(h) # <B, d_model, L>
+        h_local = rearrange(x_t, 'b l c -> b c l')
+        h_local = self.local_in_layers(h_local) # <B, d_model, L>
+        h_global = rearrange(y_t, 'b l c -> b c l')
+        h_global = self.global_in_layers(h_global) # <B, d_model, L>
         # print(h.shape, cond.shape) # <B, d_model, L>, <B, T , c_dim>
 
         ## prepare position embedding for input x
         if self.use_position_embedding:
             B, DX, TX = h.shape
-            pos_Q = torch.arange(TX, dtype=h.dtype, device=h.device)
+            pos_Q = torch.arange(TX, dtype=h_local.dtype, device=h_local.device)
             pos_embedding_Q = timestep_embedding(pos_Q, DX) # <L, d_model>
-            h = h + pos_embedding_Q.permute(1, 0) # <B, d_model, L>
+            h_local = h_local + pos_embedding_Q.permute(1, 0) # <B, d_model, L>
 
         for i in range(self.nblocks):
-            h_local = self.local_layers[i](h, t_emb, cond)
-            h_global = self.global_layers[i](h, t_emb)
-            h = self.cross_layers[i](h_global, h_local)
-        h_local = self.local_out_layers(h)
+            h_local = self.local_layers[i](h_local, t_emb, cond)
+            h_global = self.global_layers[i](h_global, t_emb)
+            h_local, h_global = self.cross_layers[i](x=h_local, y=h_global)
+        h_local = self.local_out_layers(h_local)
         h_global = self.global_out_layers(h_global)
         h_local = rearrange(h_local, 'b c l -> b l c')
         h_global = rearrange(h_global, 'b c l -> b l c')
@@ -272,4 +281,23 @@ class DualUNetModel(nn.Module):
 
         if y_in_shape == 2:
             h_global = h_global.squeeze(1)
-        return h_local, h_global
+        
+        x_ret = torch.cat([h_global, h_local.reshape(h_local.shape[0], self.n_pts * self.d_x)], dim=-1)
+        return x_ret
+
+    def condition(self, data: Dict) -> torch.Tensor:
+        """ Obtain scene feature with scene model
+
+        Args:
+            data: dataloader-provided data
+
+        Return:
+            Condition feature
+        """
+        b = data['obj_pc'].shape[0]
+        pc = data['obj_pc'].to(torch.float32)
+        local_obj_feat, glob_obj_feat = self.obj_feat_net(pc)
+        # obj_feat = torch.cat([local_obj_feat, glob_obj_feat.unsqueeze(2).repeat(1, 1, local_obj_feat.shape[2])], dim=1)
+        obj_feat = torch.cat([local_obj_feat, glob_obj_feat.unsqueeze(2).repeat(1, 1, local_obj_feat.shape[2])], dim=1)
+
+        return obj_feat

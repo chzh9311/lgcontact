@@ -55,6 +55,29 @@ class HandVAE(nn.Module):
         z = posterior.sample()
         recon_param, handV, handJ = self.decode(z)
         return recon_param, handV, handJ, posterior
+    
+    def normalize_trans(self, hand_trans):
+        return hand_trans / 0.2
+
+    def denormalize_trans(self, hand_trans):
+        return hand_trans * 0.2
+    
+    def hand2latent(self, handV, rot, trans):
+        hand_z = self.encode(handV.permute(0, 2, 1))  # B x hand_latent_dim
+        root_pose = torch.cat([self.normalize_trans(trans), matrix_to_rotation_6d(axis_angle_to_matrix(rot))], dim=-1)  # B x 9
+        hand_latent = torch.cat([root_pose, hand_z.sample()], dim=-1)
+        return hand_latent
+    
+    def latent2hand(self, hand_latent):
+        root_pose, hand_z = hand_latent[:, :9], hand_latent[:, 9:]
+        recon_param = self.decoder(hand_z)
+        pose = matrix_to_axis_angle(rotation_6d_to_matrix(recon_param[:, :90].view(-1, 15, 6))).view(-1, 15*3)
+        betas = recon_param[:, 90:]
+        trans = self.denormalize_trans(root_pose[:, :3])
+        rot = matrix_to_axis_angle(rotation_6d_to_matrix(root_pose[:, 3:])).view(-1, 3)
+        handV, handJ, _ = self.mano_layer(torch.cat([rot, pose], dim=-1), th_betas=betas, th_trans=trans)
+        return handV, handJ
+
 
 ## Adopted from Mesh-VQVAE
 class GraphHandVAE(nn.Module):

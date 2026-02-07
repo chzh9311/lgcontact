@@ -285,21 +285,26 @@ class BasicTransformerBlock(nn.Module):
 
 
 class CrossTransformerBlock(nn.Module):
-    def __init__(self, dim, n_heads, d_head, dropout=0., context_dim=None, gated_ff=True, mult_ff=2):
+    def __init__(self, global_dim, n_heads, d_head, dropout=0., local_dim=None, gated_ff=True, mult_ff=2):
         super().__init__()
-        self.attn1 = CrossAttention(query_dim=dim, heads=n_heads, dim_head=d_head, dropout=dropout)  # is a self-attention
-        self.ff = FeedForward(dim, dropout=dropout, glu=gated_ff, mult=mult_ff)
-        self.attn2 = CrossAttention(query_dim=dim, context_dim=context_dim,
+        self.global_attn = CrossAttention(query_dim=global_dim, heads=n_heads, dim_head=d_head, dropout=dropout)  # is a self-attention
+        self.local_attn = CrossAttention(query_dim=local_dim, heads=n_heads, dim_head=d_head, dropout=dropout)  # is a self-attention
+        self.global_ff = FeedForward(global_dim, dropout=dropout, glu=gated_ff, mult=mult_ff)
+        self.cross_attn = CrossAttention(query_dim=global_dim, context_dim=local_dim,
                                     heads=n_heads, dim_head=d_head, dropout=dropout)  # is self-attn if context is none
-        self.norm1 = nn.LayerNorm(dim)
-        self.norm2 = nn.LayerNorm(dim)
-        self.norm3 = nn.LayerNorm(dim)
+        self.local_ff = FeedForward(local_dim, dropout=dropout, glu=gated_ff, mult=mult_ff)
+        self.global_norm1 = nn.LayerNorm(global_dim)
+        self.global_norm2 = nn.LayerNorm(global_dim)
+        self.local_norm1 = nn.LayerNorm(local_dim)
+        self.local_norm2 = nn.LayerNorm(local_dim)
+    def forward(self, x, y):
+        x = self.local_attn(self.local_norm1(x)) + x
+        y = self.global_attn(self.global_norm1(y)) + y
+        y = self.cross_attn(self.global_norm2(y), context=x) + y
+        x = self.local_ff(self.local_norm2(x)) + x
+        y = self.global_ff(self.global_norm2(y)) + y
+        return x, y
 
-    def forward(self, x, context=None):
-        x = self.attn1(self.norm1(x)) + x
-        x = self.attn2(self.norm2(x), context=context) + x
-        x = self.ff(self.norm3(x)) + x
-        return x
 
 class SpatialTransformer(nn.Module):
     """
@@ -346,22 +351,80 @@ class SpatialTransformer(nn.Module):
         x = self.proj_out(x)
         return x + x_in
 
-
-class CrossSpatialTransformer(SpatialTransformer):
+class DualSpatialTransformer(nn.Module):
+    """
+    Transformer block for sequential data.
+    First, project the input (aka embedding)
+    and reshape to b, t, d.
+    Then apply standard transformer action.
+    Finally, reshape to sequential data.
+    """
     def __init__(self, in_channels, n_heads=8, d_head=64,
                  depth=1, dropout=0., context_dim=None, mult_ff=2):
-        super().__init__(in_channels, n_heads, d_head, depth, dropout, context_dim, mult_ff)
+        super().__init__()
+        self.in_channels = in_channels
         inner_dim = n_heads * d_head
+        self.local_norm = Normalize(in_channels)
+        self.local_proj_in = nn.Conv1d(in_channels,
+                                 inner_dim,
+                                 kernel_size=1,
+                                 stride=1,
+                                 padding=0)
+
+        self.global_norm = Normalize(in_channels)
+        self.global_proj_in = nn.Conv1d(in_channels,
+                                 inner_dim,
+                                 kernel_size=1,
+                                 stride=1,
+                                 padding=0)
+
+
         self.transformer_blocks = nn.ModuleList(
-            [CrossTransformerBlock(inner_dim, n_heads, d_head, dropout=dropout, context_dim=context_dim, mult_ff=mult_ff)
+            [CrossTransformerBlock(
+                global_dim=inner_dim, n_heads=n_heads, d_head=d_head,
+                dropout=dropout, local_dim=context_dim, mult_ff=mult_ff)
                 for d in range(depth)]
         )
+
+        self.local_proj_out = nn.Conv1d(inner_dim,
+                                in_channels,
+                                kernel_size=1,
+                                stride=1,
+                                padding=0)
+
+        self.global_proj_out = nn.Conv1d(inner_dim,
+                                in_channels,
+                                kernel_size=1,
+                                stride=1,
+                                padding=0)
+
+    def forward(self, x, y):
+        # note: if no context is given, cross-attention defaults to self-attention
+        B, C, L,  = x.shape
+        x_in = x
+        y_in = y
+        x = self.local_norm(x)
+        x = self.local_proj_in(x)
+        y = self.global_norm(y)
+        y = self.global_proj_in(y)
+
+        x = rearrange(x, 'b c l -> b l c')
+        y = rearrange(y, 'b c l -> b l c')
+        for block in self.transformer_blocks:
+            x, y = block(x, y)
+        x = rearrange(x, 'b l c -> b c l')
+        y = rearrange(y, 'b l c -> b c l')
+        x = self.local_proj_out(x)
+        y = self.global_proj_out(y)
+        return x + x_in, y + y_in
+
+
 
 
 if __name__ == '__main__':
     st = SpatialTransformer(256, 8, 64, 6, context_dim=768)
     print(st)
     a = torch.rand(2, 256, 10)
-    context = torch.rand(2, 5, 768)
-    o = st(a, context=context)
-    print(o.shape)
+    b = torch.rand(2, 256, 10)
+    o = st(a, b)
+    print(o[0].shape, o[1].shape)

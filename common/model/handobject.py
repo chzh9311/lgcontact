@@ -129,8 +129,12 @@ class HandObject:
         if self.normalize:
             # Apply inverse transformation objT^-1 to hand related attributes
             # Compute inverse transformation
+            if 'aug_rot' in batch:
+                augR = batch['aug_rot'].clone().to(self.device).float()
+            else:
+                augR = torch.eye(3).unsqueeze(0).to(self.device)
             objT_inv = torch.eye(4).to(self.device).unsqueeze(0).repeat(self.batch_size, 1, 1)
-            objT_inv[:, :3, :3] = objT[:, :3, :3].transpose(-1, -2)  # R^T
+            objT_inv[:, :3, :3] = augR @ objT[:, :3, :3].transpose(-1, -2)  # R^T
             objT_inv[:, :3, 3] = -(objT_inv[:, :3, :3] @ objT[:, :3, 3:4]).squeeze(-1)  # -R^T * t
 
             # Transform hand vertices
@@ -229,6 +233,13 @@ class HandObject:
             self.part_map = F.one_hot(self.pmap, 16).float()
             self.obj2hand_nn_idx = nn_idx.to(self.device)
 
+    @property
+    def nhandV(self):
+        # Return the canonical hand vertices (after inverse transformation)
+        root_j = self.cano_joints[:, 0]
+        R = axis_angle_to_matrix(self.hand_root_rot)
+        nhandV = (self.hand_verts - root_j.unsqueeze(1)) @ R + root_j.unsqueeze(1) - self.hand_trans.unsqueeze(1)
+        return nhandV
 
     def load_from_batch_obj_only(self, batch, obj_template=None, obj_hulls=None):
         """

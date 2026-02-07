@@ -3,6 +3,7 @@ defaults:
   - msdf: sparse
   - data: grab_multi_contact
   - ae: gridae_128latent
+  - hand_ae: handvae_64latent
   - generator: ldm
   - pose_optimizer: lg_base
 
@@ -10,6 +11,7 @@ training_stage: "generator"
 contact_unit: "grid"
 
 train:
+  optimizer: "adamw"
   lr: 1e-4
   batch_size: 16
   vis_every_n_batches: 500
@@ -21,7 +23,7 @@ train:
     consistency_contact_loss: 5.0
     consistency_cse_loss: 1.0
   
-  resume_ckpt: logs/checkpoints/mlcdiff/clean_pred/v1/last.ckpt
+  resume_ckpt: null # logs/checkpoints/mlcdiff/clean_pred/v1/last.ckpt
 
 val:
   batch_size: 16

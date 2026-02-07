@@ -104,9 +104,9 @@ class BaseHOIDataset(Dataset):
                 objR = objR.T
             objt = obj_trans.detach().cpu().numpy()
 
-            if self.augment:
-                objR = Rot @ objR
-                objt = (Rot @ objt[:, np.newaxis])[:, 0]
+            # if self.augment:
+            #     objR = Rot @ objR
+            #     objt = (Rot @ objt[:, np.newaxis])[:, 0]
             obj_sample_pts = obj_sample_pts @ objR.T + objt[np.newaxis, :]
             obj_sample_normals = obj_sample_normals @ objR.T
 
@@ -176,13 +176,18 @@ class BaseHOIDataset(Dataset):
             handN = trimesh.Trimesh(handV, hmodels[sbj_id].th_faces).vertex_normals
 
             if self.augment:
-                handV = handV @ Rot.T
-                handJ = handJ @ Rot.T
-                part_T[:, :3, :3] = Rot @ part_T[:, :3, :3]
-                handN = handN @ Rot.T
-                hand_rot = Rotation.from_matrix(Rot @ Rotation.from_rotvec(hand_rot.detach().cpu().numpy()).as_matrix()).as_rotvec()
-                hand_trans = (Rot @ hand_trans.detach().cpu().numpy()[:, np.newaxis])[:, 0]
                 sample['aug_rot'] = Rot
+                # handV = handV @ Rot.T
+                # handJ = handJ @ Rot.T
+                # # part_T[:, :3, :3] = Rot @ part_T[:, :3, :3]
+                # handN = handN @ Rot.T
+                # hand_rot = Rotation.from_matrix(Rot @ Rotation.from_rotvec(hand_rot.detach().cpu().numpy()).as_matrix())
+                # hand_trans = (Rot @ hand_trans.detach().cpu().numpy()[:, np.newaxis]) + (Rot - np.eye(3)) @ canoJ[0, :, np.newaxis]
+                # hand_trans = hand_trans[:, 0]
+                # new_handV, _, _ = hmodels[sbj_id](
+                #     th_pose_coeffs=torch.cat([torch.as_tensor(hand_rot.as_rotvec()).float(), hand_pose], dim=0).unsqueeze(0),
+                #     th_trans=torch.as_tensor(hand_trans).float().unsqueeze(0))
+                # hand_rot = hand_rot.as_rotvec()
 
             sample.update({
                 'handRot': hand_rot,
@@ -190,7 +195,7 @@ class BaseHOIDataset(Dataset):
                 'handTrans': hand_trans,
                 'handVerts': handV,
                 'handJoints': handJ,
-                'handPartT': part_T,
+                # 'handPartT': part_T,
                 'handPartIds': hand_part_ids,
                 'handNormals': np.stack(handN, axis=0),
                 'canoJoints': canoJ,

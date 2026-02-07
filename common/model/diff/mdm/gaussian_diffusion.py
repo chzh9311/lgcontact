@@ -1221,17 +1221,17 @@ class GaussianDiffusion(nn.Module):
         terms["latent_mse"] = F.mse_loss(model_output, target, reduction="mean")
 
         ## Reconstruction Loss
-        batch_size, n_grids = model_output.shape[:2]
-        latent = model_output.reshape(batch_size*n_grids, -1)
-        grid_ae = kwargs['grid_ae']
-        ms_obj_cond = kwargs['ms_obj_cond']
-        recon_lg_contact = grid_ae.decode(latent, ms_obj_cond)
-        msdf_k = kwargs['msdf_k']
-        recon_lg_contact = recon_lg_contact.view(batch_size, n_grids, -1, msdf_k ** 3).permute(0, 1, 3, 2)
-        recon_contact = recon_lg_contact[..., 0] # * grid_contact_mask[:, :, None].float()
-        recon_cse = recon_lg_contact[..., 1:]
+        # batch_size, n_grids = model_output.shape[:2]
+        # latent = model_output.reshape(batch_size*n_grids, -1)
+        # grid_ae = kwargs['grid_ae']
+        # ms_obj_cond = kwargs['ms_obj_cond']
+        # recon_lg_contact = grid_ae.decode(latent, ms_obj_cond)
+        # msdf_k = kwargs['msdf_k']
+        # recon_lg_contact = recon_lg_contact.view(batch_size, n_grids, -1, msdf_k ** 3).permute(0, 1, 3, 2)
+        # recon_contact = recon_lg_contact[..., 0] # * grid_contact_mask[:, :, None].float()
+        # recon_cse = recon_lg_contact[..., 1:]
 
-        gt_contact, gt_cse = kwargs['gt_lg_contact'][..., 0], kwargs['gt_lg_contact'][..., 1:]
+        # gt_contact, gt_cse = kwargs['gt_lg_contact'][..., 0], kwargs['gt_lg_contact'][..., 1:]
         # recon_loss_dict = self.recon_loss(recon_contact=recon_contact, recon_cse=recon_cse,
         #                                   gt_contact=gt_contact, gt_cse=gt_cse)
         # terms.update(recon_loss_dict)
@@ -1241,13 +1241,13 @@ class GaussianDiffusion(nn.Module):
         #                                          grid_points=kwargs['grid_points'],
         #                                          hand_cse=kwargs['hand_cse'],
         #                                          msdf_k=msdf_k, cse_dim=recon_cse.shape[-1])
-        dist_th = kwargs['grid_scale'] / (msdf_k - 1)
-        consistency_loss_dict = self.consistency_loss(recon_contact=gt_contact,
-                                                      recon_cse=gt_cse,
-                                                      adj_pt_indices=kwargs['adj_pt_indices'],
-                                                      adj_pt_distances=kwargs['adj_pt_distances'],
-                                                      dist_th=dist_th)
-        terms.update(consistency_loss_dict)
+        # dist_th = kwargs['grid_scale'] / (msdf_k - 1)
+        # consistency_loss_dict = self.consistency_loss(recon_contact=gt_contact,
+        #                                               recon_cse=gt_cse,
+        #                                               adj_pt_indices=kwargs['adj_pt_indices'],
+        #                                               adj_pt_distances=kwargs['adj_pt_distances'],
+        #                                               dist_th=dist_th)
+        # terms.update(consistency_loss_dict)
 
         return terms
     
@@ -1443,3 +1443,26 @@ def _extract_into_tensor(arr, timesteps, broadcast_shape):
     while len(res.shape) < len(broadcast_shape):
         res = res[..., None]
     return res.expand(broadcast_shape)
+
+
+class DualGaussianDiffusion(GaussianDiffusion):
+    def __init__(
+        self,
+        *,
+        timesteps,
+        schedule_cfg,
+        model_mean_type,
+        model_var_type,
+        rescale_timesteps=False,
+        rand_t_type='half',
+        msdf_cfg,
+    ):
+        super(DualGaussianDiffusion, self).__init__(
+            timesteps=timesteps,
+            schedule_cfg=schedule_cfg,
+            model_mean_type=model_mean_type,
+            model_var_type=model_var_type,
+            rescale_timesteps=rescale_timesteps,
+            rand_t_type=rand_t_type,
+            msdf_cfg=msdf_cfg,
+            )

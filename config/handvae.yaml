@@ -1,13 +1,8 @@
 defaults:
   - msdf: sparse
   - data: grab_multi_contact
+  - handvae: handvae_64latent
   - _self_
-
-handvae:
-  input_channel: 3
-  latent_dim: 64
-  hidden_dim: 64
-  mano_root: ${data.mano_root}
 
 training_stage: "handvae"
 contact_unit: null

@@ -1,4 +1,5 @@
 import torch
+torch.multiprocessing.set_sharing_strategy('file_system')
 import lightning as L
 import hydra
 from lightning.pytorch.loggers import WandbLogger, TensorBoardLogger
@@ -9,9 +10,11 @@ from common.dataset_utils.datamodules import HOIDatasetModule
 # from common.model.mlctrainer import MLCTrainer
 from common.model.diff.dm.ddpm import DDPM
 import common.model.diff.mdm.gaussian_diffusion as mdm_gd
-from common.model.diff.unet import UNetModel
+from common.model.diff.unet import UNetModel, DualUNetModel
 from common.model.gridae.gridae import GRIDAE
+from common.model.vae.handvae import HandVAE
 from common.model.lgcdifftrainer import LGCDiffTrainer
+from common.model.graspdifftrainer import GraspDiffTrainer
 from common.utils.misc import set_seed, load_pl_ckpt
 from lightning.pytorch.callbacks import ModelCheckpoint
 
@@ -30,7 +33,6 @@ def main(cfg):
     # Initialize the model, data module, and trainer
     # generator_module = importlib.import_module(f"common.model.{cfg.generator.model_type}.{cfg.generator.model_name}")
     # model = getattr(generator_module, cfg.generator.model_name.upper())(cfg)
-    model = UNetModel(cfg.generator.unet)
     # MDM GaussianDiffusion
     mdm_cfg = cfg.generator.mdm
     diffusion = mdm_gd.GaussianDiffusion(
@@ -44,6 +46,9 @@ def main(cfg):
     # DDPM (the base version of diffusion)
     # diffusion1 = DDPM(cfg.generator.ddpm)
     gridae = GRIDAE(cfg.ae, obj_1d_feat=True)
+    hand_ae = HandVAE(cfg.hand_ae)
+    # sd = torch.load(cfg.hand_ae.pretrained_weight, map_location='cpu', weights_only=True)['state_dict']
+    # load_pl_ckpt(hand_ae, sd, prefix='model.')
     
     t = datetime.datetime.now()
     exp_name = cfg.generator.model_name + '-' + cfg.run_phase + '-' + t.strftime('%Y%m%d-%H%M%S')
@@ -78,22 +83,29 @@ def main(cfg):
     data_module = HOIDatasetModule(cfg)
 
     # Start training
+    if cfg.generator.model_name == 'dual_latent_diffusion':
+        trainer_module = GraspDiffTrainer
+        model = DualUNetModel(cfg.generator.unet)
+    else:
+        trainer_module = LGCDiffTrainer
+        model = UNetModel(cfg.generator.unet)
     if cfg.run_phase == 'train':
-        pl_model = LGCDiffTrainer(gridae, model, diffusion, cfg)
+        pl_model = trainer_module(grid_ae=gridae, model=model, diffusion=diffusion, hand_ae=hand_ae, cfg=cfg)
         trainer.fit(pl_model, datamodule=data_module, ckpt_path=cfg.train.get('resume_ckpt', None))
     elif cfg.run_phase == 'val':
         # pl_model = LGCDiffTrainer(gridae, model, cfg)
-        pl_model = LGCDiffTrainer.load_from_checkpoint(cfg.val.get('ckpt_path', None), gridae, model, diffusion, cfg)
+        pl_model = trainer_module.load_from_checkpoint(cfg.val.get('ckpt_path', None), grid_ae=gridae, model=model, diffusion=diffusion, hand_ae=hand_ae, cfg=cfg)
         trainer.validate(pl_model, datamodule=data_module)
     else:
         sd = torch.load(cfg.ckpt_path, map_location='cpu')['state_dict']
         print('total keys in ckpt:', len(sd.keys()))
         load_pl_ckpt(gridae, sd, prefix='grid_ae.')
         load_pl_ckpt(model, sd, prefix='model.')
-        unused_keys = [k for k in sd.keys() if not (k.startswith('grid_ae.') or k.startswith('model.'))]
+        load_pl_ckpt(hand_ae, sd, prefix='hand_ae.')
+        unused_keys = [k for k in sd.keys() if not (k.startswith('grid_ae.') or k.startswith('model.') or k.startswith('hand_ae.'))]
         print(f'Unused keys in ckpt: {unused_keys}')
 
-        pl_model = LGCDiffTrainer(gridae, model, diffusion, cfg)
+        pl_model = trainer_module(grid_ae=gridae, model=model, diffusion=diffusion, hand_ae=hand_ae, cfg=cfg)
         # pl_model = LGCDiffTrainer.load_from_checkpoint(cfg.ckpt_path, grid_ae=gridae, model=model, cfg=cfg)
         trainer.test(pl_model, datamodule=data_module)
 

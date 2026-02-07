@@ -1,4 +1,5 @@
 import os.path as osp
+from contextlib import nullcontext
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -21,14 +22,16 @@ from common.utils.vis import visualize_recon_hand_w_object, visualize_grid_conta
 from common.msdf.utils.msdf import get_grid
 from common.evaluation.eval_fns import calculate_metrics, calc_diversity
 from einops import rearrange
+from common.model.sam import SAM
 
 
 class LGCDiffTrainer(L.LightningModule):
     """
     The Lightning trainer interface to train Local-grid based contact autoencoder.
     """
-    def __init__(self, grid_ae, model, diffusion, cfg):
+    def __init__(self, grid_ae, model, diffusion, cfg, **kwargs):
         super().__init__()
+        self.automatic_optimization = False
         self.grid_ae = grid_ae
         self.model = model
         self.diffusion = diffusion
@@ -40,8 +43,9 @@ class LGCDiffTrainer(L.LightningModule):
         self.loss_weights = cfg.train.get('loss_weights', {})
 
         ## Load autoencoder pretrained weights (freezing is done in on_fit_start)
+        self.pretrained_keys = []
         if cfg.run_phase == 'train':
-            self._load_ae_pretrained_weights(cfg.generator.get('ae_pretrained_weight', None))
+            self._load_pretrained_weights(cfg.generator.get('ae_pretrained_weight', None), target_prefix='grid_ae')
 
         self.mano_layer = ManoLayer(mano_root=cfg.data.mano_root, side='right',
                                     use_pca=True, ncomps=cfg.pose_optimizer.ncomps, flat_hand_mean=True)
@@ -65,13 +69,15 @@ class LGCDiffTrainer(L.LightningModule):
                 batch[key] = value.float()
         return batch
 
-    def _load_ae_pretrained_weights(self, checkpoint_path):
+    def _load_pretrained_weights(self, checkpoint_path, target_prefix='grid_ae'):
         """
-        Load pretrained autoencoder weights from a Lightning checkpoint.
+        Load pretrained weights from a Lightning checkpoint.
         Only loads weights for layers that exist in both the checkpoint and current model.
 
         Args:
             checkpoint_path: Path to the Lightning checkpoint file
+            target_prefix: Prefix to add to checkpoint keys when loading into current model
+                          (e.g., 'grid_ae' will map 'model.encoder.xxx' to 'grid_ae.encoder.xxx')
         """
         import os
 
@@ -79,7 +85,7 @@ class LGCDiffTrainer(L.LightningModule):
             print(f"Warning: Checkpoint file not found at {checkpoint_path}. Skipping weight initialization.")
             return
 
-        print(f"Loading pretrained autoencoder weights from {checkpoint_path}")
+        print(f"Loading pretrained weights from {checkpoint_path} with prefix '{target_prefix}'")
 
         # Load checkpoint
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
@@ -90,24 +96,24 @@ class LGCDiffTrainer(L.LightningModule):
         else:
             state_dict = checkpoint
 
-        # Filter state dict to only include grid_ae parameters
-        # Lightning saves with 'model.' prefix, we need to extract grid_ae weights
-        ae_state_dict = {}
+        # Filter state dict and remap keys
+        # Lightning saves with 'model.' prefix, we need to extract and remap weights
+        remapped_state_dict = {}
         for key, value in state_dict.items():
-            # Look for keys like 'model.obj_encoder.xxx' or 'model.encoder.xxx' or 'model.decoder.xxx'
+            # Look for keys like 'model.encoder.xxx' or 'model.decoder.xxx'
             if key.startswith('model.'):
                 # Remove 'model.' prefix to get the actual model key
                 model_key = key[6:]  # Remove 'model.'
-                # Add 'grid_ae.' prefix to match our model structure
-                new_key = f'grid_ae.{model_key}'
-                ae_state_dict[new_key] = value
+                # Add target prefix to match our model structure
+                new_key = f'{target_prefix}.{model_key}'
+                remapped_state_dict[new_key] = value
 
         # Get current model state dict
         current_state_dict = self.state_dict()
 
         # Filter to only load weights that exist in current model (handle extra layers)
         filtered_state_dict = {}
-        for key, value in ae_state_dict.items():
+        for key, value in remapped_state_dict.items():
             if key in current_state_dict:
                 # Check if shapes match
                 if current_state_dict[key].shape == value.shape:
@@ -122,14 +128,14 @@ class LGCDiffTrainer(L.LightningModule):
         missing_keys, unexpected_keys = self.load_state_dict(filtered_state_dict, strict=False)
 
         # Track which keys were successfully loaded
-        self.pretrained_keys = list(filtered_state_dict.keys())
+        self.pretrained_keys.extend(filtered_state_dict.keys())
 
-        # Count only missing keys in grid_ae
-        missing_grid_ae_keys = [k for k in missing_keys if k.startswith('grid_ae.')]
+        # Count only missing keys with the target prefix
+        missing_prefixed_keys = [k for k in missing_keys if k.startswith(f'{target_prefix}.')]
 
         print(f"Successfully loaded {len(filtered_state_dict)} layers from pretrained checkpoint")
-        if missing_grid_ae_keys:
-            print(f"Missing grid_ae keys: {len(missing_grid_ae_keys)} keys")
+        if missing_prefixed_keys:
+            print(f"Missing {target_prefix} keys: {len(missing_prefixed_keys)} keys")
         if unexpected_keys:
             print(f"Warning: Unexpected keys: {unexpected_keys}")
     
@@ -202,6 +208,7 @@ class LGCDiffTrainer(L.LightningModule):
                 raise ValueError(f"NaN detected in input_data['{key}'] at batch_idx {batch_idx}")
 
         # grid_coords = obj_msdf_center[:, :, None, :] + self.grid_coords.view(-1, 3)[None, None, :, :]  # B x N x K^3 x 3
+        optimizer = self.optimizers()
         losses = self.diffusion.training_losses(self.model, input_data, grid_ae=self.grid_ae, ms_obj_cond=multi_scale_obj_cond,
                                               hand_cse=self.hand_cse, msdf_k=self.msdf_k, grid_scale=self.msdf_scale,
                                               gt_lg_contact=flat_lg_contact,
@@ -209,6 +216,30 @@ class LGCDiffTrainer(L.LightningModule):
                                               adj_pt_distances=batch['adjPointDistances'])
         total_loss = sum([losses[k] * self.loss_weights[k] for k in losses.keys()])
         losses['total_loss'] = total_loss
+        if stage == 'train' and self.cfg.train.optimizer == 'asam':
+            no_sync = self.trainer.model.no_sync if hasattr(self.trainer.model, 'no_sync') else nullcontext
+            with no_sync():
+                self.manual_backward(total_loss)
+            optimizer.first_step(zero_grad=True)
+
+            # Recompute forward pass with perturbed weights for the second step
+            lg_contact_2 = rearrange(handobject.ml_contact, 'b n k1 k2 k3 c -> (b n) c k1 k2 k3')
+            flat_lg_contact_2 = rearrange(handobject.ml_contact, 'b n k1 k2 k3 c -> b n (k1 k2 k3) c')
+            posterior_2, obj_feat_2, multi_scale_obj_cond_2 = self.grid_ae.encode(lg_contact_2, obj_msdf.detach())
+            obj_pc_2 = torch.cat([obj_msdf_center.detach(), obj_feat_2.view(batch_size, n_grids, -1)], dim=-1)
+            z_2 = posterior_2.sample().view(batch_size, n_grids, -1)
+            input_data_2 = {'x': z_2, 'obj_pc': obj_pc_2.permute(0, 2, 1)}
+
+            losses2 = self.diffusion.training_losses(self.model, input_data_2, grid_ae=self.grid_ae, ms_obj_cond=multi_scale_obj_cond_2,
+                                                  hand_cse=self.hand_cse, msdf_k=self.msdf_k, grid_scale=self.msdf_scale,
+                                                  gt_lg_contact=flat_lg_contact_2,
+                                                  adj_pt_indices=batch['adjPointIndices'],
+                                                  adj_pt_distances=batch['adjPointDistances'])
+            total_loss = sum([losses2[k] * self.loss_weights[k] for k in losses2.keys()])
+            losses2['total_loss'] = total_loss
+            self.manual_backward(total_loss)
+            optimizer.second_step(zero_grad=True)
+
         # grid_loss = F.mse_loss(err[:, :, 0], torch.zeros_like(err[:, :, 0]), reduction='mean')  # only compute loss on n_ho_dist dimension
         # diff_loss = F.mse_loss(err[:, :, 1:], torch.zeros_like(err[:, :, 1:]), reduction='none')
         # obj_pt_mask = input_data['x'][:, :, 0:1] < 0
@@ -259,53 +290,11 @@ class LGCDiffTrainer(L.LightningModule):
 
             gt_rec_hand_verts, gt_rec_verts_mask, gt_rec_grid_contact = self.reconstruct_from_latent(gt_latent, multi_scale_obj_cond, obj_msdf_center)
 
-            pred_contact_img, _ = visualize_grid_contact(contact_pts = obj_msdf_center[vis_idx].detach().cpu().numpy(),
-                                                    pt_contact = pred_grid_contact[vis_idx].detach().cpu().numpy(),
-                                                    grid_scale = self.cfg.msdf.scale,
-                                                    obj_mesh = obj_templates[vis_idx],
-                                                    w=400, h=400)
-            gt_rec_contact_img, _ = visualize_grid_contact(contact_pts = obj_msdf_center[vis_idx].detach().cpu().numpy(),
-                                                    pt_contact = gt_rec_grid_contact[vis_idx].detach().cpu().numpy(),
-                                                    grid_scale = self.cfg.msdf.scale,
-                                                    obj_mesh = obj_templates[vis_idx],
-                                                    w=400, h=400)
-
-            gt_contact_img, _ = visualize_grid_contact(contact_pts = obj_msdf_center[vis_idx].detach().cpu().numpy(),
-                                                    pt_contact = handobject.obj_pt_mask[vis_idx].detach().cpu().float().numpy(),
-                                                    grid_scale = self.cfg.msdf.scale,
-                                                    obj_mesh = obj_templates[vis_idx],
-                                                    w=400, h=400)
-
-
-            pred_img, pred_geoms = visualize_recon_hand_w_object(hand_verts=pred_hand_verts[vis_idx].detach().cpu().numpy(),
-                                        hand_verts_mask=pred_verts_mask[vis_idx].detach().cpu().numpy(),
-                                        hand_faces=self.mano_layer.th_faces.detach().cpu().numpy(),
-                                        obj_mesh=obj_templates[vis_idx],
-                                        msdf_center=obj_msdf_center[vis_idx].detach().cpu().numpy(),
-                                        part_ids=handobject.hand_part_ids,
-                                        grid_scale=self.cfg.msdf.scale,
-                                        h=400, w=400)
-
-            gt_rec_img, gt_rec_geoms = visualize_recon_hand_w_object(hand_verts=gt_rec_hand_verts[vis_idx].detach().cpu().numpy(),
-                                        hand_verts_mask=gt_rec_verts_mask[vis_idx].detach().cpu().numpy(),
-                                        hand_faces=self.mano_layer.th_faces.detach().cpu().numpy(),
-                                        obj_mesh=obj_templates[vis_idx],
-                                        part_ids=handobject.hand_part_ids,
-                                        msdf_center=obj_msdf_center[vis_idx].detach().cpu().numpy(),
-                                        grid_scale=self.cfg.msdf.scale,
-                                        h=400, w=400)
-
-            gt_img, gt_geoms = visualize_recon_hand_w_object(hand_verts=handobject.hand_verts[vis_idx].detach().cpu().numpy() @ rot.T,
-                                        hand_verts_mask=handobject.hand_vert_mask[vis_idx].any(dim=0).detach().cpu().numpy(),
-                                        hand_faces=self.mano_layer.th_faces.detach().cpu().numpy(),
-                                        obj_mesh=obj_templates[vis_idx],
-                                        part_ids=handobject.hand_part_ids,
-                                        msdf_center=obj_msdf_center[vis_idx].detach().cpu().numpy(),
-                                        grid_scale=self.cfg.msdf.scale,
-                                        h=400, w=400)
-
-            contact_img = np.concatenate([gt_contact_img, gt_rec_contact_img, pred_contact_img], axis=0)
-            img = np.concatenate([gt_img, gt_rec_img, pred_img], axis=0)
+            contact_img = self._visualize_contact_comparison(
+                obj_msdf_center, pred_grid_contact, gt_rec_grid_contact, handobject, obj_templates, vis_idx)
+            img = self._visualize_hand_comparison(
+                pred_hand_verts, pred_verts_mask, gt_rec_hand_verts, gt_rec_verts_mask,
+                handobject, obj_templates, obj_msdf_center, rot, vis_idx)
             # plt.imsave(f'tmp/contact_vis_{batch_idx}.png', contact_img)
             # plt.imsave(f'tmp/rec_img_{batch_idx}.png', img)
 
@@ -321,7 +310,7 @@ class LGCDiffTrainer(L.LightningModule):
                     self.logger.experiment.log({f'{stage}/GT_vs_GTRec_vs_sampled_contact': wandb.Image(contact_img)}, step=self.global_step)
                     self.logger.experiment.log({f'{stage}/GT_vs_GTRec_vs_sampled_hand': wandb.Image(img)}, step=self.global_step)
 
-        return total_loss
+        return losses['total_loss']
                                   
         # recon_loss = F.mse_loss(recon_grid_contact, gt_grid_contact.permute(0, 4, 1, 2, 3))
         # loss_dict = {f'{stage}/embedding_loss': loss, f'{stage}/recon_loss': recon_loss, f'{stage}/perplexity': perplexity}
@@ -362,6 +351,40 @@ class LGCDiffTrainer(L.LightningModule):
         self.log_dict(loss_dict, prog_bar=True, sync_dist=True)
         return loss_dict['total_loss']
     
+    def _visualize_contact_comparison(self, obj_msdf_center, pred_grid_contact, gt_rec_grid_contact, handobject, obj_templates, vis_idx):
+        pred_contact_img, _ = visualize_grid_contact(
+            contact_pts=obj_msdf_center[vis_idx].detach().cpu().numpy(),
+            pt_contact=pred_grid_contact[vis_idx].detach().cpu().numpy(),
+            grid_scale=self.cfg.msdf.scale, obj_mesh=obj_templates[vis_idx], w=400, h=400)
+        gt_rec_contact_img, _ = visualize_grid_contact(
+            contact_pts=obj_msdf_center[vis_idx].detach().cpu().numpy(),
+            pt_contact=gt_rec_grid_contact[vis_idx].detach().cpu().numpy(),
+            grid_scale=self.cfg.msdf.scale, obj_mesh=obj_templates[vis_idx], w=400, h=400)
+        gt_contact_img, _ = visualize_grid_contact(
+            contact_pts=obj_msdf_center[vis_idx].detach().cpu().numpy(),
+            pt_contact=handobject.obj_pt_mask[vis_idx].detach().cpu().float().numpy(),
+            grid_scale=self.cfg.msdf.scale, obj_mesh=obj_templates[vis_idx], w=400, h=400)
+        return np.concatenate([gt_contact_img, gt_rec_contact_img, pred_contact_img], axis=0)
+
+    def _visualize_hand_comparison(self, pred_hand_verts, pred_verts_mask, gt_rec_hand_verts, gt_rec_verts_mask,
+                                   handobject, obj_templates, obj_msdf_center, rot, vis_idx):
+        common_kwargs = dict(
+            hand_faces=self.mano_layer.th_faces.detach().cpu().numpy(),
+            obj_mesh=obj_templates[vis_idx],
+            msdf_center=obj_msdf_center[vis_idx].detach().cpu().numpy(),
+            part_ids=handobject.hand_part_ids,
+            grid_scale=self.cfg.msdf.scale, h=400, w=400)
+        pred_img, _ = visualize_recon_hand_w_object(
+            hand_verts=pred_hand_verts[vis_idx].detach().cpu().numpy(),
+            hand_verts_mask=pred_verts_mask[vis_idx].detach().cpu().numpy(), **common_kwargs)
+        gt_rec_img, _ = visualize_recon_hand_w_object(
+            hand_verts=gt_rec_hand_verts[vis_idx].detach().cpu().numpy(),
+            hand_verts_mask=gt_rec_verts_mask[vis_idx].detach().cpu().numpy(), **common_kwargs)
+        gt_img, _ = visualize_recon_hand_w_object(
+            hand_verts=handobject.hand_verts[vis_idx].detach().cpu().numpy() @ rot.T,
+            hand_verts_mask=handobject.hand_vert_mask[vis_idx].any(dim=0).detach().cpu().numpy(), **common_kwargs)
+        return np.concatenate([gt_img, gt_rec_img, pred_img], axis=0)
+
     def reconstruct_from_latent(self, latent, multi_scale_obj_cond, obj_msdf_center):
         batch_size, n_grids = latent.shape[:2]
         latent = latent.reshape(batch_size*n_grids, -1)
@@ -632,14 +655,20 @@ class LGCDiffTrainer(L.LightningModule):
         # o3d.visualization.draw_geometries(gt_geoms, window_name='GT Local Grid Visualization')
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr)
+        if self.cfg.optimizer == 'adamw':
+            optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr)
+        elif self.cfg.optimizer == 'asam':
+            base_optimizer = torch.optim.SGD
+            optimizer = SAM(self.model.parameters(), base_optimizer=base_optimizer, lr=self.lr, momentum=0.9, adaptive=True)
 
-        # StepLR scheduler: decay LR by gamma every step_size epochs
-        scheduler = torch.optim.lr_scheduler.StepLR(
-            optimizer,
-            step_size=10,
-            gamma=0.8
-        )
+            # StepLR scheduler: attach to SAM optimizer itself so Lightning accepts it
+            scheduler = torch.optim.lr_scheduler.StepLR(
+                optimizer,
+                step_size=10,
+                gamma=0.8
+            )
+        else:
+            raise ValueError(f"Unsupported optimizer: {self.cfg.optimizer}")
 
         return {
             'optimizer': optimizer,
@@ -649,3 +678,11 @@ class LGCDiffTrainer(L.LightningModule):
                 'frequency': 1
             }
         }
+
+    def lr_scheduler_step(self, scheduler, metric):
+        if not self.cfg.optimizer == 'asam':
+            super().lr_scheduler_step(scheduler, metric)
+        else:
+            # Forward the scheduler step to the base_optimizer,
+            # since SAM wraps it and shares param_groups
+            scheduler.step()

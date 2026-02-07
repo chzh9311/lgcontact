@@ -1,4 +1,5 @@
 import torch
+from torch.utils.data import DataLoader
 import trimesh
 import hydra
 import open3d as o3d
@@ -117,36 +118,42 @@ def vis_msdf_data_sample(cfg):
     print("Setting up validation dataset...")
     dm.setup('validate')
 
-    # Get validation dataloader
-    val_loader = dm.val_dataloader()
+    # Get validation dataloader (use num_workers=0 to avoid multiprocessing issues)
+    val_loader = DataLoader(dm.val_set, batch_size=dm.val_batch_size, shuffle=False,
+                            num_workers=4, collate_fn=dm.collate_fn)
     print(f"Validation dataset size: {len(dm.val_set)}")
     print(f"Number of batches: {len(val_loader)}")
     print(f"Batch size: {dm.val_batch_size}")
 
+    # Track handTrans min/max per dimension across all batches
+    hand_trans_min = None
+    hand_trans_max = None
+
     # Iterate through validation dataloader
     print("\nTesting validation batches...")
-    for batch_idx, batch in enumerate(val_loader):
-        print(f"\n{'='*50}")
-        print(f"Batch {batch_idx}:")
-        print(f"  Keys: {list(batch.keys())}")
+    for batch_idx, batch in enumerate(tqdm(val_loader, desc="Processing batches")):
+        # Track handTrans range
+        if 'handTrans' in batch:
+            hand_trans = batch['handTrans']  # (B, 3)
+            batch_min = hand_trans.min(dim=0).values  # (3,)
+            batch_max = hand_trans.max(dim=0).values  # (3,)
 
-        # Print shapes/info for each field in the batch
-        for key, value in batch.items():
-            if hasattr(value, 'shape'):
-                print(f"  {key}: shape={value.shape}, dtype={value.dtype}")
-            elif isinstance(value, list):
-                print(f"  {key}: list with {len(value)} items")
+            if hand_trans_min is None:
+                hand_trans_min = batch_min
+                hand_trans_max = batch_max
             else:
-                print(f"  {key}: {value}")
+                hand_trans_min = torch.minimum(hand_trans_min, batch_min)
+                hand_trans_max = torch.maximum(hand_trans_max, batch_max)
 
-        # Visualize grid SDFs with object mesh
-        visualize_grid_sdf(batch, cfg, dm)
-
-        # Test first 5 batches only
-        if batch_idx >= 4:
-            print(f"\n{'='*50}")
-            print("Successfully tested 5 batches!")
-            break
+    # Print handTrans range summary
+    print(f"\n{'='*50}")
+    print("handTrans range across all batches:")
+    if hand_trans_min is not None:
+        for dim in range(3):
+            dim_name = ['X', 'Y', 'Z'][dim]
+            print(f"  {dim_name}: min={hand_trans_min[dim].item():.6f}, max={hand_trans_max[dim].item():.6f}, range={hand_trans_max[dim].item() - hand_trans_min[dim].item():.6f}")
+    else:
+        print("  handTrans not found in batch")
 
     print("\nDataModule validation complete!")
 
@@ -238,7 +245,7 @@ def test_manolayer():
     faces = mano_layer.th_faces.detach().cpu().numpy()
     _, cano_joints, _ = mano_layer(torch.zeros_like(thetas), th_betas=betas)
     verts, joints, _ = mano_layer(thetas, th_betas=betas, th_trans=trans)
-    # root_j = joints[:, 0]
+    root_j = cano_joints[:, 0]
     targetR = axis_angle_to_matrix(torch.randn(1, 3))
     targett = torch.randn(1, 3)
     verts = verts @ targetR.transpose(-1, -2) + targett.unsqueeze(1)
