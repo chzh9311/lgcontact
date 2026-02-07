@@ -661,14 +661,14 @@ class LGCDiffTrainer(L.LightningModule):
             base_optimizer = torch.optim.SGD
             optimizer = SAM(self.model.parameters(), base_optimizer=base_optimizer, lr=self.lr, momentum=0.9, adaptive=True)
 
-            # StepLR scheduler: attach to SAM optimizer itself so Lightning accepts it
-            scheduler = torch.optim.lr_scheduler.StepLR(
-                optimizer,
-                step_size=10,
-                gamma=0.8
-            )
         else:
             raise ValueError(f"Unsupported optimizer: {self.cfg.optimizer}")
+
+        scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=10,
+            gamma=0.8
+        )
 
         return {
             'optimizer': optimizer,
