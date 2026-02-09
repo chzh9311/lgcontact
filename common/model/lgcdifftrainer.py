@@ -19,7 +19,7 @@ from common.model.pose_optimizer import optimize_pose_wrt_local_grids
 from common.model.handobject import HandObject, recover_hand_verts_from_contact
 from common.model.hand_cse.hand_cse import HandCSE
 from common.utils.vis import visualize_recon_hand_w_object, visualize_grid_contact
-from common.msdf.utils.msdf import get_grid
+from common.msdf.utils.msdf import get_grid, calc_local_grid_all_pts_gpu
 from common.evaluation.eval_fns import calculate_metrics, calc_diversity
 from einops import rearrange
 from common.model.sam import SAM
@@ -33,6 +33,8 @@ class LGCDiffTrainer(L.LightningModule):
         super().__init__()
         self.automatic_optimization = False
         self.grid_ae = grid_ae
+        if cfg.pose_optimizer.name == 'hand_ae':
+            self.hand_ae = kwargs.get('hand_ae', None)
         self.model = model
         self.diffusion = diffusion
         self.cfg = cfg
@@ -45,10 +47,13 @@ class LGCDiffTrainer(L.LightningModule):
         ## Load autoencoder pretrained weights (freezing is done in on_fit_start)
         self.pretrained_keys = []
         if cfg.run_phase == 'train':
-            self._load_pretrained_weights(cfg.generator.get('ae_pretrained_weight', None), target_prefix='grid_ae')
+            self._load_pretrained_weights(cfg.ae.get('pretrained_weight', None), target_prefix='grid_ae')
 
+        if cfg.pose_optimizer.name == 'hand_ae':
+            self._load_pretrained_weights(cfg.hand_ae.get('pretrained_weight', None), target_prefix='hand_ae')
+    
         self.mano_layer = ManoLayer(mano_root=cfg.data.mano_root, side='right',
-                                    use_pca=True, ncomps=cfg.pose_optimizer.ncomps, flat_hand_mean=True)
+                                    use_pca=cfg.pose_optimizer.use_pca, ncomps=cfg.pose_optimizer.n_comps, flat_hand_mean=True)
         self.closed_mano_faces = np.load(osp.join('data', 'misc', 'closed_mano_r_faces.npy'))
         cse_ckpt = torch.load(cfg.data.hand_cse_path)
 
@@ -60,7 +65,7 @@ class LGCDiffTrainer(L.LightningModule):
         self.hand_cse.eval()
         self.grid_coords = get_grid(self.cfg.msdf.kernel_size) * self.cfg.msdf.scale  # (K^3, 3)
         self.msdf_scale = self.cfg.msdf.scale
-        self.pool = None
+        self.pool = Pool(processes=min(self.cfg.test.batch_size, 16))
 
     def transfer_batch_to_device(self, batch, device, dataloader_idx):
         batch = super().transfer_batch_to_device(batch, device, dataloader_idx)
@@ -407,7 +412,6 @@ class LGCDiffTrainer(L.LightningModule):
         return pred_hand_verts, pred_verts_mask, grid_contact
     
     def on_test_epoch_start(self):
-        self.pool = Pool(processes=min(self.cfg.test.batch_size, 16))
         self.all_results = []
         self.sample_joints = []
 
@@ -480,7 +484,11 @@ class LGCDiffTrainer(L.LightningModule):
             ## 'x' only indicates the latent shape; latents are sampled inside the model
             input_data = {'x': torch.randn(n_samples, n_grids, self.cfg.ae.feat_dim, device=self.device), 'obj_pc': obj_pc.permute(0, 2, 1).to(self.device)}
 
-            samples = self.diffusion.sample(self.model, input_data, k=n_samples)
+            def project_latent(latent):
+                """Closure that captures obj context to project latent through hand mesh."""
+                return self._project_latent(latent, n_grids, obj_msdf, obj_msdf_center, multi_scale_obj_cond)
+
+            samples = self.diffusion.sample(self.model, input_data, k=n_samples, proj_fn=project_latent, progress=True)
             # sample_latent = samples ## B x latent
             latent = samples.reshape(n_samples*n_grids, -1)
             ## repeat the multi-scale obj cond here
@@ -504,18 +512,31 @@ class LGCDiffTrainer(L.LightningModule):
             # recon_lg_contact = self.model.sample(obj_msdf, obj_msdf_center).permute(0, 1, 3, 4, 5, 2)
 
         pred_grid_contact = recon_lg_contact[..., 0].reshape(n_samples, -1)  # B x N x K^3
+        obj_msdf_center = obj_msdf_center.repeat(n_samples, 1, 1)  # B x N x 3
         grid_coords = obj_msdf_center[:, :, None, :] + self.grid_coords.view(-1, 3)[None, None, :, :]  # B x N x K^3 x 3
         pred_grid_cse = recon_lg_contact[..., 1:].reshape(n_samples, -1, self.cse_dim)
         pred_targetWverts = self.hand_cse.emb2Wvert(pred_grid_cse.view(n_samples, -1, self.cse_dim))
 
-        with torch.enable_grad():
-            global_pose, mano_pose, mano_shape, mano_trans = optimize_pose_wrt_local_grids(
-                        self.mano_layer, grid_centers=obj_msdf_center.repeat(n_samples, 1, 1), target_pts=grid_coords.view(1, -1, 3).repeat(n_samples, 1, 1),
-                        target_W_verts=pred_targetWverts, weights=pred_grid_contact,
-                        n_iter=self.cfg.pose_optimizer.n_opt_iter, lr=self.cfg.pose_optimizer.opt_lr,
-                        grid_scale=self.cfg.msdf.scale, w_repulsive=self.cfg.pose_optimizer.w_repulsive)
-        
-        handV, handJ, _ = self.mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
+        if self.cfg.pose_optimizer.name == 'hand_ae':
+            pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
+                self.hand_cse, None,
+                pred_grid_contact.reshape(n_samples, -1), pred_grid_cse.reshape(n_samples, -1, self.cse_dim),
+                grid_coords=grid_coords.reshape(n_samples, -1, 3),
+                mask_th = 2
+            )
+            recon_param, _ = self.hand_ae(pred_hand_verts.permute(0, 2, 1), mask=pred_verts_mask.unsqueeze(1), is_training=False)
+            nrecon_trans, recon_pose, recon_betas = torch.split(recon_param, [3, 48, 10], dim=1)
+            recon_trans = nrecon_trans * 0.2
+            handV, handJ, _ = self.mano_layer(recon_pose, th_betas=recon_betas, th_trans=recon_trans)
+        else:
+            with torch.enable_grad():
+                global_pose, mano_pose, mano_shape, mano_trans = optimize_pose_wrt_local_grids(
+                            self.mano_layer, grid_centers=obj_msdf_center, target_pts=grid_coords.view(n_samples, -1, 3),
+                            target_W_verts=pred_targetWverts, weights=pred_grid_contact,
+                            n_iter=self.cfg.pose_optimizer.n_opt_iter, lr=self.cfg.pose_optimizer.opt_lr,
+                            grid_scale=self.cfg.msdf.scale, w_repulsive=self.cfg.pose_optimizer.w_repulsive)
+            
+            handV, handJ, _ = self.mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
 
         handV, handJ = handV.detach().cpu().numpy(), handJ.detach().cpu().numpy()
 
@@ -558,7 +579,7 @@ class LGCDiffTrainer(L.LightningModule):
             self.hand_cse, None,
             pred_grid_contact.reshape(n_samples, -1),
             pred_grid_cse.reshape(n_samples, -1, self.cse_dim),
-            grid_coords=grid_coords.reshape(1, -1, 3).repeat(n_samples, 1, 1),
+            grid_coords=grid_coords.reshape(n_samples, -1, 3),
             mask_th = 2
         )
 
@@ -572,7 +593,7 @@ class LGCDiffTrainer(L.LightningModule):
                 hand_faces=self.mano_layer.th_faces.detach().cpu().numpy(),
                 obj_mesh=obj_meshes[vis_idx],
                 part_ids=handobject.hand_part_ids,
-                msdf_center=obj_msdf_center[0].detach().cpu().numpy(),
+                msdf_center=obj_msdf_center[vis_idx].detach().cpu().numpy(),
                 grid_scale=self.cfg.msdf.scale,
                 h=400, w=400)
             recon_imgs.append(recon_img)
@@ -610,6 +631,129 @@ class LGCDiffTrainer(L.LightningModule):
             # o3d.visualization.draw(gt_geoms + [g['geometry'].translate((0, 0.25, 0)) if 'geometry' in g else g for g in pred_geoms])
 
         return result
+    
+    def _project_latent(self, latent, n_grids, obj_msdf, obj_msdf_center, multi_scale_obj_cond):
+        """
+        Project latent through hand mesh fitting and re-encode.
+
+        Args:
+            latent: (n_samples, n_grids, feat_dim) diffusion latent
+            n_grids: number of grids per sample
+            obj_msdf: (N, 1, K, K, K) object MSDF
+            obj_msdf_center: (1, N, 3) grid centers
+            multi_scale_obj_cond: list of multi-scale object conditioning tensors
+        Returns:
+            proj_latent: (n_samples, n_grids, feat_dim) projected latent
+        """
+        K = self.cfg.msdf.kernel_size
+        n_samples = latent.shape[0]
+
+        # Decode latent to contact grid
+        flat_latent = latent.reshape(n_samples * n_grids, -1)
+        ms_obj_cond = [cond.repeat(n_samples, 1, 1, 1, 1) for cond in multi_scale_obj_cond]
+        recon = self.grid_ae.decode(flat_latent, ms_obj_cond)  # (n_samples*n_grids, C, K, K, K)
+        recon = recon.view(n_samples, n_grids, -1, K ** 3).permute(0, 1, 3, 2)  # (B, N, K^3, C)
+
+        grid_contact = recon[..., 0].reshape(n_samples, -1)  # (B, N*K^3)
+        grid_cse = recon[..., 1:].reshape(n_samples, -1, self.cse_dim)  # (B, N*K^3, cse_dim)
+        grid_centers = obj_msdf_center.repeat(n_samples, 1, 1)  # (B, N, 3)
+        grid_coords = grid_centers[:, :, None, :] + self.grid_coords.view(-1, 3)[None, None, :, :]  # (B, N, K^3, 3)
+        grid_coords = grid_coords.reshape(n_samples, -1, 3)  # (B, N*K^3, 3)
+
+        # Project through hand mesh
+        proj_contact, proj_cse = self.contact_grid_projection(
+            grid_contact, grid_cse, grid_coords, grid_centers
+        )
+
+        # Re-encode projected contact grid back to latent
+        proj_lg = torch.cat([
+            proj_contact.reshape(n_samples, n_grids, K ** 3, 1),
+            proj_cse.reshape(n_samples, n_grids, K ** 3, self.cse_dim)
+        ], dim=-1)  # (B, N, K^3, C)
+        proj_lg = rearrange(proj_lg, 'b n (k1 k2 k3) c -> (b n) c k1 k2 k3', k1=K, k2=K, k3=K)
+        posterior, _, _ = self.grid_ae.encode(proj_lg, obj_msdf.repeat(n_samples, 1, 1, 1, 1))
+        proj_latent = posterior.mode().view(n_samples, n_grids, -1)
+        return proj_latent
+
+    def contact_grid_projection(self, grid_contact, grid_cse, grid_coords, grid_centers):
+        B = grid_contact.shape[0]
+        N_total = grid_contact.shape[1]  # N * K^3
+        device = grid_contact.device
+        cse_dim = grid_cse.shape[-1]
+
+        # --- Filter to contact-active points to speed up emb2Wvert ---
+        # emb2Wvert computes cdist (B, n_pts, 1538) which is the bottleneck.
+        # By filtering from ~65k to only contact-active points, this becomes tractable.
+        contact_th = 0.03
+        active_mask = grid_contact > contact_th  # (B, N_total)
+        n_active_per_sample = active_mask.sum(dim=1)  # (B,)
+        max_active = n_active_per_sample.max().item()
+
+        if max_active == 0:
+            return torch.zeros_like(grid_contact), torch.zeros_like(grid_cse)
+
+        # Gather active points into padded tensors for batched emb2Wvert
+        active_cse = torch.zeros(B, max_active, cse_dim, device=device)
+        active_contact = torch.zeros(B, max_active, device=device)
+        active_coords = torch.zeros(B, max_active, 3, device=device)
+        for b in range(B):
+            n = n_active_per_sample[b].item()
+            if n > 0:
+                idx = active_mask[b].nonzero(as_tuple=True)[0]
+                active_cse[b, :n] = grid_cse[b, idx]
+                active_contact[b, :n] = grid_contact[b, idx]
+                active_coords[b, :n] = grid_coords[b, idx]
+
+        # emb2Wvert on filtered points only
+        targetWverts = self.hand_cse.emb2Wvert(active_cse, None)  # (B, max_active, 778)
+        weight = (targetWverts * active_contact.unsqueeze(-1)).transpose(-1, -2)  # (B, 778, max_active)
+        recon_verts_mask = torch.sum(weight, dim=-1) > 2  # (B, 778)
+        weight[recon_verts_mask] = weight[recon_verts_mask] / torch.sum(weight[recon_verts_mask], dim=-1, keepdim=True)
+        recon_hand_verts = weight @ active_coords  # (B, 778, 3)
+
+        recon_param, _ = self.hand_ae(recon_hand_verts.permute(0, 2, 1), mask=recon_verts_mask.unsqueeze(1), is_training=False)
+        nrecon_trans, recon_pose, recon_betas = torch.split(recon_param, [3, 48, 10], dim=1)
+        recon_trans = nrecon_trans * 0.2
+        handV, handJ, _ = self.mano_layer(recon_pose, th_betas=recon_betas, th_trans=recon_trans)
+
+        ## Project back to contact grid
+        hand_faces = self.mano_layer.th_faces
+        hand_cse = self.hand_cse.embedding_tensor  # (778, cse_dim)
+        K = self.cfg.msdf.kernel_size
+        normalized_coords = get_grid(kernel_size=K, device=device).reshape(-1, 3).float()
+
+        proj_lg_contact = torch.zeros_like(grid_contact)  # (B, N*K^3)
+        proj_lg_cse = torch.zeros_like(grid_cse)  # (B, N*K^3, cse_dim)
+
+        for b in range(B):
+            grid_distance, verts_mask_b, grid_mask, ho_dist, nn_face_idx, nn_point = calc_local_grid_all_pts_gpu(
+                contact_points=grid_centers[b],  # (N, 3)
+                normalized_coords=normalized_coords,
+                hand_verts=handV[b],
+                faces=hand_faces,
+                kernel_size=K,
+                grid_scale=self.cfg.msdf.scale,
+            )
+
+            if grid_mask.any():
+                nn_face_idx_flat = nn_face_idx.reshape(-1)
+                nn_point_flat = nn_point.reshape(-1, 3)
+
+                nn_vert_idx = hand_faces[nn_face_idx_flat]
+                face_verts = handV[b, nn_vert_idx]
+                face_cse = hand_cse[nn_vert_idx]
+
+                w = torch.linalg.inv(face_verts.transpose(1, 2)) @ nn_point_flat.unsqueeze(-1)
+                w = torch.clamp(w, 0, 1)
+                w = w / (torch.sum(w, dim=1, keepdim=True) + 1e-8)
+
+                grid_hand_cse = torch.sum(face_cse * w, dim=1)
+
+                flat_mask = grid_mask.unsqueeze(1).expand(-1, K ** 3).reshape(-1)
+                proj_lg_contact[b, flat_mask] = grid_distance.reshape(-1)
+                proj_lg_cse[b, flat_mask] = grid_hand_cse
+
+        return proj_lg_contact, proj_lg_cse
 
     def on_test_epoch_end(self):
         final_metrics = {}

@@ -1,0 +1,3 @@
+name: hand_ae
+use_pca: false
+n_comps: 45

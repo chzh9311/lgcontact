@@ -8,11 +8,11 @@ import datetime
 from omegaconf import OmegaConf
 from common.dataset_utils.datamodules import HOIDatasetModule
 # from common.model.mlctrainer import MLCTrainer
-from common.model.diff.dm.ddpm import DDPM
 import common.model.diff.mdm.gaussian_diffusion as mdm_gd
 from common.model.diff.unet import UNetModel, DualUNetModel
 from common.model.gridae.gridae import GRIDAE
-from common.model.vae.handvae import HandVAE
+# from common.model.vae.handvae import HandVAE
+from common.model.hand_ipt_vae.hand_imputation import HandImputationVAE
 from common.model.lgcdifftrainer import LGCDiffTrainer
 from common.model.graspdifftrainer import GraspDiffTrainer
 from common.utils.misc import set_seed, load_pl_ckpt
@@ -46,7 +46,7 @@ def main(cfg):
     # DDPM (the base version of diffusion)
     # diffusion1 = DDPM(cfg.generator.ddpm)
     gridae = GRIDAE(cfg.ae, obj_1d_feat=True)
-    hand_ae = HandVAE(cfg.hand_ae)
+    hand_ae = HandImputationVAE(**cfg.hand_ae)
     # sd = torch.load(cfg.hand_ae.pretrained_weight, map_location='cpu', weights_only=True)['state_dict']
     # load_pl_ckpt(hand_ae, sd, prefix='model.')
     
@@ -101,7 +101,7 @@ def main(cfg):
         print('total keys in ckpt:', len(sd.keys()))
         load_pl_ckpt(gridae, sd, prefix='grid_ae.')
         load_pl_ckpt(model, sd, prefix='model.')
-        load_pl_ckpt(hand_ae, sd, prefix='hand_ae.')
+        # load_pl_ckpt(hand_ae, sd, prefix='hand_ae.')
         unused_keys = [k for k in sd.keys() if not (k.startswith('grid_ae.') or k.startswith('model.') or k.startswith('hand_ae.'))]
         print(f'Unused keys in ckpt: {unused_keys}')
 

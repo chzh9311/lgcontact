@@ -6,6 +6,8 @@ import torch
 import trimesh
 from pysdf import SDF
 from skimage.measure import marching_cubes
+from kaolin.metrics.trianglemesh import point_to_mesh_distance
+from kaolin.ops.mesh import index_vertices_by_faces
 
 def get_grid(kernel_size, device='cpu') -> torch.Tensor:
     """
@@ -442,6 +444,194 @@ def nn_dist_to_mesh(points: np.ndarray, mesh: trimesh.Trimesh) -> tuple[np.ndarr
     distances = np.abs(distances)
 
     return distances, face_indices, closest_points
+
+
+def _project_points_to_triangles(points, tri_verts):
+    """
+    Project query points onto their closest triangles to get the nearest surface point.
+    Implements the full 7-region Voronoi classification from Ericson's
+    "Real-Time Collision Detection" Section 5.1.5 (ClosestPtPointTriangle).
+
+    Args:
+        points: (N, 3) query points
+        tri_verts: (N, 3, 3) the 3 vertices of each point's closest triangle
+
+    Returns:
+        closest_points: (N, 3) nearest points on triangle surfaces
+    """
+    a = tri_verts[:, 0]  # (N, 3)
+    b = tri_verts[:, 1]  # (N, 3)
+    c = tri_verts[:, 2]  # (N, 3)
+    p = points
+
+    ab = b - a
+    ac = c - a
+    ap = p - a
+
+    d1 = (ab * ap).sum(dim=-1)  # (N,)
+    d2 = (ac * ap).sum(dim=-1)
+
+    bp = p - b
+    d3 = (ab * bp).sum(dim=-1)
+    d4 = (ac * bp).sum(dim=-1)
+
+    cp = p - c
+    d5 = (ab * cp).sum(dim=-1)
+    d6 = (ac * cp).sum(dim=-1)
+
+    # Start with all zeros, fill in region by region
+    # Use barycentric coords: result = a*u + b*v + c*w, where u+v+w=1
+    v_coord = torch.zeros_like(d1)
+    w_coord = torch.zeros_like(d1)
+    assigned = torch.zeros_like(d1, dtype=torch.bool)
+
+    # Region 1: vertex A (d1 <= 0 and d2 <= 0)
+    r1 = (d1 <= 0) & (d2 <= 0)
+    # v=0, w=0 (already zero)
+    assigned = assigned | r1
+
+    # Region 2: vertex B (d3 >= 0 and d4 <= d3)
+    r2 = ~assigned & (d3 >= 0) & (d4 <= d3)
+    v_coord[r2] = 1.0
+    assigned = assigned | r2
+
+    # Region 3: vertex C (d6 >= 0 and d5 <= d6)
+    r3 = ~assigned & (d6 >= 0) & (d5 <= d6)
+    w_coord[r3] = 1.0
+    assigned = assigned | r3
+
+    # Region 4: edge AB (vc <= 0, d1 >= 0, d3 <= 0)
+    vc = d1 * d4 - d3 * d2
+    r4 = ~assigned & (vc <= 0) & (d1 >= 0) & (d3 <= 0)
+    v_ab = d1 / (d1 - d3).clamp(min=1e-12)
+    v_coord[r4] = v_ab[r4]
+    assigned = assigned | r4
+
+    # Region 5: edge AC (vb <= 0, d2 >= 0, d6 <= 0)
+    vb = d5 * d2 - d1 * d6
+    r5 = ~assigned & (vb <= 0) & (d2 >= 0) & (d6 <= 0)
+    w_ac = d2 / (d2 - d6).clamp(min=1e-12)
+    w_coord[r5] = w_ac[r5]
+    assigned = assigned | r5
+
+    # Region 6: edge BC (va <= 0, (d4-d3) >= 0, (d5-d6) >= 0)
+    va = d3 * d6 - d5 * d4
+    r6 = ~assigned & (va <= 0) & ((d4 - d3) >= 0) & ((d5 - d6) >= 0)
+    w_bc = (d4 - d3) / ((d4 - d3) + (d5 - d6)).clamp(min=1e-12)
+    v_coord[r6] = (1.0 - w_bc)[r6]
+    w_coord[r6] = w_bc[r6]
+    assigned = assigned | r6
+
+    # Region 7: inside triangle
+    r7 = ~assigned
+    denom = (va + vb + vc).clamp(min=1e-12)
+    v_coord[r7] = (vb / denom)[r7]
+    w_coord[r7] = (vc / denom)[r7]
+
+    u_coord = 1.0 - v_coord - w_coord
+    closest_points = u_coord.unsqueeze(-1) * a + v_coord.unsqueeze(-1) * b + w_coord.unsqueeze(-1) * c
+    return closest_points
+
+
+def nn_dist_to_mesh_gpu(points, hand_verts, faces):
+    """
+    GPU-accelerated nearest distance from points to mesh surface using Kaolin.
+
+    Args:
+        points: torch.Tensor (N, 3), query points on GPU
+        hand_verts: torch.Tensor (V, 3), mesh vertices on GPU
+        faces: torch.LongTensor (F, 3), face indices on GPU
+
+    Returns:
+        distances: torch.Tensor (N,), unsigned distances
+        face_indices: torch.LongTensor (N,), nearest face indices
+        closest_points: torch.Tensor (N, 3), nearest points on mesh surface
+    """
+    # Kaolin expects batched input: (B, N, 3) and (B, F, 3, 3)
+    face_verts = index_vertices_by_faces(
+        hand_verts.unsqueeze(0), faces
+    )  # (1, F, 3, 3)
+
+    sq_dist, face_idx, _ = point_to_mesh_distance(
+        points.unsqueeze(0), face_verts
+    )  # (1, N), (1, N), (1, N)
+
+    sq_dist = sq_dist.squeeze(0)      # (N,)
+    face_idx = face_idx.squeeze(0)    # (N,)
+
+    # Gather the 3 vertices of each closest triangle
+    nearest_tri_verts = face_verts[0, face_idx]  # (N, 3, 3)
+
+    # Project points onto their nearest triangles
+    closest_points = _project_points_to_triangles(points, nearest_tri_verts)
+
+    distances = torch.sqrt(sq_dist.clamp(min=0))
+
+    return distances, face_idx, closest_points
+
+
+def calc_local_grid_all_pts_gpu(contact_points, normalized_coords, hand_verts, faces, kernel_size, grid_scale):
+    """
+    GPU-accelerated version of calc_local_grid_all_pts using Kaolin.
+
+    All inputs and outputs are torch tensors on GPU.
+
+    Args:
+        contact_points: (N, 3) contact points in world coordinates
+        normalized_coords: (K^3, 3) normalized grid coordinates
+        hand_verts: (V, 3) hand mesh vertices
+        faces: (F, 3) face indices (LongTensor)
+        kernel_size: int, size of the cubic grid
+        grid_scale: float, scale of the grid
+
+    Returns:
+        grid_distance: (M, K, K, K, 1) distances for active grids
+        verts_mask: (N, V) bool, which hand verts are within grid_scale of each contact point
+        grid_mask: (N,) bool, which contact points have any nearby hand verts
+        ho_dist: (N, V) Chebyshev distances
+        nn_face_idx: (M, K, K, K) face indices for nearest triangles
+        nn_point: (M, K, K, K, 3) nearest points on mesh surface
+    """
+    N = contact_points.shape[0]
+    device = contact_points.device
+
+    # Chebyshev distance masking
+    ho_dist = torch.max(
+        torch.abs(hand_verts[None, :, :] - contact_points[:, None, :]), dim=-1
+    )[0]  # (N, V)
+    verts_mask = ho_dist < grid_scale  # (N, V)
+    grid_mask = verts_mask.any(dim=1)  # (N,)
+    M = grid_mask.sum().item()
+
+    if M == 0:
+        K = kernel_size
+        V = hand_verts.shape[0]
+        return (
+            torch.empty(0, K, K, K, 1, device=device),
+            verts_mask,
+            grid_mask,
+            ho_dist,
+            torch.empty(0, K, K, K, dtype=torch.long, device=device),
+            torch.empty(0, K, K, K, 3, device=device),
+        )
+
+    # Build grid points for active contact points
+    grid_points_flat = (
+        contact_points[grid_mask, None, :] + normalized_coords[None, :, :] * grid_scale
+    )  # (M, K^3, 3)
+    grid_points_all = grid_points_flat.reshape(-1, 3)  # (M * K^3, 3)
+
+    # GPU nearest distance using Kaolin
+    nn_dist, nn_face_idx, nn_point = nn_dist_to_mesh_gpu(
+        grid_points_all, hand_verts, faces
+    )
+
+    K = kernel_size
+    grid_distance = nn_dist.reshape(M, K, K, K, 1)
+    nn_face_idx = nn_face_idx.reshape(M, K, K, K)
+    nn_point = nn_point.reshape(M, K, K, K, 3)
+
+    return grid_distance, verts_mask, grid_mask, ho_dist, nn_face_idx, nn_point
 
 
 def msdf2mlcontact(obj_msdf, hand_verts, hand_cse, kernel_size, grid_scale, hand_faces, pool=None):

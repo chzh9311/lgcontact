@@ -3,9 +3,9 @@ defaults:
   - msdf: sparse
   - data: grab_multi_contact
   - ae: gridae_128latent
-  - hand_ae: handvae_64latent
+  - hand_ae: hand_imputation_vae
   - generator: ldm
-  - pose_optimizer: lg_base
+  - pose_optimizer: hand_ae
 
 training_stage: "generator"
 contact_unit: "grid"
@@ -61,7 +61,7 @@ trainer: ## For instantiating pytorch-lightning Trainer
 
 run_phase: train
 test_gt: false
-ckpt_path: logs/checkpoints/mlcdiff/clean_pred/v1/best.ckpt
+ckpt_path: logs/checkpoints/mlcdiff/clean_pred/v2-aug/best.ckpt
 
 debug: true
 

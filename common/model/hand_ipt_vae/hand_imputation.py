@@ -110,7 +110,7 @@ class HandImputationVAE(nn.Module):
 
         kl_loss = dl_rec.mean() + dl_g.mean()
         return recon_params, kl_loss
-
+    
 
 class HandImputationVAETrainer(LightningModule):
     def __init__(self, model, cfg):

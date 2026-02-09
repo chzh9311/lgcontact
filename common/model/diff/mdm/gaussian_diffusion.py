@@ -525,7 +525,7 @@ class GaussianDiffusion(nn.Module):
         sample = out["mean"] + nonzero_mask * th.exp(0.5 * out["log_variance"]) * noise
         return {"sample": sample, "pred_xstart": out["pred_xstart"].detach()}
     
-    def sample(self, model, input_data, k):
+    def sample(self, model, input_data, k, proj_fn=None, progress=False):
         """
         Generate samples from the model.
 
@@ -538,7 +538,7 @@ class GaussianDiffusion(nn.Module):
         shape = input_data['x'].shape
         condition = model.condition({'obj_pc': input_data['obj_pc']})
         result = self.p_sample_loop(model, shape, condition.repeat(k, 1, 1), noise=input_data['x'],
-                                    clip_denoised=False)
+                                    clip_denoised=False, proj_fn=proj_fn, progress=progress)
         return result
     
     def p_sample_loop(
@@ -559,6 +559,7 @@ class GaussianDiffusion(nn.Module):
         cond_fn_with_grad=False,
         dump_steps=None,
         const_noise=False,
+        proj_fn=None,
     ):
         """
         Generate samples from the model.
@@ -600,6 +601,7 @@ class GaussianDiffusion(nn.Module):
             randomize_class=randomize_class,
             cond_fn_with_grad=cond_fn_with_grad,
             const_noise=const_noise,
+            proj_fn=proj_fn,
         )):
             if dump_steps is not None and i in dump_steps:
                 dump.append(deepcopy(sample["sample"]))
@@ -625,7 +627,8 @@ class GaussianDiffusion(nn.Module):
         randomize_class=False,
         cond_fn_with_grad=False,
         const_noise=False,
-    ):
+        proj_fn=None,
+    ): 
         """
         Generate samples from the model and yield intermediate samples from
         each timestep of diffusion.
@@ -672,6 +675,8 @@ class GaussianDiffusion(nn.Module):
                     model_kwargs=model_kwargs,
                     const_noise=const_noise,
                 )
+                if proj_fn is not None:
+                    out["sample"] = proj_fn(out["sample"])
                 yield out
                 img = out["sample"]
 

@@ -7,4 +7,4 @@ hidden_dim: 256
 output_size: 61
 mano_root: ${data.mano_root}
 
-pretrained_weight: null
+pretrained_weight: logs/checkpoints/hand_imp_ae/16latent/best.ckpt
