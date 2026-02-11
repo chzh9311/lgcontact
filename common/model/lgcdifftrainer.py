@@ -240,10 +240,10 @@ class LGCDiffTrainer(L.LightningModule):
         n_adj_pt = handobject.n_adj_pt.view(batch_size, n_grids * self.msdf_k**3)
         sdf_flat = sdf_flat * self.msdf_scale * np.sqrt(3)
         ## Assume gravity direction is always (0, 0, -1), since there're some tolerance for penetration error.
-        # stable_loss = self.stable_loss(sdf_flat, all_pts.view(batch_size, -1, 3), recon_lg_contact[..., 0], sdf_grad, n_adj_pt,
-        #                         obj_mass=handobject.obj_mass, gravity_direction=torch.FloatTensor([[0, 0, -1]]).to(self.device),
-        #                         J=handobject.obj_inertia)
-        losses['stable_loss'] = 0
+        stable_loss = self.stable_loss(sdf_flat, all_pts.view(batch_size, -1, 3), recon_lg_contact[..., 0], sdf_grad, n_adj_pt,
+                                obj_mass=handobject.obj_mass, gravity_direction=torch.FloatTensor([[0, 0, -1]]).to(self.device),
+                                J=handobject.obj_inertia)
+        losses['stable_loss'] = stable_loss.mean()
 
         total_loss = sum([losses[k] * self.loss_weights[k] for k in losses.keys()])
         losses['total_loss'] = total_loss
