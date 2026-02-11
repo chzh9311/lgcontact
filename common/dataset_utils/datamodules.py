@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import trimesh
 import h5py
+from pytorch3d.structures import Meshes
 from torch.utils.data import DataLoader
 from lightning import LightningDataModule
 from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
@@ -16,7 +17,6 @@ from multiprocessing.pool import Pool
 from common.msdf.utils.msdf import calculate_contact_mask, calc_local_grid_all_pts
 from common.msdf.simplified_msdf import mesh2msdf
 from common.manopth.manopth.manolayer import ManoLayer
-from common.utils.vis import o3dmesh
 import open3d as o3d
 
 class LocalGridDataModule(LightningDataModule):
@@ -236,9 +236,10 @@ class HOIDatasetModule(LightningDataModule):
                 if not osp.exists(msdf_path):
                     print(f'Preprocessing M-SDF for {k}...')
                     ## M-SDF: K^3 + 3
-                    msdf = mesh2msdf(mesh, n_samples=self.cfg.msdf.num_grids, kernel_size=self.cfg.msdf.kernel_size, scale=self.cfg.msdf.scale)
+                    msdf, msdf_grad = mesh2msdf(mesh, n_samples=self.cfg.msdf.num_grids, kernel_size=self.cfg.msdf.kernel_size,
+                                                scale=self.cfg.msdf.scale, return_gradient=True)
                                     
-                    np.savez_compressed(msdf_path, msdf=msdf)
+                    np.savez_compressed(msdf_path, msdf=msdf, msdf_grad=msdf_grad)
                     print('result saved to ', msdf_path)
                 if not osp.exists(osp.dirname(adj_points_path)):
                     os.makedirs(osp.dirname(adj_points_path))
@@ -246,8 +247,8 @@ class HOIDatasetModule(LightningDataModule):
                     print(f'Preprocessing adjacent point pairs for {k}...')
                     msdf_data = np.load(msdf_path)
                     msdf_points = msdf_data['msdf'][:, -3:]  # N x 3
-                    indices, distances = self._adjacent_point_pairs(msdf_points, self.normalized_coords.numpy() * self.cfg.msdf.scale, self.cfg.msdf.kernel_size, self.cfg.msdf.scale)
-                    np.savez_compressed(adj_points_path, indices=indices, distances=distances)
+                    indices, distances, n_adj_points = self._adjacent_point_pairs(msdf_points, self.normalized_coords.numpy() * self.cfg.msdf.scale, self.cfg.msdf.kernel_size, self.cfg.msdf.scale)
+                    np.savez_compressed(adj_points_path, indices=indices, distances=distances, n_adj_points=n_adj_points)
                     print(f'Saved {len(indices)} point pairs to ', adj_points_path)
                 
             if hasattr(self.cfg, 'n_obj_samples'):
@@ -264,7 +265,8 @@ class HOIDatasetModule(LightningDataModule):
             
         ## Preprocess the grid contact data of the hand.
         data_cfg = deepcopy(self.cfg)
-        for split in ['train', 'val', 'test']:
+        ## TODO: Remove the preprocess code when necessary
+        for split in []:
             os.makedirs(osp.join(self.preprocessed_dir, self.dataset_name, split), exist_ok=True)
             self.base_dataset = getattr(self.module, self.dataset_name.upper() + 'Dataset')(data_cfg, split, load_msdf=True, test_gt=True)
             dataset_file = osp.join(self.preprocessed_dir, self.dataset_name, split, f'hand_grid_contact_{self.cfg.msdf.num_grids}_{self.cfg.msdf.kernel_size}_{int(self.cfg.msdf.scale*1000):02d}mm_every{self.cfg.downsample_rate[split]}.h5')
@@ -451,10 +453,10 @@ class HOIDatasetModule(LightningDataModule):
             pts_i = grid_pt_coords[chunk_adj_i]  # chunk x K^3 x 3
             pts_j = grid_pt_coords[chunk_adj_j]  # chunk x K^3 x 3
 
-            # Compute pairwise L2 distances: chunk x K^3 x K^3
+            # Compute pairwise Chebyshev distances: chunk x K^3 x K^3
             # pts_i[:, :, None, :] - pts_j[:, None, :, :] -> chunk x K^3 x K^3 x 3
             diff = pts_i[:, :, None, :] - pts_j[:, None, :, :]  # chunk x K^3 x K^3 x 3
-            pt_dists = np.linalg.norm(diff, axis=-1)  # chunk x K^3 x K^3
+            pt_dists = np.abs(diff).max(axis=-1)  # chunk x K^3 x K^3
 
             # Adjacent points: distance < pt_spacing
             adj_pt_mask = pt_dists < pt_spacing  # chunk x K^3 x K^3
@@ -484,8 +486,11 @@ class HOIDatasetModule(LightningDataModule):
 
         indices = np.concatenate(all_indices, axis=0).astype(np.int64)  # M x 2
         distances = np.concatenate(all_distances, axis=0).astype(np.float32)  # M
+        n_adj_points = np.zeros(N * K3).astype(np.int64)
+        for pair in all_indices:
+            n_adj_points[pair] += 1
 
-        return indices, distances
+        return indices, distances, n_adj_points
     
 
     def setup(self, stage: str):
@@ -558,3 +563,38 @@ class HOIDatasetModule(LightningDataModule):
         ## load only one object at a time for sample generation
         return DataLoader(self.test_set, batch_size=batch_size, shuffle=False, num_workers=self.cfg.num_workers, collate_fn=self.collate_fn) 
 
+
+class OnlineHOIDatasetModule(HOIDatasetModule):
+    """
+    SDF and grid contact are calculated online so no prepare data is needed.
+    """
+    def __init__(self, cfg):
+        super(OnlineHOIDatasetModule, self).__init__(cfg)
+
+    def prepare_data(self):
+        ## No preprocessing needed for this class
+        pass
+
+    @staticmethod
+    def collate_fn(batch):
+
+        mesh_keys = ['objMesh']
+        collated = {}
+        keys = batch[0].keys()
+
+        for key in keys:
+            items = [sample[key] for sample in batch]
+            if key in mesh_keys:
+                verts = [torch.as_tensor(m.vertices, dtype=torch.float32) for m in items]
+                faces = [torch.as_tensor(m.faces, dtype=torch.int64) for m in items]
+                collated[key] = Meshes(verts=verts, faces=faces)
+            elif isinstance(items[0], torch.Tensor):
+                collated[key] = torch.stack(items, dim=0)
+            elif isinstance(items[0], np.ndarray):
+                collated[key] = torch.from_numpy(np.stack(items, axis=0))
+            elif isinstance(items[0], (int, float)):
+                collated[key] = torch.tensor(items)
+            else:
+                collated[key] = items
+
+        return collated

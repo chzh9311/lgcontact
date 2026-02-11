@@ -966,3 +966,17 @@ def reorder_3d(input_array, axis_id, rot_id):
             return flip(transpose(input_array, 0, 1), 0)
 
     raise ValueError('Unknown axis_id {:d} or rot_id {:d}'.format(axis_id, rot_id))
+
+
+def get_perpend_vecs_tensor(vs: torch.Tensor, device='cpu') -> tuple:
+    """
+    :param vs: (batch_size x N x 3) a set of 3D vectors;
+    :return: tuple of (batch_size x N x 3) -> the 2 perpendicular vector of the current vector
+    if n = [a, b, c], then one perpendicular vector will be: [0, -c, b];
+    By cross product, we can get the second vector as: [b^2+c^2, -ab, -ac]
+    """
+    n1 = torch.zeros_like(vs, device=device)
+    n1[..., 1] = -vs[..., 2]
+    n1[..., 2] = vs[..., 1]
+    n2 = torch.cross(vs, n1, dim=-1)
+    return n1, n2

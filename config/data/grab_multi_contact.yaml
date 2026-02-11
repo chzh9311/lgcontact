@@ -7,12 +7,12 @@ preprocessed_dir: data/preprocessed
 MSDF_dir: data/preprocessed/grab_msdf
 augment: ${train.augment}
 load_msdf: true
-load_grid_contact: true
+load_grid_contact: false
 
 contact_unit: ${contact_unit}
 downsample_rate: 
-  train: 4
-  val: 8
+  train: 1
+  val: 4
   test: 64
 
 msdf:

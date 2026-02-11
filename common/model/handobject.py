@@ -9,7 +9,9 @@ import open3d.visualization as vis
 from matplotlib import pyplot as plt
 
 from common.manopth.manopth.manolayer import ManoLayer
-from common.utils.vis import o3dmesh_from_trimesh, o3d_arrow, geom_to_img, extract_masked_mesh_components
+from common.utils.physics import StableLoss
+from common.utils.vis import (o3dmesh_from_trimesh, o3d_arrow, geom_to_img, extract_masked_mesh_components,
+                               visualize_grid_contact, visualize_local_grid_with_hand, visualize_recon_hand_w_object)
 from common.utils.misc import linear_normalize
 from common.utils.geometry import (
         flip_x_axis,
@@ -18,7 +20,8 @@ from common.utils.geometry import (
         calculate_contact_capsule
     )
 
-from common.msdf.utils.msdf import msdf2mlcontact, get_grid
+from common.msdf.utils.msdf import msdf2mlcontact, get_grid, get_grid_points, calc_local_grid_all_pts_gpu
+from common.utils.geometry import GridDistanceToContact
 
 class HandObject:
     def __init__(self, cfg, device, mano_layer=None, normalize=True):
@@ -74,6 +77,7 @@ class HandObject:
         new_ho.obj_rot = copy(self.obj_rot)
         new_ho.obj_trans = copy(self.obj_trans)
         new_ho.obj_com = copy(self.obj_com)
+        new_ho.obj_inertia = copy(self.obj_inertia)
         # new_ho.batch_size = self.batch_size
         return new_ho
 
@@ -87,6 +91,9 @@ class HandObject:
         # self.obj_normals = batch['objSampleNormals'].clone()
         self.obj_rot = batch['objRot'].clone().to(self.device).float()
         self.obj_trans = batch['objTrans'].clone().to(self.device).float()
+        self.obj_com = batch['objCoM'].clone().to(self.device).float()
+        self.obj_inertia = batch['objInertia'].clone().to(self.device).float()
+        self.obj_mass = batch['objMass'].clone().to(self.device).float()
         self.obj_names = batch['objName']
         self.hand_pose = batch['handPose'].clone().to(self.device).float()
         self.hand_root_rot = batch['handRot'].clone().to(self.device).float()
@@ -126,16 +133,20 @@ class HandObject:
                     ohs.append(h0)
                 self.obj_hulls.append(ohs)
 
+        self.grav_dire = torch.tensor([[0, 0, -1]], dtype=torch.float32, device=self.device).repeat(self.batch_size, 1)
         if self.normalize:
             # Apply inverse transformation objT^-1 to hand related attributes
             # Compute inverse transformation
             if 'aug_rot' in batch:
-                augR = batch['aug_rot'].clone().to(self.device).float()
+                self.augR = batch['aug_rot'].clone().to(self.device).float()
             else:
-                augR = torch.eye(3).unsqueeze(0).to(self.device)
+                self.augR = torch.eye(3).unsqueeze(0).repeat(self.batch_size, 1, 1).to(self.device)
+            
+            self.obj_inertia = self.augR @ self.obj_inertia @ self.augR.transpose(-1, -2)
             objT_inv = torch.eye(4).to(self.device).unsqueeze(0).repeat(self.batch_size, 1, 1)
-            objT_inv[:, :3, :3] = augR @ objT[:, :3, :3].transpose(-1, -2)  # R^T
-            objT_inv[:, :3, 3] = -(objT_inv[:, :3, :3] @ objT[:, :3, 3:4]).squeeze(-1)  # -R^T * t
+            objT_inv[:, :3, :3] = self.augR @ objT[:, :3, :3].transpose(-1, -2)  # R^T
+            objT_inv[:, :3, 3:4] = - objT_inv[:, :3, :3] @ objT[:, :3, 3:4] - self.augR @ self.obj_com.unsqueeze(-1)  # -R^T * t
+            self.grav_dire = (objT_inv[:, :3, :3] @ self.grav_dire.unsqueeze(-1)).squeeze(-1)
 
             # Transform hand vertices
             homo_hand_verts = F.pad(self.hand_verts, (0, 1), 'constant', 1)
@@ -189,7 +200,7 @@ class HandObject:
                     objT_np = objT[i].detach().cpu().numpy()
                     for j in range(len(self.obj_hulls[i])):
                         self.obj_hulls[i][j] = transform_mesh(self.obj_hulls[i][j], objT_np)
-            self.obj_com = self.obj_verts.mean(dim=1, keepdim=True)
+            # self.obj_com = self.obj_verts.mean(dim=1, keepdim=True)
             self.obj_verts = self.obj_verts - self.obj_com
             self.hand_verts = self.hand_verts - self.obj_com
             self.hand_joints = self.hand_joints - self.obj_com
@@ -197,32 +208,82 @@ class HandObject:
         ## Compute Local grid contact representation
         if self.contact_unit == 'grid':
             self.obj_msdf = batch['objMsdf'].clone().to(self.device).float()
-            # ml_dist, ml_cse, mask, hand_vert_mask, ho_dist, normalized_coords = msdf2mlcontact(self.obj_msdf, self.hand_verts,
-            #                                                                           self.hand_cse, self.cfg.msdf.kernel_size, self.cfg.msdf.scale,
-            #                                                                           self.mano_layer.th_faces, pool=pool)
+            self.obj_msdf_grad = batch['objMsdfGrad'].clone().to(self.device).float()
+            self.adj_point_indices = [b.to(self.device) for b in batch['adjPointIndices']]
+            self.n_adj_pt = batch['nAdjPoints'].clone().to(self.device)
+            self.msdf_grad = self.obj_msdf_grad
 
-            # ml_dist[mask] = sdf_to_contact(ml_dist[mask] / (self.cfg.msdf.scale / (self.cfg.msdf.kernel_size-1)), None, method=2)
-            ## Do the mapping: 0 -> -1; 1 -> 0; infty -> 1: contact = 1 - 2/(dist + 1)
-            # ho_dist = ho_dist / self.cfg.msdf.scale # For grid-level contact
-            # self.n_ho_dist = 1 - 2 / (ho_dist + 1)
-            # # ml_contact[mask, :, :, :, 0] = sdf_to_contact(ml_contact[mask, :, :, :, 0] / (self.cfg.msdf.scale / self.cfg.msdf.num_grids), None, method=0)
-            # self.ml_contact = torch.cat([ml_dist.unsqueeze(-1), ml_cse], dim=-1)
-            # self.normalized_coords = normalized_coords
-            # self.obj_pt_mask = mask
-            # self.hand_vert_mask = hand_vert_mask
+            K = self.cfg.msdf.kernel_size
+            scale = self.cfg.msdf.scale
+            contact_method = self.cfg.msdf.get('contact_method', 2)
+            grid_dist_to_contact = GridDistanceToContact(scale, K, method=contact_method)
+            mano_faces = self.mano_layer.th_faces.to(self.device)
+            cse_dim = self.hand_cse.shape[-1]
 
-            self.n_ho_dist = batch['nHoDist'].clone().to(self.device).float()
-            self.ml_contact = torch.cat([batch['localGridContact'], batch['localGridCSE']], dim=-1).to(self.device).float()
-            self.obj_pt_mask = batch['objPtMask'].clone().to(self.device).bool()
-            self.hand_vert_mask = batch['handVertMask'].clone().to(self.device).bool()
+            # Pre-allocate output tensors
+            local_grid_contact = torch.zeros(
+                self.batch_size, self.obj_msdf.shape[1], K, K, K, 1,
+                device=self.device, dtype=torch.float32)
+            local_grid_cse = torch.zeros(
+                self.batch_size, self.obj_msdf.shape[1], K, K, K, cse_dim,
+                device=self.device, dtype=torch.float32)
+            all_grid_mask = torch.zeros(
+                self.batch_size, self.obj_msdf.shape[1],
+                device=self.device, dtype=torch.bool)
+            all_verts_mask = torch.zeros(
+                self.batch_size, self.obj_msdf.shape[1], self.hand_verts.shape[1],
+                device=self.device, dtype=torch.bool)
+            all_ho_dist = torch.zeros(
+                self.batch_size, self.obj_msdf.shape[1], self.hand_verts.shape[1],
+                device=self.device, dtype=torch.float32)
 
-            ## For profiling
-            # self.normalized_coords = get_grid(kernel_size=self.cfg.msdf.kernel_size, device=self.device).reshape(-1, 3).float()
-            # self.n_ho_dist = torch.randn(self.batch_size, self.cfg.msdf.num_grids).to(self.device).float()
-            # self.ml_contact = torch.randn(self.batch_size, self.cfg.msdf.num_grids, self.cfg.msdf.kernel_size, self.cfg.msdf.kernel_size, self.cfg.msdf.kernel_size,
-            #                               1 + self.hand_cse.shape[1]).to(self.device).float()
-            # self.obj_pt_mask = torch.randint(0, 2, (self.batch_size, self.cfg.msdf.num_grids)).bool().to(self.device)
-            # self.hand_vert_mask = torch.randint(0, 2, (self.batch_size, self.cfg.msdf.num_grids, 778)).bool().to(self.device)
+            for b in range(self.batch_size):
+                grid_distance, verts_mask, grid_mask, ho_dist, nn_face_idx, nn_point = calc_local_grid_all_pts_gpu(
+                    contact_points=self.obj_msdf[b, :, -3:],
+                    normalized_coords=self.normalized_coords,
+                    hand_verts=self.hand_verts[b],
+                    faces=mano_faces,
+                    kernel_size=K,
+                    grid_scale=scale
+                )
+
+                all_grid_mask[b] = grid_mask
+                all_verts_mask[b] = verts_mask
+                all_ho_dist[b] = ho_dist
+
+                M = grid_mask.sum().item()
+                if M == 0:
+                    continue
+
+                # Convert distance to contact
+                contact_vals = grid_dist_to_contact(grid_distance)  # (M, K, K, K, 1)
+                local_grid_contact[b, grid_mask] = contact_vals
+
+                # CSE via barycentric interpolation on nearest triangle
+                nn_face_flat = nn_face_idx.reshape(-1)  # (M * K^3,)
+                nn_point_flat = nn_point.reshape(-1, 3)  # (M * K^3, 3)
+
+                nn_vert_idx = mano_faces[nn_face_flat]  # (M*K^3, 3)
+                face_verts = self.hand_verts[b][nn_vert_idx]  # (M*K^3, 3, 3)
+                face_cse = self.hand_cse[nn_vert_idx]  # (M*K^3, 3, cse_dim)
+
+                # Barycentric weights via matrix inversion
+                face_verts_T = face_verts.transpose(-1, -2)  # (M*K^3, 3, 3)
+                w = torch.linalg.inv(face_verts_T) @ nn_point_flat.unsqueeze(-1)  # (M*K^3, 3, 1)
+                w = torch.clamp(w, 0, 1)
+                w = w / (w.sum(dim=1, keepdim=True) + 1e-8)  # (M*K^3, 3, 1)
+
+                grid_hand_cse = (face_cse * w).sum(dim=1)  # (M*K^3, cse_dim)
+                grid_hand_cse = grid_hand_cse.reshape(M, K, K, K, cse_dim)
+                local_grid_cse[b, grid_mask] = grid_hand_cse
+
+            self.obj_pt_mask = all_grid_mask
+            self.hand_vert_mask = all_verts_mask  # (B, N, V) bool: which hand verts are within grid_scale of each center
+            # n_ho_dist: 0 -> -1; 1 -> 0; infty -> 1
+            min_ho_dist = all_ho_dist.min(dim=-1)[0] / scale
+            self.n_ho_dist = 1 - 2 / (min_ho_dist + 1)
+            self.ml_contact = torch.cat([local_grid_contact, local_grid_cse], dim=-1)
+
 
         elif self.contact_unit == 'point':
         ## Calculate contacts
@@ -230,7 +291,7 @@ class HandObject:
                                                             self.obj_verts, self.obj_normals)
             self.contact_map = obj_cmap.to(self.device).squeeze(-1)
             self.pmap = torch.as_tensor(self.hand_part_ids).to(self.device)[nn_idx].squeeze(-1)
-            self.part_map = F.one_hot(self.pmap, 16).float()
+            self.part_map = F.one_hot(self.pmap, 16).float().to(self.device)
             self.obj2hand_nn_idx = nn_idx.to(self.device)
 
     @property
@@ -241,6 +302,218 @@ class HandObject:
         nhandV = (self.hand_verts - root_j.unsqueeze(1)) @ R + root_j.unsqueeze(1) - self.hand_trans.unsqueeze(1)
         return nhandV
     
+
+    def calculate_stable_loss(self, pred_grid_contact):
+        B, N, D = self.obj_msdf.shape
+        K = self.cfg.msdf.kernel_size
+        scale = self.cfg.msdf.scale
+        K3 = K ** 3
+
+        # Split MSDF into SDF values and centres
+        sdf_vals = self.obj_msdf[:, :, :K3]        # (B, N, K^3)
+        centres = self.obj_msdf[:, :, K3:]          # (B, N, 3)
+
+        # Expand centres into per-grid-point coordinates: (B, N, 1, 3) + (1, 1, K^3, 3) -> (B, N, K^3, 3)
+        all_pts = centres.unsqueeze(2) + self.normalized_coords[None, None, :, :] * scale
+        all_pts = all_pts.reshape(B, N * K3, 3)
+
+        # Flatten SDF, contact, grad, n_adj to (B, N*K^3, ...)
+        sdf_flat = sdf_vals.reshape(B, N * K3)
+        sdf_grad = self.msdf_grad.reshape(B, N * K3, 3)
+        n_adj = self.n_adj_pt.view(B, N * K3)
+        ## Denormalize SDF values
+        sdf_flat = sdf_flat * scale * np.sqrt(3)
+
+        loss = self.stable_loss(sdf_flat, all_pts, pred_grid_contact, sdf_grad, n_adj,
+                                obj_mass=self.obj_mass, gravity_direction=self.grav_dire, J=self.obj_inertia)
+        return loss
+
+    ## ---- Visualization wrappers ---- ##
+
+    def vis_grid_contact(self, obj_templates, idx=0, w=500, h=500, bbox_alpha=0.2):
+        """
+        Visualize grid-level contact as coloured bounding boxes on the object.
+
+        :param obj_templates: list of trimesh objects (one per batch element)
+        :param idx: batch index
+        :return: (img, vis_geoms)
+        """
+        _, obj_mesh, _ = self._load_templates(idx, obj_templates)
+        K = self.cfg.msdf.kernel_size
+        scale = self.cfg.msdf.scale
+        contact_pts = self.obj_msdf[idx, :, -3:].detach().cpu().numpy()  # (N, 3)
+        # Per-centre contact: max contact value inside each grid cell
+        pt_contact = self.ml_contact[idx, :, :, :, :, 0].reshape(-1, K**3).max(dim=-1)[0].detach().cpu().numpy()
+        return visualize_grid_contact(contact_pts, pt_contact, scale, obj_mesh, w, h, bbox_alpha)
+
+    def vis_all_grid_points(self, obj_templates, idx=0, w=500, h=500, hue='sdf'):
+        """
+        Visualize all expanded grid points together with the object mesh.
+
+        :param obj_templates: list of trimesh objects (one per batch element)
+        :param idx: batch index
+        :param w: image width
+        :param h: image height
+        :param hue: 'sdf' — blue/white/red by signed distance;
+                    'overlap' — inferno colormap by n_adj_pt (grid overlap count)
+        :return: (img, vis_geoms)
+        """
+        _, obj_mesh, _ = self._load_templates(idx, obj_templates)
+
+        K = self.cfg.msdf.kernel_size
+        K3 = K ** 3
+        scale = self.cfg.msdf.scale
+
+        # Compute all_pts and sdf_flat exactly as in calculate_stable_loss
+        sdf_vals = self.obj_msdf[idx, :, :K3]       # (N, K^3)
+        centres = self.obj_msdf[idx, :, K3:]         # (N, 3)
+        all_pts = centres.unsqueeze(1) + self.normalized_coords[None, :, :] * scale  # (N, K^3, 3)
+        all_pts = all_pts.reshape(-1, 3).detach().cpu().numpy()
+        sdf_flat = sdf_vals.reshape(-1).detach().cpu().numpy()
+
+        if hue == 'sdf':
+            # Color: blue (inside, sdf<0) -> white (sdf=0) -> red (outside, sdf>0)
+            sdf_min = sdf_flat.min()
+            sdf_max = sdf_flat.max()
+            colors = np.zeros((len(sdf_flat), 3))
+            neg_mask = sdf_flat < 0
+            pos_mask = ~neg_mask
+            if sdf_min < 0:
+                intensity = np.clip(np.abs(sdf_flat[neg_mask]) / abs(sdf_min), 0, 1)
+                colors[neg_mask, 0] = 1 - intensity
+                colors[neg_mask, 1] = 1 - intensity
+                colors[neg_mask, 2] = 1
+            if sdf_max > 0:
+                intensity = np.clip(sdf_flat[pos_mask] / sdf_max, 0, 1)
+                colors[pos_mask, 0] = 1
+                colors[pos_mask, 1] = 1 - intensity
+                colors[pos_mask, 2] = 1 - intensity
+        elif hue == 'overlap':
+            # Color by n_adj_pt: number of overlapping grids at each point
+            n_adj = self.n_adj_pt[idx].reshape(-1).detach().cpu().numpy()  # (N*K^3,)
+            heat_cmap = plt.colormaps['inferno']
+            n_adj_max = n_adj.max()
+            normalized = n_adj / n_adj_max if n_adj_max > 0 else n_adj
+            colors = heat_cmap(normalized)[:, :3]
+        else:
+            raise ValueError(f"Unknown hue mode: {hue!r}. Use 'sdf' or 'overlap'.")
+
+        # Build Open3D point cloud
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(all_pts)
+        pcd.colors = o3d.utility.Vector3dVector(colors)
+
+        # Build object mesh
+        obj_o3d = o3dmesh_from_trimesh(obj_mesh, (0.5, 0.5, 0.5))
+
+        default_mat = vis.rendering.MaterialRecord()
+        default_mat.shader = 'defaultLit'
+        obj_mat = vis.rendering.MaterialRecord()
+        obj_mat.shader = "defaultLitTransparency"
+        obj_mat.base_color = [0.5, 0.5, 0.5, 0.5]
+
+        vis_geoms = [
+            {'name': 'sdf_points', 'geometry': pcd, 'material': default_mat},
+            {'name': 'object', 'geometry': obj_o3d, 'material': obj_mat},
+        ]
+
+        # img = geom_to_img(vis_geoms, w, h)
+        return None, vis_geoms
+
+    def vis_local_grid_with_hand(self, obj_templates, idx=0, pt_idx=0):
+        """
+        Visualize a single local grid (SDF + contact + CSE + SDF gradient arrows)
+        together with the hand mesh.
+        The object is normalized to align the center of mass
+
+        :param obj_templates: list of trimesh objects (one per batch element)
+        :param idx: batch index
+        :param pt_idx: MSDF centre index within the sample
+        :return: list of Open3D geometries
+        """
+        _, obj_mesh, _ = self._load_templates(idx, obj_templates)
+        K = self.cfg.msdf.kernel_size
+        K3 = K ** 3
+        scale = self.cfg.msdf.scale
+
+        # SDF values for this centre: (K, K, K, 1)
+        sdf = self.obj_msdf[idx, pt_idx, :K3].detach().cpu().numpy().reshape(K, K, K, 1)
+        # Contact + CSE: (K, K, K, 1+cse_dim)
+        contact_cse = self.ml_contact[idx, pt_idx].detach().cpu().numpy()  # (K, K, K, 1+cse_dim)
+        # Concatenate SDF as first channel: (K, K, K, 1 + 1 + cse_dim)
+        local_grid = np.concatenate([sdf, contact_cse], axis=-1)
+
+        contact_point = self.obj_msdf[idx, pt_idx, -3:].detach().cpu().numpy()
+        hand_verts = self.hand_verts[idx].detach().cpu().numpy()
+        hand_cse = self.hand_cse.detach().cpu().numpy()
+
+        geoms = visualize_local_grid_with_hand(
+            local_grid, hand_verts, self.closed_hand_faces, hand_cse,
+            K, scale, contact_point=contact_point, obj_mesh=obj_mesh)
+
+        # Add SDF gradient arrows at each grid point
+        grad = self.msdf_grad[idx, pt_idx].detach().cpu().numpy()  # (K^3, 3)
+        sdf_flat = sdf.flatten()  # (K^3,)
+
+        # Compute grid point positions
+        indices = np.array([(i, j, k) for i in range(K)
+                            for j in range(K)
+                            for k in range(K)])
+        coords = (2 * indices - (K - 1)) / (K - 1)
+        grid_points = contact_point[None, :] + coords * scale
+
+        for i in range(K3):
+            direction = grad[i]
+            norm = np.linalg.norm(direction)
+            if norm < 1e-6:
+                continue
+            # Color: blue (inside) -> red (outside), matching SDF coloring
+            if sdf_flat[i] < 0:
+                color = [0.2, 0.2, 1.0]
+            else:
+                color = [1.0, 0.2, 0.2]
+            arrow = o3d_arrow(grid_points[i], direction, color=color, scale=scale * 0.5)
+            geoms.append(arrow)
+
+        return geoms
+
+    def vis_recon_hand_w_object(self, obj_templates, handcse, idx=0, mask_th=0.02, h=500, w=500):
+        """
+        Reconstruct hand vertices from ml_contact via recover_hand_verts_from_contact,
+        then visualize the masked reconstructed hand with the object mesh.
+
+        :param obj_templates: list of trimesh objects (one per batch element)
+        :param handcse: HandCSE module instance
+        :param idx: batch index
+        :param mask_th: threshold for vertex mask in recover_hand_verts_from_contact
+        :return: (img, vis_geoms)
+        """
+        _, obj_mesh, _ = self._load_templates(idx, obj_templates)
+
+        K = self.cfg.msdf.kernel_size
+        K3 = K ** 3
+        scale = self.cfg.msdf.scale
+        B = self.obj_msdf.shape[0]
+        N = self.obj_msdf.shape[1]
+
+        # Flatten contact and CSE from ml_contact (B, N, K, K, K, 1+cse_dim)
+        grid_contact = self.ml_contact[:, :, :, :, :, 0].reshape(B, N * K3)
+        grid_cse = self.ml_contact[:, :, :, :, :, 1:].reshape(B, N * K3, -1)
+
+        # Compute grid point coordinates
+        centres = self.obj_msdf[:, :, K3:]  # (B, N, 3)
+        grid_coords = centres.unsqueeze(2) + self.normalized_coords[None, None, :, :] * scale
+        grid_coords = grid_coords.reshape(B, N * K3, 3)
+
+        pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
+            handcse, None, grid_contact, grid_cse, grid_coords, mask_th=mask_th)
+
+        hand_verts = pred_hand_verts[idx].detach().cpu().numpy()
+        verts_mask = pred_verts_mask[idx].detach().cpu().numpy()
+        return visualize_recon_hand_w_object(
+            hand_verts, verts_mask, self.closed_hand_faces,
+            obj_mesh, self.hand_part_ids, h=h, w=w)
+
     def load_from_batch_obj_only(self, batch, obj_template=None, obj_hulls=None):
         """
         Load only object-related data from batched data. Used for testing.
@@ -301,11 +574,14 @@ class HandObject:
                 # if self.hand_sides[idx] == 'left':
                 #     flip_x_axis(obj_mesh)
                 obj_mesh.apply_transform(T)
-                obj_mesh.apply_translation(-self.obj_com[i, 0].detach().cpu().numpy())  # Move to zero-centered
-                self.obj_models.append(obj_mesh)
             else:
                 obj_mesh = copy(obj_templates[i])
-                self.obj_models.append(obj_mesh)
+
+            T = np.eye(4)
+            T[:3, :3] = self.augR[i].detach().cpu().numpy()
+            T[:3, 3:4] = -T[:3, :3] @ self.obj_com[i].view(3, 1).detach().cpu().numpy()
+            obj_mesh.apply_transform(T)
+            self.obj_models.append(obj_mesh)
                 
         obj_mesh = self.obj_models[idx]
 
@@ -467,6 +743,9 @@ class HandObject:
 
         # Concatenate vertically (along y axis)
         return ret_img
+    
+
+    ## Grid contact visualizations
 
 
 def recover_hand_verts_from_contact(handcse, gt_face_idx, grid_contact, grid_cse, grid_coords, mask_th=0.01):

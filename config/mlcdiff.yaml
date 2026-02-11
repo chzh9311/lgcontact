@@ -4,7 +4,7 @@ defaults:
   - data: grab_multi_contact
   - ae: gridae_128latent
   - hand_ae: handvae_16latent
-  - generator: dual_ldm
+  - generator: ldm
   - pose_optimizer: hand_ae
 
 training_stage: "generator"
@@ -15,10 +15,11 @@ train:
   lr: 1e-4
   batch_size: 16
   vis_every_n_batches: 500
-  augment: false
+  augment: true
   loss_weights:
     latent_mse: 1.0
-    difference_loss: 0.0
+    # difference_loss: 0.0
+    stable_loss: 0.1
     # contact_loss: 1.0
     # cse_value_loss: 1.0
     # consistency_contact_loss: 5.0
@@ -59,6 +60,12 @@ trainer: ## For instantiating pytorch-lightning Trainer
   # profiler: simple
   # limit_train_batches: 10
   # limit_val_batches: 10
+
+physics:
+  k: 0.2
+  mu: 0.8
+  pene_th: 1e-3 # 1mm
+  eps: 1e-3 # 1mm
 
 run_phase: train
 test_gt: false

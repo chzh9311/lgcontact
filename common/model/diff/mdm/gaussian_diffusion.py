@@ -1231,6 +1231,7 @@ class GaussianDiffusion(nn.Module):
         # grid_ae = kwargs['grid_ae']
         # ms_obj_cond = kwargs['ms_obj_cond']
         # recon_lg_contact = grid_ae.decode(latent, ms_obj_cond)
+
         # msdf_k = kwargs['msdf_k']
         # recon_lg_contact = recon_lg_contact.view(batch_size, n_grids, -1, msdf_k ** 3).permute(0, 1, 3, 2)
         # recon_contact = recon_lg_contact[..., 0] # * grid_contact_mask[:, :, None].float()
@@ -1254,7 +1255,7 @@ class GaussianDiffusion(nn.Module):
         #                                               dist_th=dist_th)
         # terms.update(consistency_loss_dict)
 
-        return terms
+        return terms, model_output
     
 
     def recon_loss(self, recon_contact, recon_cse, gt_contact, gt_cse):

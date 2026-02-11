@@ -22,7 +22,7 @@ from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
 from scipy.spatial.transform import Rotation
 
 from common.manopth.manopth.manolayer import ManoLayer
-from .hoi_dataset import BaseHOIDataset, get_kine_parent, canonical_hand_parts
+from .hoi_dataset import BaseHOIDataset, BaseOnlineHOIDataset, get_kine_parent, canonical_hand_parts
 from .local_grid_dataset import LocalGridDataset
 
 jointsMapManoToSimple = [0,
@@ -133,6 +133,11 @@ class GRABDataset(BaseHOIDataset):
             # sample_pts, fid = sample.sample_surface(mesh, self.n_obj_samples)
             v['samples'] = v.pop('verts_sample')
             v['sample_normals'] = mesh.vertex_normals[v['verts_sample_id']]
+            v['CoM'] = mesh.center_mass
+
+            ## Assume unit density 1kg/cm^3
+            v['mass'] = mesh.mass
+            v['inertia'] = mesh.moment_inertia
 
         if msdf_path is not None:
             adj_point_path = msdf_path.replace('msdf', 'msdf_adj_points')
@@ -140,10 +145,13 @@ class GRABDataset(BaseHOIDataset):
                 if os.path.exists(osp.join(msdf_path, f'{k}.npz')):
                     msdf_data = np.load(osp.join(msdf_path, f'{k}.npz'))
                     v['msdf'] = msdf_data['msdf']
+                    if 'msdf_grad' in msdf_data:
+                        v['msdf_grad'] = msdf_data['msdf_grad']
                 if os.path.exists(osp.join(adj_point_path, f'{k}.npz')):
                     adj_data = np.load(osp.join(adj_point_path, f'{k}.npz'))
                     v['adj_indices'] = adj_data['indices']
                     v['adj_distances'] = adj_data['distances']
+                    v['n_adj_points'] = adj_data['n_adj_points']
         return obj_info
 
     def _load_data(self):

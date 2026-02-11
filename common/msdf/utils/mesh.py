@@ -1,8 +1,6 @@
 import trimesh
 from trimesh import Trimesh, Scene
 import numpy as np
-import point_cloud_utils as pcu
-
 
 def normalize_mesh(mesh: Trimesh) -> Trimesh:
     """
@@ -33,11 +31,24 @@ def load_mesh(file_path: str) -> Trimesh:
 
 def farthest_point_sampling(points, num_samples):
     """
-    Simple implementation of the Farthest Point Sampling algorithm.
+    Farthest Point Sampling: iteratively select the point that is farthest
+    from the already-selected set.
     points: numpy array of shape (N, 3)
     num_samples: the number of points to sample
     """
-    sampled_indices = pcu.downsample_point_cloud_poisson_disk(points, radius=0.01, target_num_samples=int(num_samples * 1.2))
-    replace = len(sampled_indices) < num_samples
-    sampled_indices = np.random.choice(sampled_indices, num_samples, replace=replace)
-    return points[sampled_indices]
+    N = points.shape[0]
+    if num_samples >= N:
+        return points.copy()
+
+    selected = np.zeros(num_samples, dtype=np.int64)
+    # Start from a random point
+    selected[0] = np.random.randint(N)
+    # min_dist[i] = min distance from points[i] to any selected point so far
+    min_dist = np.full(N, np.inf)
+
+    for i in range(1, num_samples):
+        dist = np.linalg.norm(points - points[selected[i - 1]], axis=1)
+        min_dist = np.minimum(min_dist, dist)
+        selected[i] = np.argmax(min_dist)
+
+    return points[selected]
