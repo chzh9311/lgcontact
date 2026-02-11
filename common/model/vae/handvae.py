@@ -4,6 +4,7 @@ import torch.nn as nn
 from common.model.pointnet_module import PointNetEncoder
 from common.manopth.manopth.manolayer import ManoLayer
 from common.model.handobject import HandObject
+from common.model.hand_ipt_vae.hand_imputation import Linear_ResBlock, MLPPointEncoder
 from pytorch3d.transforms import rotation_6d_to_matrix, matrix_to_axis_angle, axis_angle_to_matrix, matrix_to_rotation_6d
 from common.model.layers import DiagonalGaussianDistribution
 import open3d as o3d
@@ -14,40 +15,53 @@ from .graphAE import Encoder
 class HandVAE(nn.Module):
     def __init__(self, cfg):
         super(HandVAE, self).__init__()
-        self.mano_layer = ManoLayer(mano_root=cfg.mano_root, use_pca=False, flat_hand_mean=True)
+        object.__setattr__(self, 'mano_layer', ManoLayer(mano_root=cfg.mano_root, use_pca=False, flat_hand_mean=True).eval().requires_grad_(False))
         self.hidden_dim = cfg.hidden_dim
         self.latent_dim = cfg.latent_dim
         # Define encoder layers (outputs 2x latent_dim for mean and logvar)
-        self.hand_encoder = PointNetEncoder(
-            channel=cfg.input_channel, hidden_dim=cfg.hidden_dim)
+        # self.hand_encoder = PointNetEncoder(
+        #     channel=cfg.input_channel, hidden_dim=cfg.hidden_dim)
+        self.hand_encoder = MLPPointEncoder(in_channels=cfg.input_channel, hidden_dim=cfg.hidden_dim, feat_dim=cfg.feat_dim)
         
         self.encoder = nn.Sequential(
-            nn.Linear(1024, 512),
-            nn.ReLU(),
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Linear(256, self.latent_dim * 2)
+            Linear_ResBlock(input_size=cfg.feat_dim, output_size=cfg.feat_dim),
+            Linear_ResBlock(input_size=cfg.feat_dim, output_size=cfg.latent_dim * 2)
+        )
+        self.decoder = nn.Sequential(
+            Linear_ResBlock(input_size=cfg.latent_dim, output_size=2 * cfg.latent_dim),
+            Linear_ResBlock(input_size=2 * cfg.latent_dim, output_size=61)
         )
 
-        self.decoder = nn.Sequential(
-            nn.Linear(self.latent_dim, self.hidden_dim),
-            nn.ReLU(),
-            nn.Linear(self.hidden_dim, self.hidden_dim*2),
-            nn.ReLU(),
-            nn.Linear(self.hidden_dim*2, 100)
-        )
+
+        # self.encoder = nn.Sequential(
+        #     nn.Linear(1024, 512),
+        #     nn.ReLU(),
+        #     nn.Linear(512, 256),
+        #     nn.ReLU(),
+        #     nn.Linear(256, self.latent_dim * 2)
+        # )
+
+        # self.decoder = nn.Sequential(
+        #     nn.Linear(self.latent_dim, self.hidden_dim),
+        #     nn.ReLU(),
+        #     nn.Linear(self.hidden_dim, self.hidden_dim*2),
+        #     nn.ReLU(),
+        #     nn.Linear(self.hidden_dim*2, 61)
+        # )
 
     def encode(self, x):
-        _, feat = self.hand_encoder(x)
+        feat = self.hand_encoder(x)
         h = self.encoder(feat)
         posterior = DiagonalGaussianDistribution(h)
         return posterior
 
     def decode(self, z):
+        self.mano_layer.to(z.device)
         recon_param = self.decoder(z)
-        pose = matrix_to_axis_angle(rotation_6d_to_matrix(recon_param[:, :90].view(-1, 15, 6))).view(-1, 15*3)
-        betas = recon_param[:, 90:]
-        handV, handJ, _ = self.mano_layer(torch.cat([torch.zeros(pose.shape[0], 3, device=pose.device), pose], dim=-1), th_betas=betas)
+        trans = self.denormalize_trans(recon_param[:, :3])
+        pose = recon_param[:, 3:51]
+        betas = recon_param[:, 51:]
+        handV, handJ, _ = self.mano_layer(pose, th_betas=betas, th_trans=trans)
         return recon_param, handV, handJ
 
     def forward(self, x):
@@ -61,22 +75,6 @@ class HandVAE(nn.Module):
 
     def denormalize_trans(self, hand_trans):
         return hand_trans * 0.2
-    
-    def hand2latent(self, handV, rot, trans):
-        hand_z = self.encode(handV.permute(0, 2, 1))  # B x hand_latent_dim
-        root_pose = torch.cat([self.normalize_trans(trans), matrix_to_rotation_6d(axis_angle_to_matrix(rot))], dim=-1)  # B x 9
-        hand_latent = torch.cat([root_pose, hand_z.sample()], dim=-1)
-        return hand_latent
-    
-    def latent2hand(self, hand_latent):
-        root_pose, hand_z = hand_latent[:, :9], hand_latent[:, 9:]
-        recon_param = self.decoder(hand_z)
-        pose = matrix_to_axis_angle(rotation_6d_to_matrix(recon_param[:, :90].view(-1, 15, 6))).view(-1, 15*3)
-        betas = recon_param[:, 90:]
-        trans = self.denormalize_trans(root_pose[:, :3])
-        rot = matrix_to_axis_angle(rotation_6d_to_matrix(root_pose[:, 3:])).view(-1, 3)
-        handV, handJ, _ = self.mano_layer(torch.cat([rot, pose], dim=-1), th_betas=betas, th_trans=trans)
-        return handV, handJ
 
 
 ## Adopted from Mesh-VQVAE
@@ -204,15 +202,16 @@ class HandVAETrainer(LightningModule):
         #     torch.cat([torch.zeros(thetas.shape[0], 3, device=self.device), thetas[:, 3:]], dim=-1),
         #     th_betas=betas)
 
-        handobject = HandObject(self.cfg.data, self.device, mano_layer=self.model.mano_layer, normalize=False)
+        handobject = HandObject(self.cfg.data, self.device, mano_layer=self.model.mano_layer, normalize=True)
         handobject.load_from_batch(batch)
         handV_gt = handobject.hand_verts
         handJ_gt = handobject.hand_joints
-        root_j = handobject.cano_joints[:, 0]
-        hand_root_R = axis_angle_to_matrix(handobject.hand_root_rot)
-        hand_trans = handobject.hand_trans
-        nhandV_gt = (handV_gt - root_j.unsqueeze(1) - hand_trans.unsqueeze(1)) @ hand_root_R + root_j.unsqueeze(1)
-        nhandJ_gt = (handJ_gt - root_j.unsqueeze(1) - hand_trans.unsqueeze(1)) @ hand_root_R + root_j.unsqueeze(1)
+        self.model.mano_layer.to(self.device)
+        # root_j = handobject.cano_joints[:, 0]
+        # hand_root_R = axis_angle_to_matrix(handobject.hand_root_rot)
+        # hand_trans = handobject.hand_trans
+        # nhandV_gt = (handV_gt - root_j.unsqueeze(1) - hand_trans.unsqueeze(1)) @ hand_root_R + root_j.unsqueeze(1)
+        # nhandJ_gt = (handJ_gt - root_j.unsqueeze(1) - hand_trans.unsqueeze(1)) @ hand_root_R + root_j.unsqueeze(1)
 
         # Verify that hand_param and handV_gt match
         # if batch_idx == 0:
@@ -229,13 +228,13 @@ class HandVAETrainer(LightningModule):
         #         if vert_diff > 1e-4 or joint_diff > 1e-4:
         #             print(f"[Warning] Hand param and vertices mismatch!")
 
-        recon_param, handV_pred, handJ_pred, posterior = self.model(nhandV_gt.permute(0, 2, 1))
+        recon_param, handV_pred, handJ_pred, posterior = self.model(handV_gt.permute(0, 2, 1))
         # param_loss = self.criterion(recon_param, hand_param) # Ignore the shape param here.
 
         # w_param = self.cfg.train.loss_weights.w_param 
             # print(f"Epoch {self.current_epoch}: Switching to reconstruction + KL loss.")
 
-        recon_loss = self.criterion(handV_pred, nhandV_gt) + self.criterion(handJ_pred, nhandJ_gt)
+        recon_loss = (self.criterion(handV_pred, handV_gt) + self.criterion(handJ_pred, handJ_gt)) / 2
         kld_loss = posterior.kl().mean()
         loss = self.cfg.train.loss_weights.w_recon * recon_loss + self.cfg.train.loss_weights.w_kl * kld_loss
 
@@ -253,7 +252,7 @@ class HandVAETrainer(LightningModule):
 
         if batch_idx % self.cfg[stage].vis_every_n_batches == 0:
             pred_mesh = o3dmesh(handV_pred[0].detach().cpu().numpy(), self.model.mano_layer.th_faces.cpu().numpy(), color=[1, 0, 0])
-            gt_mesh = o3dmesh(nhandV_gt[0].detach().cpu().numpy(), self.model.mano_layer.th_faces.cpu().numpy(), color=[0, 0, 1])
+            gt_mesh = o3dmesh(handV_gt[0].detach().cpu().numpy(), self.model.mano_layer.th_faces.cpu().numpy(), color=[0, 0, 1])
             vis_img = geom_to_img([pred_mesh, gt_mesh], w=200, h=200, half_range=0.1)
             if hasattr(self.logger, 'experiment'):
                 if hasattr(self.logger.experiment, 'add_image'):
@@ -289,7 +288,7 @@ class HandVAETrainer(LightningModule):
         # hand_root_R = axis_angle_to_matrix(handobject.hand_root_rot)
         # hand_trans = handobject.hand_trans
         # nhandV = (handV_gt - root_j.unsqueeze(1) - hand_trans.unsqueeze(1)) @ hand_root_R + root_j.unsqueeze(1)
-        recon_param, handV_pred, handJ_pred, posterior = self.model(nhandV_gt.permute(0, 2, 1))
+        recon_param, handV_pred, handJ_pred, posterior = self.model(handV_gt.permute(0, 2, 1))
         recon_error = torch.norm(handV_pred - nhandV_gt, dim=-1).mean(dim=-1)  # B
         self.recon_err_list.append(recon_error.detach().cpu().numpy())
     

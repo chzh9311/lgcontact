@@ -766,7 +766,7 @@ def create_bbox_geomtries(msdf_center, grid_scale, contact=None, alpha=0.3):
     return bbox_geometries
 
 
-def visualize_recon_hand_w_object(hand_verts, hand_verts_mask, hand_faces, obj_mesh, part_ids, msdf_center, grid_scale, h=500, w=500):
+def visualize_recon_hand_w_object(hand_verts, hand_verts_mask, hand_faces, obj_mesh, part_ids, msdf_center=None, grid_scale=None, h=500, w=500):
     masked_hand_geometries = extract_masked_mesh_components(
         hand_verts=hand_verts,
         hand_faces=hand_faces,

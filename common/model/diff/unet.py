@@ -154,13 +154,14 @@ class DualUNetModel(nn.Module):
         self.transformer_dropout = cfg.transformer_dropout
         self.transformer_depth = cfg.transformer_depth
         self.transformer_mult_ff = cfg.transformer_mult_ff
+        self.n_timesteps = cfg.n_timesteps
         self.context_dim = cfg.context_dim
         self.obj_feat_dim = cfg.obj_feat_dim
         self.use_position_embedding = cfg.use_position_embedding # for input sequence x
-
         ## create scene model from config
         # self.scene_model = create_scene_model(cfg.scene_model.name, **scene_model_args)
         self.obj_feat_net = Pointnet_feat_net(**cfg.obj_encoder)
+        self.global2local_fn = None
 
         time_embed_dim = self.d_model * cfg.time_embed_mult
         self.time_embed = nn.Sequential(
@@ -226,17 +227,20 @@ class DualUNetModel(nn.Module):
         )
 
 
-    def forward(self, x_t: torch.Tensor,  ts: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_t: torch.Tensor,  ts: torch.Tensor, cond: Dict) -> torch.Tensor:
         """ Apply the model to an input batch
 
         Args:
             x_t: the input latent, <B, C_global+C_local>
             ts: timestep, 1-D batch of timesteps
-            cond: condition feature
-        
+            cond: condition dict with 'obj_feat' and optionally 'obj_msdf'
+
         Return:
             the denoised target data, i.e., $x_{t-1}$
         """
+        obj_feat = cond['obj_feat']
+        obj_msdf = cond.get('obj_msdf', None)
+
         y_t, x_t = torch.split(x_t, [self.d_y, self.d_x * self.n_pts], dim=-1)
         x_t = x_t.view(y_t.shape[0], self.n_pts, self.d_x)
         x_in_shape = len(x_t.shape)
@@ -259,15 +263,8 @@ class DualUNetModel(nn.Module):
         h_global = self.global_in_layers(h_global) # <B, d_model, L>
         # print(h.shape, cond.shape) # <B, d_model, L>, <B, T , c_dim>
 
-        ## prepare position embedding for input x
-        if self.use_position_embedding:
-            B, DX, TX = h.shape
-            pos_Q = torch.arange(TX, dtype=h_local.dtype, device=h_local.device)
-            pos_embedding_Q = timestep_embedding(pos_Q, DX) # <L, d_model>
-            h_local = h_local + pos_embedding_Q.permute(1, 0) # <B, d_model, L>
-
         for i in range(self.nblocks):
-            h_local = self.local_layers[i](h_local, t_emb, cond)
+            h_local = self.local_layers[i](h_local, t_emb, obj_feat)
             h_global = self.global_layers[i](h_global, t_emb)
             h_local, h_global = self.cross_layers[i](x=h_local, y=h_global)
         h_local = self.local_out_layers(h_local)
@@ -281,23 +278,33 @@ class DualUNetModel(nn.Module):
 
         if y_in_shape == 2:
             h_global = h_global.squeeze(1)
-        
-        x_ret = torch.cat([h_global, h_local.reshape(h_local.shape[0], self.n_pts * self.d_x)], dim=-1)
-        return x_ret
 
-    def condition(self, data: Dict) -> torch.Tensor:
+        difference_loss = torch.tensor(0.0, device=h_local.device)
+        if self.global2local_fn is not None:
+            recon_local = self.global2local_fn(h_global, obj_msdf) # <B, N, d_x>
+            # w = (ts / (self.n_timesteps - 1)).view(-1, 1, 1)
+            ## Gradually fuze the global info back to local.
+            ## t=0: only reconstructed; t=999: only diffused
+            h_local = (h_local + recon_local) / 2
+            difference_loss = F.mse_loss(h_local, recon_local)
+
+        x_ret = torch.cat([h_global, h_local.reshape(h_local.shape[0], self.n_pts * self.d_x)], dim=-1)
+        return x_ret, difference_loss
+
+    def condition(self, data: Dict) -> Dict:
         """ Obtain scene feature with scene model
 
         Args:
             data: dataloader-provided data
 
         Return:
-            Condition feature
+            Condition dict with 'obj_feat' and optionally 'obj_msdf'
         """
-        b = data['obj_pc'].shape[0]
         pc = data['obj_pc'].to(torch.float32)
         local_obj_feat, glob_obj_feat = self.obj_feat_net(pc)
-        # obj_feat = torch.cat([local_obj_feat, glob_obj_feat.unsqueeze(2).repeat(1, 1, local_obj_feat.shape[2])], dim=1)
         obj_feat = torch.cat([local_obj_feat, glob_obj_feat.unsqueeze(2).repeat(1, 1, local_obj_feat.shape[2])], dim=1)
 
-        return obj_feat
+        cond = {'obj_feat': obj_feat}
+        if 'obj_msdf' in data:
+            cond['obj_msdf'] = data['obj_msdf']
+        return cond

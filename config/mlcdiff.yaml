@@ -3,8 +3,8 @@ defaults:
   - msdf: sparse
   - data: grab_multi_contact
   - ae: gridae_128latent
-  - hand_ae: hand_imputation_vae
-  - generator: ldm
+  - hand_ae: handvae_16latent
+  - generator: dual_ldm
   - pose_optimizer: hand_ae
 
 training_stage: "generator"
@@ -15,13 +15,14 @@ train:
   lr: 1e-4
   batch_size: 16
   vis_every_n_batches: 500
-  augment: true
+  augment: false
   loss_weights:
     latent_mse: 1.0
+    difference_loss: 0.0
     # contact_loss: 1.0
     # cse_value_loss: 1.0
-    consistency_contact_loss: 5.0
-    consistency_cse_loss: 1.0
+    # consistency_contact_loss: 5.0
+    # consistency_cse_loss: 1.0
   
   resume_ckpt: null # logs/checkpoints/mlcdiff/clean_pred/v1/last.ckpt
 
@@ -35,7 +36,7 @@ checkpoint:
 
 test:
   n_processes: 20
-  n_samples: 20
+  n_samples: 1
   batch_size: ${test.n_samples}
   base_criteria:
     - "Simulation Displacement"
@@ -62,6 +63,7 @@ trainer: ## For instantiating pytorch-lightning Trainer
 run_phase: train
 test_gt: false
 ckpt_path: logs/checkpoints/mlcdiff/clean_pred/v2-aug/best.ckpt
+optimizer: adamw
 
 debug: true
 

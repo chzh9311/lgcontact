@@ -1,7 +1,0 @@
-name: recon_vae_64latent
-input_channel: 3
-latent_dim: 64
-hidden_dim: 64
-mano_root: ${data.mano_root}
-
-pretrained_weight: logs/checkpoints/handvae/64latent/best.ckpt

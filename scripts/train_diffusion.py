@@ -11,8 +11,8 @@ from common.dataset_utils.datamodules import HOIDatasetModule
 import common.model.diff.mdm.gaussian_diffusion as mdm_gd
 from common.model.diff.unet import UNetModel, DualUNetModel
 from common.model.gridae.gridae import GRIDAE
-# from common.model.vae.handvae import HandVAE
-from common.model.hand_ipt_vae.hand_imputation import HandImputationVAE
+from common.model.vae.handvae import HandVAE
+# from common.model.hand_ipt_vae.hand_imputation import HandImputationVAE
 from common.model.lgcdifftrainer import LGCDiffTrainer
 from common.model.graspdifftrainer import GraspDiffTrainer
 from common.utils.misc import set_seed, load_pl_ckpt
@@ -35,18 +35,10 @@ def main(cfg):
     # model = getattr(generator_module, cfg.generator.model_name.upper())(cfg)
     # MDM GaussianDiffusion
     mdm_cfg = cfg.generator.mdm
-    diffusion = mdm_gd.GaussianDiffusion(
-        timesteps=mdm_cfg.timesteps,
-        schedule_cfg=mdm_cfg.schedule_cfg,
-        model_mean_type=mdm_gd.ModelMeanType[mdm_cfg.model_mean_type.upper()],
-        model_var_type=mdm_gd.ModelVarType[mdm_cfg.model_var_type.upper()],
-        rand_t_type=mdm_cfg.rand_t_type,
-        rescale_timesteps=mdm_cfg.rescale_timesteps,
-        msdf_cfg=cfg.msdf)
     # DDPM (the base version of diffusion)
     # diffusion1 = DDPM(cfg.generator.ddpm)
     gridae = GRIDAE(cfg.ae, obj_1d_feat=True)
-    hand_ae = HandImputationVAE(**cfg.hand_ae)
+    hand_ae = HandVAE(cfg.hand_ae)
     # sd = torch.load(cfg.hand_ae.pretrained_weight, map_location='cpu', weights_only=True)['state_dict']
     # load_pl_ckpt(hand_ae, sd, prefix='model.')
     
@@ -85,10 +77,23 @@ def main(cfg):
     # Start training
     if cfg.generator.model_name == 'dual_latent_diffusion':
         trainer_module = GraspDiffTrainer
-        model = DualUNetModel(cfg.generator.unet)
+        model_class = DualUNetModel
+        diffusion_class = mdm_gd.DualGaussianDiffusion
     else:
         trainer_module = LGCDiffTrainer
-        model = UNetModel(cfg.generator.unet)
+        model_class = UNetModel
+        diffusion_class = mdm_gd.GaussianDiffusion
+    
+    model = model_class(cfg.generator.unet)
+    diffusion = diffusion_class(
+        timesteps=mdm_cfg.timesteps,
+        schedule_cfg=mdm_cfg.schedule_cfg,
+        model_mean_type=mdm_gd.ModelMeanType[mdm_cfg.model_mean_type.upper()],
+        model_var_type=mdm_gd.ModelVarType[mdm_cfg.model_var_type.upper()],
+        rand_t_type=mdm_cfg.rand_t_type,
+        rescale_timesteps=mdm_cfg.rescale_timesteps,
+        msdf_cfg=cfg.msdf)
+
     if cfg.run_phase == 'train':
         pl_model = trainer_module(grid_ae=gridae, model=model, diffusion=diffusion, hand_ae=hand_ae, cfg=cfg)
         trainer.fit(pl_model, datamodule=data_module, ckpt_path=cfg.train.get('resume_ckpt', None))

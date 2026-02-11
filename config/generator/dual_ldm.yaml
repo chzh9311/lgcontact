@@ -6,7 +6,7 @@ ae_pretrained_weight: ${ae.pretrained_weight}
 unet:
   # d_x: ${add:1,${ae.feat_dim}} # contact (1) + latent feat (${ae.feat_dim})
   d_x: ${ae.feat_dim} # latent feat (${ae.feat_dim})
-  d_y: ${add:9,${hand_ae.latent_dim}} # hand root pose (9) + hand latent (${ae.hand_latent_dim})
+  d_y: ${hand_ae.latent_dim} # hand latent (${ae.hand_latent_dim})
   n_pts: ${msdf.num_grids}
   d_model: 512
   time_embed_mult: 2
@@ -20,6 +20,7 @@ unet:
   context_dim: 512
   use_position_embedding: false # for input x
   obj_feat_dim: ${add:1024,${generator.unet.context_dim}}  # pointfeat(1024) + obj_feat(${ae.obj_feat_dim})
+  n_timesteps: ${generator.diffusion.timesteps}
   obj_encoder:
     in_dim: ${add:3,${ae.obj_feat_dim}}
     hidden_dim: 256

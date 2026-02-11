@@ -28,12 +28,12 @@ def main(cfg):
         logger = TensorBoardLogger(save_dir='logs/tb_logs')
     else:
         import wandb
-        logger = WandbLogger(name=cfg.ae.name+'-'+t.strftime('%Y%m%d-%H%M%S'),
+        logger = WandbLogger(name=cfg.hand_ae.name+'-'+t.strftime('%Y%m%d-%H%M%S'),
                                     project='LG3DContact',
                                     log_model=True, save_dir='logs/wandb_logs')
 
     # Initialize the model, data module, and trainer
-    model = HandVAE(cfg.handvae)
+    model = HandVAE(cfg.hand_ae)
     checkpoint_callback = ModelCheckpoint(
         monitor='val/total_loss',
         dirpath=cfg.checkpoint.dirpath,

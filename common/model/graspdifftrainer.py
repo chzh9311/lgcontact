@@ -16,6 +16,7 @@ from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_rotation_6d
 from .lgcdifftrainer import LGCDiffTrainer
 from common.model.handobject import HandObject
 from common.utils.vis import o3dmesh, o3dmesh_from_trimesh, geom_to_img
+from common.msdf.utils.msdf import get_grid, calc_local_grid_all_pts_gpu
 from einops import rearrange
 
 
@@ -28,6 +29,56 @@ class GraspDiffTrainer(LGCDiffTrainer):
         self.hand_ae = hand_ae
         if cfg.run_phase == 'train':
             self._load_pretrained_weights(cfg.hand_ae.get('pretrained_weight', None), target_prefix='hand_ae')
+        
+        def global2local(hand_latent, grid_centers):
+            return self._global2local(hand_latent, grid_centers)
+        
+        object.__setattr__(self.model, 'global2local_fn', global2local)
+    
+    def _global2local(self, hand_latent, obj_msdf):
+        _, handV, handJ = self.hand_ae.decode(hand_latent)
+        hand_faces = self.mano_layer.th_faces
+
+        batch_size, n_grids, _ = obj_msdf.shape
+        k = self.cfg.msdf.kernel_size
+        grid_centers = obj_msdf[:, :, k**3:]
+        grid_msdf = rearrange(obj_msdf[:, :, :k**3], 'b n (k1 k2 k3) -> (b n) 1 k1 k2 k3', k1=k, k2=k, k3=k)
+        proj_lg_contact = torch.zeros(batch_size, k**3 * grid_centers.shape[1]).to(self.device)  # (B, N*K^3)
+        proj_lg_cse = torch.zeros(batch_size, k**3 * grid_centers.shape[1], self.cse_dim).to(self.device)  # (B, N*K^3, cse_dim)
+
+        for b in range(batch_size):
+            grid_distance, verts_mask_b, grid_mask, ho_dist, nn_face_idx, nn_point = calc_local_grid_all_pts_gpu(
+                contact_points=grid_centers[b],  # (N, 3)
+                normalized_coords=self.normalized_grid_coords.view(-1, 3).to(self.device),  # (K^3, 3)
+                hand_verts=handV[b],
+                faces=hand_faces,
+                kernel_size=k,
+                grid_scale=self.cfg.msdf.scale,
+            )
+
+            if grid_mask.any():
+                nn_face_idx_flat = nn_face_idx.reshape(-1)
+                nn_point_flat = nn_point.reshape(-1, 3)
+
+                nn_vert_idx = hand_faces[nn_face_idx_flat]
+                face_verts = handV[b, nn_vert_idx]
+                face_cse = self.hand_cse.vert2emb(nn_vert_idx)
+
+                w = torch.linalg.inv(face_verts.transpose(1, 2)) @ nn_point_flat.unsqueeze(-1)
+                w = torch.clamp(w, 0, 1)
+                w = w / (torch.sum(w, dim=1, keepdim=True) + 1e-8)
+
+                grid_hand_cse = torch.sum(face_cse * w, dim=1)
+
+                flat_mask = grid_mask.unsqueeze(1).expand(-1, k ** 3).reshape(-1)
+                proj_lg_contact[b, flat_mask] = self.grid_dist_to_contact(grid_distance.reshape(-1))
+                proj_lg_cse[b, flat_mask] = grid_hand_cse
+        
+        proj_lg = torch.cat([proj_lg_contact.unsqueeze(-1), proj_lg_cse], dim=-1) # (B, N*K^3, 1+cse_dim)
+        proj_lg = rearrange(proj_lg, 'b (n k1 k2 k3) c -> (b n) c k1 k2 k3', k1=k, k2=k, k3=k)
+        posterior, _, _ = self.grid_ae.encode(proj_lg, grid_msdf)
+        local_latent = posterior.sample().view(batch_size, n_grids, -1) # (B, N, latent_dim)
+        return local_latent
     
     def on_fit_start(self):
         # Set grid_ae BatchNorm layers to eval mode to prevent running stats drift
@@ -43,6 +94,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
         print(f"Set {bn_count} BatchNorm layers to eval mode (prevents running stats drift)")
     
     def train_val_step(self, batch, batch_idx, stage):
+        self.mano_layer.to(self.device)
         self.grid_coords = self.grid_coords.view(-1, 3).to(self.device)
         handobject = HandObject(self.cfg.data, self.device, mano_layer=self.mano_layer)
         handobject.load_from_batch(batch, pool=self.pool)
@@ -59,7 +111,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
         # z = torch.cat([n_ho_dist.unsqueeze(-1), posterior.sample().view(batch_size, n_grids, -1)], dim=-1) # n_dim + 1
         gt_contact_latent = posterior.sample().view(batch_size, n_grids, -1) # n_dim
         obj_pc = torch.cat([obj_msdf_center, obj_feat.view(batch_size, n_grids, -1)], dim=-1)
-        gt_hand_latent = self.hand_ae.hand2latent(handobject.hand_verts, handobject.hand_root_rot, handobject.hand_trans) # B x hand_latent_dim
+        gt_hand_latent = self.hand_ae.encode(handobject.hand_verts.permute(0, 2, 1)).sample()
 
         ## Debug the hand data
         # sbj_id = batch['sbjId'][0]
@@ -75,7 +127,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
         # mano_param_vec = torch.cat([mano_param_vec, betas], dim=-1) # B x 109
         cat_latent = torch.cat([gt_hand_latent, gt_contact_latent.view(batch_size, -1)], dim=-1) # B x (n_grids*n_dim + hand_latent_dim)
 
-        input_data = {'x': cat_latent, 'obj_pc': obj_pc.permute(0, 2, 1)}
+        input_data = {'x': cat_latent, 'obj_pc': obj_pc.permute(0, 2, 1), 'obj_msdf': handobject.obj_msdf}
 
         # Check for NaN in input data
         for key, value in input_data.items():
@@ -102,31 +154,29 @@ class GraspDiffTrainer(LGCDiffTrainer):
             self.log_dict(loss_dict, prog_bar=True, sync_dist=True)
 
         if batch_idx % self.cfg[stage].vis_every_n_batches == 0:
-            condition = self.model.condition({'obj_pc': input_data['obj_pc']})
-            samples = self.diffusion.p_sample_loop(self.model, input_data['x'].shape, condition, clip_denoised=False)
-            # samples = self.diffusion.p_sample_loop(self.model, input_data['x'].shape, input_data['obj_pc'])
             vis_idx = 0
+            vis_data = {k: v[vis_idx:vis_idx+1] for k, v in input_data.items()}
+            condition = self.model.condition(vis_data)
+            samples = self.diffusion.p_sample_loop(self.model, vis_data['x'].shape, condition, clip_denoised=False, progress=True)
             simp_obj_mesh = getattr(self.trainer.datamodule, f'{stage}_set').simp_obj_mesh
             rot = batch['aug_rot'][vis_idx].cpu().numpy() if 'aug_rot' in batch else np.eye(3)
             obj_templates = [trimesh.Trimesh(simp_obj_mesh[name]['verts'] @ rot.T, simp_obj_mesh[name]['faces'])
                             for i, name in enumerate(batch['objName'])]
-            # sample_latent = samples[:, 0] ## 1 + latent
-            hand_latent, grid_latent = samples[:, :self.cfg.generator.unet.d_y], samples[:, self.cfg.generator.unet.d_y:].view(batch_size, n_grids, -1) ## latent
-            # grid_contact, sample_latent = sample_x[:, :, 0], sample_x[:, :, 1:]
-            # grid_contact = grid_contact < 0
-            pred_hand_verts, pred_verts_mask, pred_grid_contact = self.reconstruct_from_latent(grid_latent, multi_scale_obj_cond, obj_msdf_center)
+            hand_latent, grid_latent = samples[:, :self.cfg.generator.unet.d_y], samples[:, self.cfg.generator.unet.d_y:].view(1, n_grids, -1)
 
-            gt_rec_hand_verts, gt_rec_verts_mask, gt_rec_grid_contact = self.reconstruct_from_latent(gt_contact_latent, multi_scale_obj_cond, obj_msdf_center)
+            vis_ms_obj_cond = [c[vis_idx*n_grids:(vis_idx+1)*n_grids] for c in multi_scale_obj_cond]
+            vis_obj_msdf_center = obj_msdf_center[vis_idx:vis_idx+1]
+
+            pred_hand_verts, pred_verts_mask, pred_grid_contact = self.reconstruct_from_latent(grid_latent, vis_ms_obj_cond, vis_obj_msdf_center)
+            gt_rec_hand_verts, gt_rec_verts_mask, gt_rec_grid_contact = self.reconstruct_from_latent(gt_contact_latent[vis_idx:vis_idx+1], vis_ms_obj_cond, vis_obj_msdf_center)
 
             contact_img = self._visualize_contact_comparison(
-                obj_msdf_center, pred_grid_contact, gt_rec_grid_contact, handobject, obj_templates, vis_idx)
+                vis_obj_msdf_center, pred_grid_contact, gt_rec_grid_contact, handobject, obj_templates, vis_idx)
             img = self._visualize_hand_comparison(
                 pred_hand_verts, pred_verts_mask, gt_rec_hand_verts, gt_rec_verts_mask,
-                handobject, obj_templates, obj_msdf_center, rot, vis_idx)
-            # plt.imsave(f'tmp/contact_vis_{batch_idx}.png', contact_img)
-            # plt.imsave(f'tmp/rec_img_{batch_idx}.png', img)
-            recon_handV, recon_handJ = self.hand_ae.latent2hand(hand_latent)
-            full_hand_img = self.visualize_full_hand_comparison(recon_handV[vis_idx], handobject.hand_verts[vis_idx], obj_templates[vis_idx])
+                handobject, obj_templates, vis_obj_msdf_center, rot, vis_idx)
+            _, recon_handV, recon_handJ = self.hand_ae.decode(hand_latent)
+            full_hand_img = self.visualize_full_hand_comparison(recon_handV[0], handobject.hand_verts[vis_idx], obj_templates[vis_idx])
 
             if hasattr(self.logger, 'experiment'):
                 if hasattr(self.logger.experiment, 'add_image'):

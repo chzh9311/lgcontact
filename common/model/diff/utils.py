@@ -419,8 +419,6 @@ class DualSpatialTransformer(nn.Module):
         return x + x_in, y + y_in
 
 
-
-
 if __name__ == '__main__':
     st = SpatialTransformer(256, 8, 64, 6, context_dim=768)
     print(st)

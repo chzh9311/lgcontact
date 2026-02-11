@@ -1471,3 +1471,69 @@ class DualGaussianDiffusion(GaussianDiffusion):
             rand_t_type=rand_t_type,
             msdf_cfg=msdf_cfg,
             )
+
+    def training_losses(self, model, data, **kwargs):
+        x_start = data['x']
+        B = x_start.shape[0]
+        device = x_start.device
+
+        if self.rand_t_type == 'all':
+            ts = torch.randint(0, self.num_timesteps, (B, ), device=device).long()
+        elif self.rand_t_type == 'half':
+            ts = torch.randint(0, self.num_timesteps, ((B + 1) // 2, ), device=device)
+            if B % 2 == 1:
+                ts = torch.cat([ts, self.num_timesteps - ts[:-1] - 1], dim=0).long()
+            else:
+                ts = torch.cat([ts, self.num_timesteps - ts - 1], dim=0).long()
+        else:
+            raise Exception('Unsupported rand ts type.')
+
+        noise = th.randn_like(x_start)
+        x_t = self.q_sample(x_start, ts, noise=noise)
+
+        terms = {}
+
+        condition = model.condition(data)
+        model_output, difference_loss = model(x_t, self._scale_timesteps(ts), condition)
+
+        target = {
+            ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
+                x_start=x_start, x_t=x_t, t=ts
+            )[0],
+            ModelMeanType.START_X: x_start,
+            ModelMeanType.EPSILON: noise,
+        }[self.model_mean_type]
+        assert model_output.shape == target.shape == x_start.shape
+
+        terms["latent_mse"] = F.mse_loss(model_output, target, reduction="mean")
+        terms["difference_loss"] = difference_loss
+
+        return terms
+
+    def p_mean_variance(
+        self, model, x, t, condition=None, clip_denoised=True, denoised_fn=None, model_kwargs=None
+    ):
+        # Wrap model to discard the extra difference_loss during sampling
+        class _UnpackWrapper:
+            def __init__(self, m):
+                self._model = m
+            def __call__(self, *args, **kwargs):
+                output, _loss = self._model(*args, **kwargs)
+                return output
+            def __getattr__(self, name):
+                return getattr(self._model, name)
+
+        return super().p_mean_variance(
+            _UnpackWrapper(model), x, t,
+            condition=condition, clip_denoised=clip_denoised,
+            denoised_fn=denoised_fn, model_kwargs=model_kwargs,
+        )
+
+    def sample(self, model, input_data, k, proj_fn=None, progress=False):
+        shape = input_data['x'].shape
+        condition = model.condition(input_data)
+        # Repeat each tensor in the condition dict k times for k samples
+        condition_k = {key: v.repeat(k, *([1] * (v.dim() - 1))) for key, v in condition.items()}
+        result = self.p_sample_loop(model, shape, condition_k, noise=input_data['x'],
+                                    clip_denoised=False, proj_fn=proj_fn, progress=progress)
+        return result

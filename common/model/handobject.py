@@ -240,7 +240,7 @@ class HandObject:
         R = axis_angle_to_matrix(self.hand_root_rot)
         nhandV = (self.hand_verts - root_j.unsqueeze(1)) @ R + root_j.unsqueeze(1) - self.hand_trans.unsqueeze(1)
         return nhandV
-
+    
     def load_from_batch_obj_only(self, batch, obj_template=None, obj_hulls=None):
         """
         Load only object-related data from batched data. Used for testing.

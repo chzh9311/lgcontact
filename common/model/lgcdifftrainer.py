@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import lightning as L
 import open3d as o3d
 import trimesh
-from copy import copy
+from copy import copy, deepcopy
 import numpy as np
 # from concurrent.futures import ThreadPoolExecutor
 from multiprocessing.pool import Pool
@@ -18,7 +18,8 @@ from common.model.handobject import recover_hand_verts_from_contact
 from common.model.pose_optimizer import optimize_pose_wrt_local_grids
 from common.model.handobject import HandObject, recover_hand_verts_from_contact
 from common.model.hand_cse.hand_cse import HandCSE
-from common.utils.vis import visualize_recon_hand_w_object, visualize_grid_contact
+from common.utils.geometry import GridDistanceToContact
+from common.utils.vis import visualize_recon_hand_w_object, visualize_grid_contact, o3dmesh, o3dmesh_from_trimesh
 from common.msdf.utils.msdf import get_grid, calc_local_grid_all_pts_gpu
 from common.evaluation.eval_fns import calculate_metrics, calc_diversity
 from einops import rearrange
@@ -33,8 +34,8 @@ class LGCDiffTrainer(L.LightningModule):
         super().__init__()
         self.automatic_optimization = False
         self.grid_ae = grid_ae
-        if cfg.pose_optimizer.name == 'hand_ae':
-            self.hand_ae = kwargs.get('hand_ae', None)
+        # if cfg.pose_optimizer.name == 'hand_ae':
+        #     self.hand_ae = kwargs.get('hand_ae', None)
         self.model = model
         self.diffusion = diffusion
         self.cfg = cfg
@@ -43,17 +44,19 @@ class LGCDiffTrainer(L.LightningModule):
         self.msdf_k = cfg.msdf.kernel_size
         self.lr = cfg.train.lr
         self.loss_weights = cfg.train.get('loss_weights', {})
+        self.grid_dist_to_contact = GridDistanceToContact.from_config(cfg.msdf, method=cfg.msdf.contact_method)
 
         ## Load autoencoder pretrained weights (freezing is done in on_fit_start)
         self.pretrained_keys = []
         if cfg.run_phase == 'train':
             self._load_pretrained_weights(cfg.ae.get('pretrained_weight', None), target_prefix='grid_ae')
 
-        if cfg.pose_optimizer.name == 'hand_ae':
-            self._load_pretrained_weights(cfg.hand_ae.get('pretrained_weight', None), target_prefix='hand_ae')
+        # if cfg.pose_optimizer.name == 'hand_ae':
+        #     self._load_pretrained_weights(cfg.hand_ae.get('pretrained_weight', None), target_prefix='hand_ae')
     
-        self.mano_layer = ManoLayer(mano_root=cfg.data.mano_root, side='right',
+        mano_layer = ManoLayer(mano_root=cfg.data.mano_root, side='right',
                                     use_pca=cfg.pose_optimizer.use_pca, ncomps=cfg.pose_optimizer.n_comps, flat_hand_mean=True)
+        object.__setattr__(self, 'mano_layer', mano_layer.eval().requires_grad_(False))
         self.closed_mano_faces = np.load(osp.join('data', 'misc', 'closed_mano_r_faces.npy'))
         cse_ckpt = torch.load(cfg.data.hand_cse_path)
 
@@ -63,7 +66,8 @@ class LGCDiffTrainer(L.LightningModule):
         self.hand_cse = HandCSE(n_verts=778, emb_dim=self.cse_dim, cano_faces=handF.cpu().numpy()).to(self.device)
         self.hand_cse.load_state_dict(cse_ckpt['state_dict'])
         self.hand_cse.eval()
-        self.grid_coords = get_grid(self.cfg.msdf.kernel_size) * self.cfg.msdf.scale  # (K^3, 3)
+        self.normalized_grid_coords = get_grid(self.cfg.msdf.kernel_size)
+        self.grid_coords = self.normalized_grid_coords * self.cfg.msdf.scale  # (K^3, 3)
         self.msdf_scale = self.cfg.msdf.scale
         self.pool = Pool(processes=min(self.cfg.test.batch_size, 16))
 
@@ -184,6 +188,7 @@ class LGCDiffTrainer(L.LightningModule):
         return total_loss
     
     def train_val_step(self, batch, batch_idx, stage):
+        self.mano_layer.to(self.device)
         self.grid_coords = self.grid_coords.view(-1, 3).to(self.device)
         obj_names = batch['objName']
         # simp_obj_mesh = getattr(self.trainer.datamodule, f'train_set').simp_obj_mesh
@@ -205,7 +210,7 @@ class LGCDiffTrainer(L.LightningModule):
         # z = torch.cat([n_ho_dist.unsqueeze(-1), posterior.sample().view(batch_size, n_grids, -1)], dim=-1) # n_dim + 1
         z = posterior.sample().view(batch_size, n_grids, -1) # n_dim
 
-        input_data = {'x': z, 'obj_pc': obj_pc.permute(0, 2, 1)}
+        input_data = {'x': z, 'obj_pc': obj_pc.permute(0, 2, 1), 'obj_msdf': obj_msdf}
 
         # Check for NaN in input data
         for key, value in input_data.items():
@@ -260,7 +265,7 @@ class LGCDiffTrainer(L.LightningModule):
             self.log_dict(loss_dict, prog_bar=True, sync_dist=True)
         ## Also sample and reconstruct
         if batch_idx % self.cfg[stage].vis_every_n_batches == 0:
-            condition = self.model.condition({'obj_pc': input_data['obj_pc']})
+            condition = self.model.condition(input_data)
             samples = self.diffusion.p_sample_loop(self.model, input_data['x'].shape, condition, clip_denoised=False)
             # samples = self.diffusion.p_sample_loop(self.model, input_data['x'].shape, input_data['obj_pc'])
             vis_idx = 0
@@ -482,13 +487,27 @@ class LGCDiffTrainer(L.LightningModule):
             obj_pc = torch.cat([obj_msdf_center, obj_feat.unsqueeze(0)], dim=-1)
 
             ## 'x' only indicates the latent shape; latents are sampled inside the model
-            input_data = {'x': torch.randn(n_samples, n_grids, self.cfg.ae.feat_dim, device=self.device), 'obj_pc': obj_pc.permute(0, 2, 1).to(self.device)}
+            input_data = {'x': torch.randn(n_samples, n_grids, self.cfg.ae.feat_dim, device=self.device), 'obj_pc': obj_pc.permute(0, 2, 1).to(self.device), 'obj_msdf': obj_msdf}
 
             def project_latent(latent):
                 """Closure that captures obj context to project latent through hand mesh."""
-                return self._project_latent(latent, n_grids, obj_msdf, obj_msdf_center, multi_scale_obj_cond)
+                return self._project_latent(latent, n_grids, obj_msdf, obj_msdf_center, multi_scale_obj_cond, obj_mesh=obj_mesh, part_ids=handobject.hand_part_ids)
 
+            self.vis_geoms = []
+            self._proj_step = 0
             samples = self.diffusion.sample(self.model, input_data, k=n_samples, proj_fn=project_latent, progress=True)
+
+            # Visualize hand geometries at every 100 steps along with object
+            if self.vis_geoms:
+                obj_geom = o3dmesh_from_trimesh(obj_mesh, color=[0.7, 0.7, 0.7])
+                all_geoms = []
+                for i, hand_geom in enumerate(self.vis_geoms):
+                    offset = np.array([i * 0.25, 0, 0])
+                    h = deepcopy(hand_geom).translate(offset)
+                    o = deepcopy(obj_geom).translate(offset)
+                    all_geoms.extend([h, o])
+                o3d.visualization.draw_geometries(all_geoms, window_name='Projection Progress (every 100 steps)')
+
             # sample_latent = samples ## B x latent
             latent = samples.reshape(n_samples*n_grids, -1)
             ## repeat the multi-scale obj cond here
@@ -615,7 +634,7 @@ class LGCDiffTrainer(L.LightningModule):
                 # TensorBoardLogger
                 global_step = self.current_epoch * len(eval(f'self.trainer.datamodule.test_dataloader()')) + batch_idx
                 self.logger.experiment.add_image(f'test/Surrounding_hands', recon_img_grid, global_step, dataformats='HWC')
-                self.logger.experiment.add_image(f'test/Sampled_grasp', pred_img_grid, global_step, dataformats='HWC')
+                # self.logger.experiment.add_image(f'test/Sampled_grasp', pred_img_grid, global_step, dataformats='HWC')
             elif hasattr(self.logger.experiment, 'log') and not self.debug:
                 # WandbLogger - add row to table
                 self.test_images_table.add_data(
@@ -632,7 +651,7 @@ class LGCDiffTrainer(L.LightningModule):
 
         return result
     
-    def _project_latent(self, latent, n_grids, obj_msdf, obj_msdf_center, multi_scale_obj_cond):
+    def _project_latent(self, latent, n_grids, obj_msdf, obj_msdf_center, multi_scale_obj_cond, **kwargs):
         """
         Project latent through hand mesh fitting and re-encode.
 
@@ -661,9 +680,14 @@ class LGCDiffTrainer(L.LightningModule):
         grid_coords = grid_coords.reshape(n_samples, -1, 3)  # (B, N*K^3, 3)
 
         # Project through hand mesh
-        proj_contact, proj_cse = self.contact_grid_projection(
-            grid_contact, grid_cse, grid_coords, grid_centers
+        proj_contact, proj_cse, proj_handV = self.contact_grid_projection(
+            grid_contact, grid_cse, grid_coords, grid_centers, **kwargs
         )
+
+        self._proj_step = getattr(self, '_proj_step', 0) + 1
+        if self._proj_step % 100 == 0:
+            hand_geom = o3dmesh(proj_handV[0].detach().cpu().numpy(), self.closed_mano_faces)
+            self.vis_geoms.append(hand_geom)
 
         # Re-encode projected contact grid back to latent
         proj_lg = torch.cat([
@@ -672,10 +696,10 @@ class LGCDiffTrainer(L.LightningModule):
         ], dim=-1)  # (B, N, K^3, C)
         proj_lg = rearrange(proj_lg, 'b n (k1 k2 k3) c -> (b n) c k1 k2 k3', k1=K, k2=K, k3=K)
         posterior, _, _ = self.grid_ae.encode(proj_lg, obj_msdf.repeat(n_samples, 1, 1, 1, 1))
-        proj_latent = posterior.mode().view(n_samples, n_grids, -1)
+        proj_latent = posterior.sample().view(n_samples, n_grids, -1)
         return proj_latent
 
-    def contact_grid_projection(self, grid_contact, grid_cse, grid_coords, grid_centers):
+    def contact_grid_projection(self, grid_contact, grid_cse, grid_coords, grid_centers, **kwargs):
         B = grid_contact.shape[0]
         N_total = grid_contact.shape[1]  # N * K^3
         device = grid_contact.device
@@ -684,7 +708,7 @@ class LGCDiffTrainer(L.LightningModule):
         # --- Filter to contact-active points to speed up emb2Wvert ---
         # emb2Wvert computes cdist (B, n_pts, 1538) which is the bottleneck.
         # By filtering from ~65k to only contact-active points, this becomes tractable.
-        contact_th = 0.03
+        contact_th = 0
         active_mask = grid_contact > contact_th  # (B, N_total)
         n_active_per_sample = active_mask.sum(dim=1)  # (B,)
         max_active = n_active_per_sample.max().item()
@@ -715,6 +739,14 @@ class LGCDiffTrainer(L.LightningModule):
         nrecon_trans, recon_pose, recon_betas = torch.split(recon_param, [3, 48, 10], dim=1)
         recon_trans = nrecon_trans * 0.2
         handV, handJ, _ = self.mano_layer(recon_pose, th_betas=recon_betas, th_trans=recon_trans)
+
+        # _, contact_geoms = visualize_recon_hand_w_object(hand_verts=recon_hand_verts[0].detach().cpu().numpy(),
+        #                             # hand_verts_mask=handobject.hand_vert_mask[vis_idx].detach().cpu().numpy(),
+        #                             hand_verts_mask=recon_verts_mask[0].detach().cpu().numpy(),
+        #                             hand_faces=self.mano_layer.th_faces.detach().cpu().numpy(),
+        #                             obj_mesh=kwargs.get('obj_mesh', None),
+        #                             part_ids=kwargs.get('part_ids', None),
+        #                             h=400, w=400)
 
         ## Project back to contact grid
         hand_faces = self.mano_layer.th_faces
@@ -750,10 +782,11 @@ class LGCDiffTrainer(L.LightningModule):
                 grid_hand_cse = torch.sum(face_cse * w, dim=1)
 
                 flat_mask = grid_mask.unsqueeze(1).expand(-1, K ** 3).reshape(-1)
-                proj_lg_contact[b, flat_mask] = grid_distance.reshape(-1)
+                proj_lg_contact[b, flat_mask] = self.grid_dist_to_contact(grid_distance.reshape(-1))
                 proj_lg_cse[b, flat_mask] = grid_hand_cse
+        
 
-        return proj_lg_contact, proj_lg_cse
+        return proj_lg_contact, proj_lg_cse, handV
 
     def on_test_epoch_end(self):
         final_metrics = {}

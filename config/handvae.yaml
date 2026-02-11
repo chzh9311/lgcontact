@@ -1,7 +1,7 @@
 defaults:
   - msdf: sparse
   - data: grab_multi_contact
-  - handvae: handvae_64latent
+  - hand_ae: handvae_16latent
   - _self_
 
 training_stage: "handvae"
@@ -22,7 +22,7 @@ train:
     w_kl: 0.000001
   vis_every_n_batches: 200
   augment: false
-  resume_ckpt: logs/checkpoints/handvae/64latent-hoi4d/best.ckpt
+  resume_ckpt: null
   # pretrained_ckpt: logs/checkpoints/gridae/128latent/best-epoch=22-val/total_loss=0.0970.ckpt
 
 val:
@@ -35,7 +35,7 @@ test:
   batch_size: ${test.n_samples}
 
 checkpoint:
-  dirpath: logs/checkpoints/handvae/${handvae.latent_dim}latent/
+  dirpath: logs/checkpoints/handvae/${hand_ae.latent_dim}latent/
   filename: best
   save_top_k: 3
 
