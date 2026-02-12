@@ -4,7 +4,7 @@ defaults:
   - data: grab_multi_contact
   - ae: gridae_128latent
   - hand_ae: handvae_16latent
-  - generator: ldm
+  - generator: dual_ldm
   - pose_optimizer: lg_base
 
 training_stage: "generator"
@@ -13,22 +13,23 @@ contact_unit: "grid"
 train:
   optimizer: "adamw"
   lr: 1e-4
-  batch_size: 16
+  batch_size: 32
   vis_every_n_batches: 500
   augment: true
   loss_weights:
     latent_mse: 1.0
-    difference_loss: 1.0
+    difference_loss: 0.1
+    hand_recon_loss: 0.1
     stable_loss: 0.1
     # contact_loss: 1.0
     # cse_value_loss: 1.0
     # consistency_contact_loss: 5.0
     # consistency_cse_loss: 1.0
   
-  resume_ckpt: null # logs/checkpoints/mlcdiff/clean_pred/v1/last.ckpt
+  resume_ckpt: logs/wandb_logs/LG3DContact/dual_diff_epoch1/checkpoints/last.ckpt
 
 val:
-  batch_size: 16
+  batch_size: 32
   vis_every_n_batches: 50
 
 checkpoint:
@@ -57,6 +58,7 @@ trainer: ## For instantiating pytorch-lightning Trainer
   precision: 32
   enable_progress_bar: true
   enable_model_summary: true
+  # gradient_clip_val: 1.0
   # profiler: simple
   # limit_train_batches: 10
   # limit_val_batches: 10

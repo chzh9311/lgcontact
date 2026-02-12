@@ -39,7 +39,7 @@ class HandObject:
         self.hand_pose = None
         self.hand_root_rot = None
         self.hand_trans = None
-        self.obj_verts = None
+        # self.obj_verts = None
         self.contact_map = None
         self.part_map = None
         self.obj_normals = None
@@ -63,14 +63,14 @@ class HandObject:
         new_ho.mano_layer = self.mano_layer
         new_ho.hand_part_ids = copy(self.hand_part_ids)
         new_ho.hand_sides = copy(self.hand_sides)
-        new_ho.obj_verts = copy(self.obj_verts)
+        # new_ho.obj_verts = copy(self.obj_verts)
         new_ho.hand_verts = copy(self.hand_verts)
         new_ho.hand_root_rot = copy(self.hand_root_rot)
         new_ho.hand_pose = copy(self.hand_pose)
         new_ho.hand_trans = copy(self.hand_trans)
         new_ho.contact_map = copy(self.contact_map)
         new_ho.part_map = copy(self.part_map)
-        new_ho.obj_normals = copy(self.obj_normals)
+        # new_ho.obj_normals = copy(self.obj_normals)
         new_ho.hand_joints = copy(self.hand_joints)
         new_ho.hand_models = deepcopy(self.hand_models)
         new_ho.obj_models = deepcopy(self.obj_models)
@@ -102,8 +102,6 @@ class HandObject:
         self.hand_verts = batch['handVerts'].clone().to(self.device).float()
         self.hand_normals = batch['handNormals'].clone().to(self.device).float()
         self.hand_joints = batch['handJoints'].clone().to(self.device).float()
-        self.obj_verts = batch['objSamplePts'].clone().to(self.device).float()
-        self.obj_normals = batch['objSampleNormals'].clone().to(self.device).float()
         self.cano_joints = batch['canoJoints'].clone().to(self.device).float()
         self.batch_size = self.obj_rot.shape[0]
         # handV, handJ = batch['handVerts'].clone().cpu().numpy(), batch['handJoints'][:, :16].clone().cpu().numpy()
@@ -172,11 +170,11 @@ class HandObject:
 
             # Apply inverse transformation objT^-1 to object vertices and normals
             # (they are already transformed when loaded from batch)
-            homo_obj_verts = F.pad(self.obj_verts, (0, 1), 'constant', 1)
-            self.obj_verts = (objT_inv.unsqueeze(1) @ homo_obj_verts.unsqueeze(-1))[:, :, :3, 0]
+            # homo_obj_verts = F.pad(self.obj_verts, (0, 1), 'constant', 1)
+            # self.obj_verts = (objT_inv.unsqueeze(1) @ homo_obj_verts.unsqueeze(-1))[:, :, :3, 0]
 
             # Transform object normals with inverse transformation
-            self.obj_normals = (objT_inv[:, :3, :3].unsqueeze(1) @ self.obj_normals.unsqueeze(-1)).squeeze(-1)
+            # self.obj_normals = (objT_inv[:, :3, :3].unsqueeze(1) @ self.obj_normals.unsqueeze(-1)).squeeze(-1)
 
             # Transform object meshes and convex hulls (canonical -> CoM-centered + augR)
             for i in range(len(self.obj_models)):
@@ -275,7 +273,8 @@ class HandObject:
 
                 # Barycentric weights via matrix inversion
                 face_verts_T = face_verts.transpose(-1, -2)  # (M*K^3, 3, 3)
-                w = torch.linalg.inv(face_verts_T) @ nn_point_flat.unsqueeze(-1)  # (M*K^3, 3, 1)
+                A = face_verts_T + 1e-6 * torch.eye(3, device=face_verts_T.device).unsqueeze(0)
+                w = torch.linalg.solve(A, nn_point_flat.unsqueeze(-1))  # (M*K^3, 3, 1)
                 w = torch.clamp(w, 0, 1)
                 w = w / (w.sum(dim=1, keepdim=True) + 1e-8)  # (M*K^3, 3, 1)
 
@@ -293,6 +292,10 @@ class HandObject:
 
         elif self.contact_unit == 'point':
         ## Calculate contacts
+
+            self.obj_verts = batch['objSamplePts'].clone().to(self.device).float()
+            self.obj_normals = batch['objSampleNormals'].clone().to(self.device).float()
+            self.obj_normals = (objT_inv[:, :3, :3].unsqueeze(1) @ self.obj_normals.unsqueeze(-1)).squeeze(-1)
             obj_cmap, _, nn_idx = calculate_contact_capsule(self.hand_verts, self.hand_normals,
                                                             self.obj_verts, self.obj_normals)
             self.contact_map = obj_cmap.to(self.device).squeeze(-1)
@@ -701,34 +704,34 @@ class HandObject:
         return img
 
 
-    def get_ho_features(self, rot_dim=3):
-        """
-        Obtain data directly used for training.
-        The random rotations only affects the output of this function, not modifying the physics representation.
-        """
+    # def get_ho_features(self, rot_dim=3):
+    #     """
+    #     Obtain data directly used for training.
+    #     The random rotations only affects the output of this function, not modifying the physics representation.
+    #     """
 
-        if self.hand_verts is not None:
-            if rot_dim == 3:
-                hand_pose = self.hand_pose
-                root_rot = self.hand_root_rot
-            elif rot_dim == 4:
-                hand_pose = axis_angle_to_quaternion(self.hand_pose.view(-1, 15, 3)).view(-1, 60)
-                root_rot = axis_angle_to_quaternion(self.hand_root_rot)
-            elif rot_dim == 6:
-                hand_pose = matrix_to_rotation_6d(axis_angle_to_matrix(self.hand_pose.view(-1, 15, 3))).view(-1, 90)
-                root_rot = matrix_to_rotation_6d(axis_angle_to_matrix(self.hand_root_rot))
-            elif rot_dim == 9:
-                hand_pose = axis_angle_to_matrix(self.hand_pose.view(-1, 15, 3)).view(-1, 135)
-                root_rot = axis_angle_to_matrix(self.hand_root_rot).view(-1, 9)
-            else:
-                raise NotImplementedError
+    #     if self.hand_verts is not None:
+    #         if rot_dim == 3:
+    #             hand_pose = self.hand_pose
+    #             root_rot = self.hand_root_rot
+    #         elif rot_dim == 4:
+    #             hand_pose = axis_angle_to_quaternion(self.hand_pose.view(-1, 15, 3)).view(-1, 60)
+    #             root_rot = axis_angle_to_quaternion(self.hand_root_rot)
+    #         elif rot_dim == 6:
+    #             hand_pose = matrix_to_rotation_6d(axis_angle_to_matrix(self.hand_pose.view(-1, 15, 3))).view(-1, 90)
+    #             root_rot = matrix_to_rotation_6d(axis_angle_to_matrix(self.hand_root_rot))
+    #         elif rot_dim == 9:
+    #             hand_pose = axis_angle_to_matrix(self.hand_pose.view(-1, 15, 3)).view(-1, 135)
+    #             root_rot = axis_angle_to_matrix(self.hand_root_rot).view(-1, 9)
+    #         else:
+    #             raise NotImplementedError
 
-            hand_params = {'handVerts': self.hand_verts, 'handPose': hand_pose,
-                           'handTrans': self.hand_trans, 'handRot': root_rot}
-        else:
-            hand_params = None
+    #         hand_params = {'handVerts': self.hand_verts, 'handPose': hand_pose,
+    #                        'handTrans': self.hand_trans, 'handRot': root_rot}
+    #     else:
+    #         hand_params = None
 
-        return self.obj_verts, self.obj_normals, hand_params
+    #     return self.obj_verts, self.obj_normals, hand_params
 
     def vis_img(self, idx:int, h:int=600, w:int=800, draw_maps=False, **kwargs) -> np.ndarray:
         """
@@ -771,6 +774,6 @@ def recover_hand_verts_from_contact(handcse, gt_face_idx, grid_contact, grid_cse
     # verts_mask = torch.sum(targetWverts, dim=1) > 0.01  # (B, 778)
     weight = (targetWverts * grid_contact.unsqueeze(-1)).transpose(-1, -2)  # (B, 778, K^3)
     verts_mask = torch.sum(weight, dim=-1) > mask_th  # (B, 778)
-    weight[verts_mask] = weight[verts_mask] / torch.sum(weight[verts_mask], dim=-1, keepdim=True)
+    weight[verts_mask] = weight[verts_mask] / (torch.sum(weight[verts_mask], dim=-1, keepdim=True) + 1e-8)
     pred_verts = weight @ grid_coords  # (B, 778, 3)
     return pred_verts, verts_mask

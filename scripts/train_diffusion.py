@@ -27,8 +27,8 @@ def main(cfg):
     else:
         set_seed(42)  # default seed
 
-    print("Configuration:")
-    print(OmegaConf.to_yaml(cfg))
+    # print("Configuration:")
+    # print(OmegaConf.to_yaml(cfg))
     
     # Initialize the model, data module, and trainer
     # generator_module = importlib.import_module(f"common.model.{cfg.generator.model_type}.{cfg.generator.model_name}")

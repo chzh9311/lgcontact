@@ -56,6 +56,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
                 faces=hand_faces,
                 kernel_size=k,
                 grid_scale=self.cfg.msdf.scale,
+                apply_grid_mask=True
             )
 
             if grid_mask.any():
@@ -66,7 +67,8 @@ class GraspDiffTrainer(LGCDiffTrainer):
                 face_verts = handV[b, nn_vert_idx]
                 face_cse = self.hand_cse.vert2emb(nn_vert_idx)
 
-                w = torch.linalg.inv(face_verts.transpose(1, 2)) @ nn_point_flat.unsqueeze(-1)
+                A = face_verts.transpose(1, 2) + 1e-6 * torch.eye(3, device=face_verts.device).unsqueeze(0)
+                w = torch.linalg.solve(A, nn_point_flat.unsqueeze(-1))
                 w = torch.clamp(w, 0, 1)
                 w = w / (torch.sum(w, dim=1, keepdim=True) + 1e-8)
 
@@ -132,11 +134,8 @@ class GraspDiffTrainer(LGCDiffTrainer):
         input_data = {'x': cat_latent, 'obj_pc': obj_pc.permute(0, 2, 1), 'obj_msdf': handobject.obj_msdf}
 
         # grid_coords = obj_msdf_center[:, :, None, :] + self.grid_coords.view(-1, 3)[None, None, :, :]  # B x N x K^3 x 3
-        losses = self.diffusion.training_losses(self.model, input_data, grid_ae=self.grid_ae, ms_obj_cond=multi_scale_obj_cond,
-                                              hand_cse=self.hand_cse, msdf_k=self.msdf_k, grid_scale=self.msdf_scale,
-                                              gt_lg_contact=flat_lg_contact,
-                                              adj_pt_indices=batch['adjPointIndices'],
-                                              adj_pt_distances=batch['adjPointDistances'])
+        losses = self.diffusion.training_losses(self.model, input_data,
+                                                hand_ae=self.hand_ae, gt_handV=handobject.hand_verts, gt_handJ=handobject.hand_joints)
         total_loss = sum([losses[k] * self.loss_weights[k] for k in losses.keys()])
         losses['total_loss'] = total_loss
         # grid_loss = F.mse_loss(err[:, :, 0], torch.zeros_like(err[:, :, 0]), reduction='mean')  # only compute loss on n_ho_dist dimension
@@ -174,7 +173,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
                 pred_hand_verts, pred_verts_mask, gt_rec_hand_verts, gt_rec_verts_mask,
                 handobject, vis_obj_msdf_center, rot, vis_idx)
             _, recon_handV, recon_handJ = self.hand_ae.decode(hand_latent)
-            full_hand_img = self.visualize_full_hand_comparison(recon_handV[0], handobject.hand_verts[vis_idx], obj_templates[vis_idx])
+            full_hand_img = self.visualize_full_hand_comparison(recon_handV[vis_idx], handobject.hand_verts[vis_idx], handobject.obj_models[vis_idx])
 
             if hasattr(self.logger, 'experiment'):
                 if hasattr(self.logger.experiment, 'add_image'):

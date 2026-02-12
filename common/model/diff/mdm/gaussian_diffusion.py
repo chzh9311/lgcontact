@@ -1505,6 +1505,11 @@ class DualGaussianDiffusion(GaussianDiffusion):
             ModelMeanType.EPSILON: noise,
         }[self.model_mean_type]
         assert model_output.shape == target.shape == x_start.shape
+        hand_ae = kwargs['hand_ae']
+        pred_latent = model_output[:, :hand_ae.latent_dim]
+        _, recon_handV, recon_handJ = hand_ae.decode(pred_latent)
+        terms["hand_recon_loss"] = (F.mse_loss(recon_handV, kwargs['gt_handV'], reduction="mean") + 
+            F.mse_loss(recon_handJ, kwargs['gt_handJ'], reduction="mean")) / 2 * 1000 ## mm
 
         terms["latent_mse"] = F.mse_loss(model_output, target, reduction="mean")
         terms["difference_loss"] = difference_loss

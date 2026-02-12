@@ -570,7 +570,7 @@ def nn_dist_to_mesh_gpu(points, hand_verts, faces):
     return distances, face_idx, closest_points
 
 
-def calc_local_grid_all_pts_gpu(contact_points, normalized_coords, hand_verts, faces, kernel_size, grid_scale):
+def calc_local_grid_all_pts_gpu(contact_points, normalized_coords, hand_verts, faces, kernel_size, grid_scale, apply_grid_mask=True):
     """
     GPU-accelerated version of calc_local_grid_all_pts using Kaolin.
 
@@ -600,25 +600,36 @@ def calc_local_grid_all_pts_gpu(contact_points, normalized_coords, hand_verts, f
         torch.abs(hand_verts[None, :, :] - contact_points[:, None, :]), dim=-1
     )[0]  # (N, V)
     verts_mask = ho_dist < grid_scale  # (N, V)
-    grid_mask = verts_mask.any(dim=1)  # (N,)
-    M = grid_mask.sum().item()
 
-    if M == 0:
-        K = kernel_size
-        V = hand_verts.shape[0]
-        return (
-            torch.empty(0, K, K, K, 1, device=device),
-            verts_mask,
-            grid_mask,
-            ho_dist,
-            torch.empty(0, K, K, K, dtype=torch.long, device=device),
-            torch.empty(0, K, K, K, 3, device=device),
-        )
+    if apply_grid_mask:
+        grid_mask = verts_mask.any(dim=1)  # (N,)
+        M = grid_mask.sum().item()
 
-    # Build grid points for active contact points
-    grid_points_flat = (
-        contact_points[grid_mask, None, :] + normalized_coords[None, :, :] * grid_scale
-    )  # (M, K^3, 3)
+        if M == 0:
+            K = kernel_size
+            V = hand_verts.shape[0]
+            return (
+                torch.empty(0, K, K, K, 1, device=device),
+                verts_mask,
+                grid_mask,
+                ho_dist,
+                torch.empty(0, K, K, K, dtype=torch.long, device=device),
+                torch.empty(0, K, K, K, 3, device=device),
+            )
+
+        # Build grid points for active contact points
+        grid_points_flat = (
+            contact_points[grid_mask, None, :] + normalized_coords[None, :, :] * grid_scale
+        )  # (M, K^3, 3)
+    else:
+        grid_mask = torch.ones(N, dtype=torch.bool, device=device)  # (N,)
+        M = N
+
+        # Build grid points for all contact points
+        grid_points_flat = (
+            contact_points[:, None, :] + normalized_coords[None, :, :] * grid_scale
+        )  # (M, K^3, 3)
+
     grid_points_all = grid_points_flat.reshape(-1, 3)  # (M * K^3, 3)
 
     # GPU nearest distance using Kaolin
