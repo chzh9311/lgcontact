@@ -295,6 +295,7 @@ class CrossTransformerBlock(nn.Module):
         self.local_ff = FeedForward(local_dim, dropout=dropout, glu=gated_ff, mult=mult_ff)
         self.global_norm1 = nn.LayerNorm(global_dim)
         self.global_norm2 = nn.LayerNorm(global_dim)
+        self.global_norm3 = nn.LayerNorm(global_dim)
         self.local_norm1 = nn.LayerNorm(local_dim)
         self.local_norm2 = nn.LayerNorm(local_dim)
     def forward(self, x, y):
@@ -302,7 +303,7 @@ class CrossTransformerBlock(nn.Module):
         y = self.global_attn(self.global_norm1(y)) + y
         y = self.cross_attn(self.global_norm2(y), context=x) + y
         x = self.local_ff(self.local_norm2(x)) + x
-        y = self.global_ff(self.global_norm2(y)) + y
+        y = self.global_ff(self.global_norm3(y)) + y
         return x, y
 
 

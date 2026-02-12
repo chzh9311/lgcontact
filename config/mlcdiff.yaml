@@ -18,7 +18,7 @@ train:
   augment: true
   loss_weights:
     latent_mse: 1.0
-    # difference_loss: 0.0
+    difference_loss: 1.0
     stable_loss: 0.1
     # contact_loss: 1.0
     # cse_value_loss: 1.0

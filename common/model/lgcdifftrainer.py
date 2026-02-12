@@ -48,10 +48,11 @@ class LGCDiffTrainer(L.LightningModule):
         self.grid_dist_to_contact = GridDistanceToContact.from_config(cfg.msdf, method=cfg.msdf.contact_method)
         self.stable_loss = StableLoss(k=cfg.physics.k, mu=cfg.physics.mu, pene_th=cfg.physics.pene_th, eps=cfg.physics.eps)
 
-        ## Load autoencoder pretrained weights (freezing is done in on_fit_start)
+        ## Load autoencoder pretrained weights and freeze before DDP wrapping
         self.pretrained_keys = []
         if cfg.run_phase == 'train':
             self._load_pretrained_weights(cfg.ae.get('pretrained_weight', None), target_prefix='grid_ae')
+            self._freeze_pretrained_weights()
 
         # if cfg.pose_optimizer.name == 'hand_ae':
         #     self._load_pretrained_weights(cfg.hand_ae.get('pretrained_weight', None), target_prefix='hand_ae')
@@ -67,7 +68,7 @@ class LGCDiffTrainer(L.LightningModule):
         self.cse_dim = cse_ckpt['emb_dim']
         self.hand_cse = HandCSE(n_verts=778, emb_dim=self.cse_dim, cano_faces=handF.cpu().numpy()).to(self.device)
         self.hand_cse.load_state_dict(cse_ckpt['state_dict'])
-        self.hand_cse.eval()
+        self.hand_cse.eval().requires_grad_(False)
         self.normalized_grid_coords = get_grid(self.cfg.msdf.kernel_size)
         self.grid_coords = self.normalized_grid_coords * self.cfg.msdf.scale  # (K^3, 3)
         self.msdf_scale = self.cfg.msdf.scale

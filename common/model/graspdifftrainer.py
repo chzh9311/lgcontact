@@ -29,6 +29,8 @@ class GraspDiffTrainer(LGCDiffTrainer):
         self.hand_ae = hand_ae
         if cfg.run_phase == 'train':
             self._load_pretrained_weights(cfg.hand_ae.get('pretrained_weight', None), target_prefix='hand_ae')
+            self._freeze_pretrained_weights()  # Re-freeze including hand_ae keys before DDP wrapping
+        self.hand_ae.eval().requires_grad_(False)
         
         def global2local(hand_latent, grid_centers):
             return self._global2local(hand_latent, grid_centers)
@@ -73,7 +75,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
                 flat_mask = grid_mask.unsqueeze(1).expand(-1, k ** 3).reshape(-1)
                 proj_lg_contact[b, flat_mask] = self.grid_dist_to_contact(grid_distance.reshape(-1))
                 proj_lg_cse[b, flat_mask] = grid_hand_cse
-        
+
         proj_lg = torch.cat([proj_lg_contact.unsqueeze(-1), proj_lg_cse], dim=-1) # (B, N*K^3, 1+cse_dim)
         proj_lg = rearrange(proj_lg, 'b (n k1 k2 k3) c -> (b n) c k1 k2 k3', k1=k, k2=k, k3=k)
         posterior, _, _ = self.grid_ae.encode(proj_lg, grid_msdf)
@@ -129,11 +131,6 @@ class GraspDiffTrainer(LGCDiffTrainer):
 
         input_data = {'x': cat_latent, 'obj_pc': obj_pc.permute(0, 2, 1), 'obj_msdf': handobject.obj_msdf}
 
-        # Check for NaN in input data
-        for key, value in input_data.items():
-            if torch.isnan(value).any():
-                raise ValueError(f"NaN detected in input_data['{key}'] at batch_idx {batch_idx}")
-
         # grid_coords = obj_msdf_center[:, :, None, :] + self.grid_coords.view(-1, 3)[None, None, :, :]  # B x N x K^3 x 3
         losses = self.diffusion.training_losses(self.model, input_data, grid_ae=self.grid_ae, ms_obj_cond=multi_scale_obj_cond,
                                               hand_cse=self.hand_cse, msdf_k=self.msdf_k, grid_scale=self.msdf_scale,
@@ -153,7 +150,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
         else:
             self.log_dict(loss_dict, prog_bar=True, sync_dist=True)
 
-        if batch_idx % self.cfg[stage].vis_every_n_batches == 0:
+        if batch_idx % self.cfg[stage].vis_every_n_batches == 0 and batch_idx > 0:
             vis_idx = 0
             vis_data = {k: v[vis_idx:vis_idx+1] for k, v in input_data.items()}
             condition = self.model.condition(vis_data)
