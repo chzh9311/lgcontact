@@ -2,6 +2,37 @@
 ## [Unreleased]
 
 
+<a name="v1.1.0"></a>
+## [v1.1.0] - 2026-02-12
+### Bug Fixes
+- Update testing scripts to suit the new HandObject loading pipeline.
+- Minor fixes regarding the weights.
+- Update visualization code for graspDiffTrainer.
+- Update stable loss to mask out small contacts.
+- stable loss enabled.
+- Update hand_translation calculation in HandObject.
+- Implement a safer way to freeze VAE.
+- Fix the dimension mismatch of objtrans.
+- Fix the error in visualization.
+- Update the checkpoint saving and loading scripts.
+
+### Code Synchronization
+- Update checkpoint details.
+- Train using new schedule predictiong x0 again.
+
+### Features
+- Implement stable loss.
+- Trial to integrate hand prior into training & inference.
+- New inference-time latent projection.
+- Implement Hand Imputation VAE.
+- Add ASAM optimizer support & visualization wrapping.
+- HAndVAE training using HOI4D dataset
+- Add data augmentation
+- Add consistency loss and precalculation of point adjacency.
+- New reachability loss.
+- Detecting the difference between GaussianDiffusion and previous DDPM
+
+
 <a name="v1.0.1"></a>
 ## [v1.0.1] - 2026-01-31
 ### Bug Fixes
@@ -69,7 +100,8 @@
 - Enable dumping local grids first.
 
 
-[Unreleased]: /compare/v1.0.1...HEAD
+[Unreleased]: /compare/v1.1.0...HEAD
+[v1.1.0]: /compare/v1.0.1...v1.1.0
 [v1.0.1]: /compare/v1.0.0...v1.0.1
 [v1.0.0]: /compare/v0.2.0...v1.0.0
 [v0.2.0]: /compare/v0.1.1...v0.2.0
