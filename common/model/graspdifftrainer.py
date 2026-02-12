@@ -160,8 +160,9 @@ class GraspDiffTrainer(LGCDiffTrainer):
             samples = self.diffusion.p_sample_loop(self.model, vis_data['x'].shape, condition, clip_denoised=False, progress=True)
             simp_obj_mesh = getattr(self.trainer.datamodule, f'{stage}_set').simp_obj_mesh
             rot = batch['aug_rot'][vis_idx].cpu().numpy() if 'aug_rot' in batch else np.eye(3)
-            obj_templates = [trimesh.Trimesh(simp_obj_mesh[name]['verts'] @ rot.T, simp_obj_mesh[name]['faces'])
+            obj_templates = [trimesh.Trimesh(simp_obj_mesh[name]['verts'], simp_obj_mesh[name]['faces'])
                             for i, name in enumerate(batch['objName'])]
+            handobject._load_templates(idx=vis_idx, obj_templates=obj_templates)
             hand_latent, grid_latent = samples[:, :self.cfg.generator.unet.d_y], samples[:, self.cfg.generator.unet.d_y:].view(1, n_grids, -1)
 
             vis_ms_obj_cond = [c[vis_idx*n_grids:(vis_idx+1)*n_grids] for c in multi_scale_obj_cond]
@@ -171,10 +172,10 @@ class GraspDiffTrainer(LGCDiffTrainer):
             gt_rec_hand_verts, gt_rec_verts_mask, gt_rec_grid_contact = self.reconstruct_from_latent(gt_contact_latent[vis_idx:vis_idx+1], vis_ms_obj_cond, vis_obj_msdf_center)
 
             contact_img = self._visualize_contact_comparison(
-                vis_obj_msdf_center, pred_grid_contact, gt_rec_grid_contact, handobject, obj_templates, vis_idx)
+                vis_obj_msdf_center, pred_grid_contact, gt_rec_grid_contact, handobject, vis_idx)
             img = self._visualize_hand_comparison(
                 pred_hand_verts, pred_verts_mask, gt_rec_hand_verts, gt_rec_verts_mask,
-                handobject, obj_templates, vis_obj_msdf_center, rot, vis_idx)
+                handobject, vis_obj_msdf_center, rot, vis_idx)
             _, recon_handV, recon_handJ = self.hand_ae.decode(hand_latent)
             full_hand_img = self.visualize_full_hand_comparison(recon_handV[0], handobject.hand_verts[vis_idx], obj_templates[vis_idx])
 
