@@ -87,17 +87,16 @@ class BaseHOIDataset(Dataset):
             return len(self.frame_names)
 
     def __getitem__(self, idx):
+        # obj_sample_pts = self.obj_info[obj_name]['samples'] # n_sample x 3
+        # obj_sample_normals = self.obj_info[obj_name]['sample_normals'] # n_sample x 3
+        sample = {}
         if self.augment:
             reorder_id, Rot = grid_reorder_id_and_rot(self.msdf_kernel_size, np.random.randint(0, 12))
+            sample['aug_rot'] = Rot
         if self.split in ['train', 'val'] or self.test_gt:
             fname_path = self.frame_names[idx].split('/')
             sbj_id = fname_path[2]
             obj_name = fname_path[3].split('_')[0]
-            obj_sample_pts = self.obj_info[obj_name]['samples'] # n_sample x 3
-            obj_sample_normals = self.obj_info[obj_name]['sample_normals'] # n_sample x 3
-            obj_com = self.obj_info[obj_name]['CoM']
-            obj_inertia = self.obj_info[obj_name]['inertia']
-            obj_mass = self.obj_info[obj_name]['mass']
             obj_rot = self.object_data['global_orient'][idx]
             obj_trans = self.object_data['transl'][idx]
 
@@ -110,10 +109,9 @@ class BaseHOIDataset(Dataset):
             # if self.augment:
             #     objR = Rot @ objR
             #     objt = (Rot @ objt[:, np.newaxis])[:, 0]
-            obj_sample_pts = obj_sample_pts @ objR.T + objt[np.newaxis, :]
-            obj_sample_normals = obj_sample_normals @ objR.T
+            # obj_sample_pts = obj_sample_pts @ objR.T + objt[np.newaxis, :]
+            # obj_sample_normals = obj_sample_normals @ objR.T
 
-            samples = {}
             if self.hand_sides is not None:
                 hand_side = self.hand_sides[idx]
                 if hand_side == 'left':
@@ -128,44 +126,17 @@ class BaseHOIDataset(Dataset):
                 hmodels = self.rh_models
                 hdata = self.rh_data
 
-            sample = {
+            sample.update({
                 'frameName': '/'.join(fname_path[2:]),
                 'objName': obj_name,
                 'sbjId': sbj_id,
-                'objSamplePts': obj_sample_pts,
-                'objSampleNormals': obj_sample_normals,
+                # 'objSamplePts': obj_sample_pts,
+                # 'objSampleNormals': obj_sample_normals,
                 'objTrans': objt,
                 'objRot': Rotation.from_matrix(objR).as_rotvec(),
                 'handSide': hand_side,
-                'objCoM': obj_com,
-                'objInertia': obj_inertia,
-                'objMass': obj_mass
-            }
+            })
 
-            if self.msdf_path is not None:
-                obj_msdf = self.obj_info[obj_name]['msdf'].copy() ## K^3 + 3
-                obj_msdf[:, :-3] = obj_msdf[:, :-3] / self.msdf_scale / np.sqrt(3) # Normalize SDF
-                sample['objMsdf'] = obj_msdf
-                sample['objMsdfGrad'] = self.obj_info[obj_name]['msdf_grad'].copy()
-                sample['adjPointIndices'] = self.obj_info[obj_name].get('adj_indices', None)
-                sample['adjPointDistances'] = self.obj_info[obj_name].get('adj_distances', None)
-                sample['nAdjPoints'] = self.obj_info[obj_name]['n_adj_points']
-                if self.augment:
-                    obj_msdf_pts = (obj_msdf[:, -3:] - obj_com) @ Rot.T
-                    obj_msdf[:, -3:] = obj_msdf_pts
-                    obj_msdf[:, :-3] = obj_msdf[:, :-3][:, reorder_id]
-                    sample['objMsdf'] = obj_msdf
-                    sample['objMsdfGrad'] = sample['objMsdfGrad'][:, reorder_id] @ Rot.T
-                    ## reorder adjacents
-                    adj_indices = sample['adjPointIndices']
-                    grid_id = adj_indices // (self.msdf_kernel_size ** 3)
-                    local_point_id = adj_indices % (self.msdf_kernel_size ** 3)
-                    new_local_point_id = reorder_id[local_point_id]
-                    new_adj_indices = grid_id * (self.msdf_kernel_size ** 3) + new_local_point_id
-                    plain_grid_ids = np.arange(obj_msdf.shape[0])
-                    glob_reorder = (plain_grid_ids[:, None] * self.msdf_kernel_size**3 + reorder_id[None, :]).flatten()
-                    sample['adjPointIndices'] = new_adj_indices
-                    sample['nAdjPoints'] = sample['nAdjPoints'][glob_reorder]
 
             # hand_out = hmodels[sbj_id](
             #     global_orient=hdata['global_orient'][idx:idx+1],
@@ -187,8 +158,6 @@ class BaseHOIDataset(Dataset):
 
             handN = trimesh.Trimesh(handV, hmodels[sbj_id].th_faces).vertex_normals
 
-            if self.augment:
-                sample['aug_rot'] = Rot
                 # handV = handV @ Rot.T
                 # handJ = handJ @ Rot.T
                 # # part_T[:, :3, :3] = Rot @ part_T[:, :3, :3]
@@ -213,67 +182,94 @@ class BaseHOIDataset(Dataset):
                 'canoJoints': canoJ,
             })
             
-            if self.grid_contact_ds is not None:
-                with h5py.File(self.grid_contact_ds, 'r') as ds:
-                    ho_dist = ds['ho_dist'][idx]  # (n_grids, 778)
-                    contact_mask = ho_dist < self.msdf_scale
-                    grid_mask = np.any(contact_mask, axis=-1)
-                    local_grid_dist = ds['local_grid'][idx]
+            # if self.grid_contact_ds is not None:
+            #     with h5py.File(self.grid_contact_ds, 'r') as ds:
+            #         ho_dist = ds['ho_dist'][idx]  # (n_grids, 778)
+            #         contact_mask = ho_dist < self.msdf_scale
+            #         grid_mask = np.any(contact_mask, axis=-1)
+            #         local_grid_dist = ds['local_grid'][idx]
 
-                    nn_point = ds['nn_point'][idx][grid_mask].reshape(-1, self.msdf_kernel_size**3, 3)
-                    nn_face_idx = ds['nn_face_idx'][idx][grid_mask].reshape(-1, self.msdf_kernel_size**3)  # (M * K^3,)
+            #         nn_point = ds['nn_point'][idx][grid_mask].reshape(-1, self.msdf_kernel_size**3, 3)
+            #         nn_face_idx = ds['nn_face_idx'][idx][grid_mask].reshape(-1, self.msdf_kernel_size**3)  # (M * K^3,)
 
-                    if self.augment:
-                        local_grid_dist = local_grid_dist.reshape(-1, self.msdf_kernel_size**3)[:, reorder_id].reshape(
-                            -1, self.msdf_kernel_size, self.msdf_kernel_size, self.msdf_kernel_size, 1)
-                        nn_point = nn_point @ (Rot.T)[np.newaxis, :, :]
-                        nn_point = nn_point[:, reorder_id, :]
-                        nn_face_idx = nn_face_idx[:, reorder_id]
+            #         if self.augment:
+            #             local_grid_dist = local_grid_dist.reshape(-1, self.msdf_kernel_size**3)[:, reorder_id].reshape(
+            #                 -1, self.msdf_kernel_size, self.msdf_kernel_size, self.msdf_kernel_size, 1)
+            #             nn_point = nn_point @ (Rot.T)[np.newaxis, :, :]
+            #             nn_point = nn_point[:, reorder_id, :]
+            #             nn_face_idx = nn_face_idx[:, reorder_id]
 
-                    sample['localGridContact'] = np.zeros_like(local_grid_dist)
-                    sample['localGridContact'][grid_mask] = self.grid_dist_to_contact(local_grid_dist[grid_mask])
+            #         sample['localGridContact'] = np.zeros_like(local_grid_dist)
+            #         sample['localGridContact'][grid_mask] = self.grid_dist_to_contact(local_grid_dist[grid_mask])
 
-                ## Apply inverse transform to hand vertices
-                handV = (handV - objt[np.newaxis, :]) @ objR
+            #     ## Apply inverse transform to hand vertices
+            #     handV = (handV - objt[np.newaxis, :]) @ objR
 
-                nn_vert_idx = hmodels[sbj_id].th_faces[nn_face_idx]  # (M, K^3, 3)
-                face_verts = handV[nn_vert_idx]  # (M, K^3, 3, 3)
-                face_cse_t = self.hand_cse[nn_vert_idx]  # (M, K^3, 3, cse_dim)
+            #     nn_vert_idx = hmodels[sbj_id].th_faces[nn_face_idx]  # (M, K^3, 3)
+            #     face_verts = handV[nn_vert_idx]  # (M, K^3, 3, 3)
+            #     face_cse_t = self.hand_cse[nn_vert_idx]  # (M, K^3, 3, cse_dim)
 
-                # Calculate barycentric weights using matrix inversion (pure numpy operations)
-                face_verts_transposed = np.swapaxes(face_verts, -1, -2)  # (M, K^3, 3, 3)
-                w = np.linalg.inv(face_verts_transposed) @ nn_point[..., np.newaxis]  # (M, K^3, 3, 1)
+            #     # Calculate barycentric weights using matrix inversion (pure numpy operations)
+            #     face_verts_transposed = np.swapaxes(face_verts, -1, -2)  # (M, K^3, 3, 3)
+            #     w = np.linalg.inv(face_verts_transposed) @ nn_point[..., np.newaxis]  # (M, K^3, 3, 1)
 
-                # Make sure weights are all positive and normalized
-                w = np.clip(w, 0, 1)
-                w = w / (np.sum(w, axis=2, keepdims=True)+1e-8)  # (M, K^3, 3, 1)
+            #     # Make sure weights are all positive and normalized
+            #     w = np.clip(w, 0, 1)
+            #     w = w / (np.sum(w, axis=2, keepdims=True)+1e-8)  # (M, K^3, 3, 1)
 
-                grid_hand_cse = np.sum(face_cse_t * w, axis=2).reshape(-1, self.msdf_kernel_size, self.msdf_kernel_size, self.msdf_kernel_size, self.hand_cse.shape[1])  # (kernel_size, kernel_size, kernel_size, cse_dim)
-                sample['localGridCSE'] = np.zeros((local_grid_dist.shape[0], self.msdf_kernel_size, self.msdf_kernel_size, self.msdf_kernel_size, self.hand_cse.shape[1]), dtype=np.float32)
-                sample['localGridCSE'][grid_mask] = grid_hand_cse
-                sample['nHoDist'] = 1 - 2 / (np.min(ho_dist / self.msdf_scale, axis=-1) + 1)
-                sample['objPtMask'] = grid_mask
-                sample['handVertMask'] = contact_mask
+            #     grid_hand_cse = np.sum(face_cse_t * w, axis=2).reshape(-1, self.msdf_kernel_size, self.msdf_kernel_size, self.msdf_kernel_size, self.hand_cse.shape[1])  # (kernel_size, kernel_size, kernel_size, cse_dim)
+            #     sample['localGridCSE'] = np.zeros((local_grid_dist.shape[0], self.msdf_kernel_size, self.msdf_kernel_size, self.msdf_kernel_size, self.hand_cse.shape[1]), dtype=np.float32)
+            #     sample['localGridCSE'][grid_mask] = grid_hand_cse
+            #     sample['nHoDist'] = 1 - 2 / (np.min(ho_dist / self.msdf_scale, axis=-1) + 1)
+            #     sample['objPtMask'] = grid_mask
+            #     sample['handVertMask'] = contact_mask
 
         else:
             obj_name = self.test_objects[idx]
-            obj_sample_pts = self.obj_info[obj_name]['samples'] # n_sample x 3
-            obj_sample_normals = self.obj_info[obj_name]['sample_normals'] # n_sample x 3
+            # obj_sample_pts = self.obj_info[obj_name]['samples'] # n_sample x 3
+            # obj_sample_normals = self.obj_info[obj_name]['sample_normals'] # n_sample x 3
             ## For testing, return object with random rotations. The rng is set to make sure
             ## each idx generates fixed rotation.
             # obj_rot = R.identity()
 
-            sample = {
+            sample.update({
                 'objName': obj_name,
-                'objSamplePts': obj_sample_pts,
-                'objSampleNormals': obj_sample_normals,
-                # 'objRot': obj_rot.as_rotvec(),
-            }
+            })
 
-            if self.msdf_path is not None:
-                obj_msdf = self.obj_info[obj_name]['msdf'].copy() ## K^3 + 3
-                obj_msdf[:, :-3] = obj_msdf[:, :-3] / self.msdf_scale / np.sqrt(3) # Normalize SDF
+        obj_com = self.obj_info[obj_name]['CoM']
+        obj_inertia = self.obj_info[obj_name]['inertia']
+        obj_mass = self.obj_info[obj_name]['mass']
+        sample.update({
+                'objCoM': obj_com,
+                'objInertia': obj_inertia,
+                'objMass': obj_mass
+            })
+
+        if self.msdf_path is not None:
+            obj_msdf = self.obj_info[obj_name]['msdf'].copy() ## K^3 + 3
+            obj_msdf[:, :-3] = obj_msdf[:, :-3] / self.msdf_scale / np.sqrt(3) # Normalize SDF
+            obj_msdf[:, -3:] = obj_msdf[:, -3:] - obj_com
+            sample['objMsdf'] = obj_msdf
+            sample['objMsdfGrad'] = self.obj_info[obj_name]['msdf_grad'].copy()
+            sample['adjPointIndices'] = self.obj_info[obj_name].get('adj_indices', None)
+            sample['adjPointDistances'] = self.obj_info[obj_name].get('adj_distances', None)
+            sample['nAdjPoints'] = self.obj_info[obj_name]['n_adj_points']
+            if self.augment:
+                obj_msdf_pts = obj_msdf[:, -3:] @ Rot.T
+                obj_msdf[:, -3:] = obj_msdf_pts
+                obj_msdf[:, :-3] = obj_msdf[:, :-3][:, reorder_id]
                 sample['objMsdf'] = obj_msdf
+                sample['objMsdfGrad'] = sample['objMsdfGrad'][:, reorder_id] @ Rot.T
+                ## reorder adjacents
+                adj_indices = sample['adjPointIndices']
+                grid_id = adj_indices // (self.msdf_kernel_size ** 3)
+                local_point_id = adj_indices % (self.msdf_kernel_size ** 3)
+                new_local_point_id = reorder_id[local_point_id]
+                new_adj_indices = grid_id * (self.msdf_kernel_size ** 3) + new_local_point_id
+                plain_grid_ids = np.arange(obj_msdf.shape[0])
+                glob_reorder = (plain_grid_ids[:, None] * self.msdf_kernel_size**3 + reorder_id[None, :]).flatten()
+                sample['adjPointIndices'] = new_adj_indices
+                sample['nAdjPoints'] = sample['nAdjPoints'][glob_reorder]
 
         return sample
 

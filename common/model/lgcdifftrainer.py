@@ -58,7 +58,7 @@ class LGCDiffTrainer(L.LightningModule):
         #     self._load_pretrained_weights(cfg.hand_ae.get('pretrained_weight', None), target_prefix='hand_ae')
     
         mano_layer = ManoLayer(mano_root=cfg.data.mano_root, side='right',
-                                    use_pca=cfg.pose_optimizer.use_pca, ncomps=cfg.pose_optimizer.n_comps, flat_hand_mean=True)
+                                    use_pca=cfg.pose_optimizer.use_pca, ncomps=cfg.pose_optimizer.ncomps, flat_hand_mean=True)
         object.__setattr__(self, 'mano_layer', mano_layer.eval().requires_grad_(False))
         self.closed_mano_faces = np.load(osp.join('data', 'misc', 'closed_mano_r_faces.npy'))
         cse_ckpt = torch.load(cfg.data.hand_cse_path)
@@ -487,6 +487,7 @@ class LGCDiffTrainer(L.LightningModule):
 
     def test_step(self, batch, batch_idx):
         self.grid_coords = self.grid_coords.to(self.device)
+        self.mano_layer.to(self.device)
         handobject = HandObject(self.cfg.data, self.device, mano_layer=self.mano_layer, normalize=True)
         obj_hulls = getattr(self.trainer.datamodule, 'test_set').obj_hulls
         obj_name = batch['objName'][0]
@@ -503,11 +504,11 @@ class LGCDiffTrainer(L.LightningModule):
             recon_lg_contact = handobject.ml_contact
         else:
             ## Test the reconstrucion 
-            handobject.load_from_batch_obj_only(batch)
+            n_samples = self.cfg.test.get('n_samples', 1)
+            handobject.load_from_batch_obj_only(batch, n_samples, obj_template=obj_mesh, obj_hulls=obj_hulls)
             # lg_contact = handobject.ml_contact
             # obj_msdf = handobject.obj_msdf[:, :, :self.msdf_k**3].view(-1, self.msdf_k, self.msdf_k, self.msdf_k)
             # obj_msdf_center = handobject.obj_msdf[:, :, self.msdf_k**3:] # B x 3
-            n_samples = self.cfg.test.get('n_samples', 1)
 
             obj_msdf = handobject.obj_msdf[:, :, :self.msdf_k**3].view(-1, 1, self.msdf_k, self.msdf_k, self.msdf_k) # N x ...
             obj_msdf_center = handobject.obj_msdf[:, :, self.msdf_k**3:] # N x 3
@@ -519,15 +520,15 @@ class LGCDiffTrainer(L.LightningModule):
 
             def project_latent(latent):
                 """Closure that captures obj context to project latent through hand mesh."""
-                return self._project_latent(latent, n_grids, obj_msdf, obj_msdf_center, multi_scale_obj_cond, obj_mesh=obj_mesh, part_ids=handobject.hand_part_ids)
+                return self._project_latent(latent, n_grids, obj_msdf, obj_msdf_center, multi_scale_obj_cond, obj_mesh=handobject.obj_models[0], part_ids=handobject.hand_part_ids)
 
             self.vis_geoms = []
             self._proj_step = 0
-            samples = self.diffusion.sample(self.model, input_data, k=n_samples, proj_fn=project_latent, progress=True)
+            samples = self.diffusion.sample(self.model, input_data, k=n_samples, proj_fn=None, progress=True)
 
             # Visualize hand geometries at every 100 steps along with object
             if self.vis_geoms:
-                obj_geom = o3dmesh_from_trimesh(obj_mesh, color=[0.7, 0.7, 0.7])
+                obj_geom = o3dmesh_from_trimesh(handobject.obj_models[0], color=[0.7, 0.7, 0.7])
                 all_geoms = []
                 for i, hand_geom in enumerate(self.vis_geoms):
                     offset = np.array([i * 0.25, 0, 0])
@@ -588,7 +589,7 @@ class LGCDiffTrainer(L.LightningModule):
         handV, handJ = handV.detach().cpu().numpy(), handJ.detach().cpu().numpy()
 
         param_list = [{'dataset_name': 'grab', 'frame_name': f"{obj_name}_{i}", 'hand_model': trimesh.Trimesh(handV[i], self.closed_mano_faces),
-                       'obj_name': obj_name, 'hand_joints': handJ[i], 'obj_model': obj_mesh, 'obj_hulls': obj_hulls,
+                       'obj_name': obj_name, 'hand_joints': handJ[i], 'obj_model': handobject.obj_models[0], 'obj_hulls': handobject.obj_hulls[0],
                        'idx': i} for i in range(handV.shape[0])]
             
         result = calculate_metrics(param_list, metrics=self.cfg.test.criteria, pool=self.pool, reduction='none')
@@ -617,7 +618,6 @@ class LGCDiffTrainer(L.LightningModule):
         ## Visualization
         # for vis_idx in range(handV.shape[0]):
         # gt_geoms = handobject.get_vis_geoms(idx=vis_idx, obj_templates=obj_meshes)
-        obj_meshes = [obj_mesh for _ in range(n_samples)]
         pred_ho = copy(handobject)
         pred_ho.hand_verts = torch.tensor(handV, dtype=torch.float32)
         pred_ho.hand_joints = torch.tensor(handJ, dtype=torch.float32)
@@ -638,7 +638,7 @@ class LGCDiffTrainer(L.LightningModule):
                 hand_verts=pred_hand_verts[vis_idx].detach().cpu().numpy(),
                 hand_verts_mask=pred_verts_mask[vis_idx].detach().cpu().numpy(),
                 hand_faces=self.mano_layer.th_faces.detach().cpu().numpy(),
-                obj_mesh=obj_meshes[vis_idx],
+                obj_mesh=handobject.obj_models[vis_idx],
                 part_ids=handobject.hand_part_ids,
                 msdf_center=obj_msdf_center[vis_idx].detach().cpu().numpy(),
                 grid_scale=self.cfg.msdf.scale,
@@ -646,10 +646,10 @@ class LGCDiffTrainer(L.LightningModule):
             recon_imgs.append(recon_img)
 
             if self.debug:
-                ho_geoms = pred_ho.get_vis_geoms(idx=vis_idx, obj_templates=obj_meshes)
+                ho_geoms = pred_ho.get_vis_geoms(idx=vis_idx)
                 o3d.visualization.draw_geometries(pred_geoms + [g['geometry'].translate((0, 0.25, 0)) if 'geometry' in g else g.translate((0, 0.25, 0)) for g in ho_geoms], window_name='Predicted Hand-Object')
             else:
-                pred_img = pred_ho.vis_img(idx=vis_idx, h=400, w=400, obj_templates=obj_meshes)
+                pred_img = pred_ho.vis_img(idx=vis_idx, h=400, w=400)
                 pred_imgs.append(pred_img)
 
         # Concatenate all sample images horizontally

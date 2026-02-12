@@ -53,6 +53,7 @@ class HandObject:
         self.obj_trans = None
         self.normalize = normalize
         self.obj_com = None
+        self.obj_inertia = None
         self.contact_unit = cfg.contact_unit
         self.normalized_coords = get_grid(kernel_size=self.cfg.msdf.kernel_size, device=self.device).reshape(-1, 3).float()
 
@@ -78,7 +79,7 @@ class HandObject:
         new_ho.obj_trans = copy(self.obj_trans)
         new_ho.obj_com = copy(self.obj_com)
         new_ho.obj_inertia = copy(self.obj_inertia)
-        # new_ho.batch_size = self.batch_size
+        new_ho.batch_size = self.batch_size
         return new_ho
 
     def load_from_batch(self, batch, obj_templates=None, obj_hulls=None, pool=None):
@@ -169,14 +170,6 @@ class HandObject:
             # ], dim=0)
             self.hand_normals = (objT_inv[:, :3, :3].unsqueeze(1) @ self.hand_normals.unsqueeze(-1)).squeeze(-1)
 
-            # Transform hand models
-            # for i in range(len(self.hand_models)):
-            #     objT_inv_np = objT_inv[i].detach().cpu().numpy()
-            #     self.hand_models[i] = transform_mesh(self.hand_models[i], objT_inv_np)
-
-            # Transform hand frames with inverse transformation
-            # hand_frames = (objT_inv.unsqueeze(1) @ hand_frames).to(self.device)
-
             # Apply inverse transformation objT^-1 to object vertices and normals
             # (they are already transformed when loaded from batch)
             homo_obj_verts = F.pad(self.obj_verts, (0, 1), 'constant', 1)
@@ -184,6 +177,19 @@ class HandObject:
 
             # Transform object normals with inverse transformation
             self.obj_normals = (objT_inv[:, :3, :3].unsqueeze(1) @ self.obj_normals.unsqueeze(-1)).squeeze(-1)
+
+            # Transform object meshes and convex hulls (canonical -> CoM-centered + augR)
+            for i in range(len(self.obj_models)):
+                T = np.eye(4)
+                T[:3, :3] = self.augR[i].detach().cpu().numpy()
+                T[:3, 3:4] = -T[:3, :3] @ self.obj_com[i].view(3, 1).detach().cpu().numpy()
+                self.obj_models[i] = transform_mesh(self.obj_models[i], T)
+            for i in range(len(self.obj_hulls)):
+                T = np.eye(4)
+                T[:3, :3] = self.augR[i].detach().cpu().numpy()
+                T[:3, 3:4] = -T[:3, :3] @ self.obj_com[i].view(3, 1).detach().cpu().numpy()
+                for j in range(len(self.obj_hulls[i])):
+                    self.obj_hulls[i][j] = transform_mesh(self.obj_hulls[i][j], T)
         else:
             # When normalize=False, object vertices and normals are already transformed
             # Only transform object models and hulls which are loaded from canonical space
@@ -514,30 +520,37 @@ class HandObject:
             hand_verts, verts_mask, self.closed_hand_faces,
             obj_mesh, self.hand_part_ids, h=h, w=w)
 
-    def load_from_batch_obj_only(self, batch, obj_template=None, obj_hulls=None):
+    def load_from_batch_obj_only(self, batch, n_samples, obj_template=None, obj_hulls=None):
         """
         Load only object-related data from batched data. Used for testing.
         No hand-related variables are loaded - those will be generated later.
         The batch size is 1: loading only one object each time.
         """
+        self.batch_size = n_samples
         self.obj_names = batch['objName']
-        self.obj_verts = batch['objSamplePts'].clone().to(self.device).float()
-        self.obj_normals = batch['objSampleNormals'].clone().to(self.device).float()
+        self.obj_com = batch['objCoM'][0]
+        # self.obj_verts = batch['objSamplePts'].clone().to(self.device).float()
+        # self.obj_normals = batch['objSampleNormals'].clone().to(self.device).float()
 
         # Load object templates
+        self.augR = torch.eye(3).unsqueeze(0).repeat(self.batch_size, 1, 1).to(self.device)
         if obj_template is not None:
             self.obj_models = []
-            obj_mesh = copy(obj_template)
-            self.obj_models.append(obj_mesh)
+            for i in range(self.batch_size):
+                obj_mesh = copy(obj_template)
+                obj_mesh.apply_translation(-self.obj_com.detach().cpu().numpy())
+                self.obj_models.append(obj_mesh)
 
         # Load object hulls
         if obj_hulls is not None:
             self.obj_hulls = []
-            ohs = []
-            for h in obj_hulls:
-                h0 = copy(h)
-                ohs.append(h0)
-            self.obj_hulls.append(ohs)
+            for i in range(self.batch_size):
+                ohs = []
+                for h in obj_hulls:
+                    h0 = copy(h)
+                    h0.apply_translation(-self.obj_com.detach().cpu().numpy())
+                    ohs.append(h0)
+                self.obj_hulls.append(ohs)
 
         # Center object at origin
         # self.obj_com = self.obj_verts.mean(dim=1, keepdim=True)
@@ -556,10 +569,6 @@ class HandObject:
 
 
     def _load_templates(self, idx, obj_templates, obj_hull=None):
-        if self.hand_verts is not None:
-            hand_mesh = trimesh.Trimesh(self.hand_verts[idx].detach().cpu().numpy(), self.closed_hand_faces.copy())
-        else:
-            hand_mesh = None
 
         self.hand_models = []
         self.obj_models = []
@@ -596,14 +605,18 @@ class HandObject:
         else:
             ohs = None
 
-        return hand_mesh, obj_mesh, ohs
+        return obj_mesh, ohs
 
     def get_vis_geoms(self, idx=0, draw_maps=False, draw_hand=True, draw_obj=True, **kwargs):
         if 'obj_templates' in kwargs:
-            hand_mesh, obj_mesh, _ = self._load_templates(idx=idx, obj_templates=kwargs['obj_templates'])
+            obj_mesh, _ = self._load_templates(idx=idx, obj_templates=kwargs['obj_templates'])
         else:
-            hand_mesh = self.hand_models[idx]
             obj_mesh = self.obj_models[idx]
+
+        if self.hand_verts is not None:
+            hand_mesh = trimesh.Trimesh(self.hand_verts[idx].detach().cpu().numpy(), self.closed_hand_faces.copy())
+        else:
+            hand_mesh = None
 
         # Downsample object mesh for visualization if it has too many faces
         if obj_mesh is not None and len(obj_mesh.faces) > 6000:
