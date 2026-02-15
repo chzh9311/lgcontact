@@ -58,7 +58,8 @@ class HandVAE(nn.Module):
     def decode(self, z):
         self.mano_layer.to(z.device)
         recon_param = self.decoder(z)
-        trans = self.denormalize_trans(recon_param[:, :3])
+        recon_param[:, :3] = self.denormalize_trans(recon_param[:, :3])
+        trans = recon_param[:, :3]
         pose = recon_param[:, 3:51]
         betas = recon_param[:, 51:]
         handV, handJ, _ = self.mano_layer(pose, th_betas=betas, th_trans=trans)

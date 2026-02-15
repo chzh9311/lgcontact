@@ -11,12 +11,16 @@ import numpy as np
 from multiprocessing.pool import Pool
 import wandb
 from matplotlib import pyplot as plt
+from copy import deepcopy
 from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_rotation_6d
 
+from common.model.pose_optimizer import optimize_pose_wrt_local_grids
+
 from .lgcdifftrainer import LGCDiffTrainer
-from common.model.handobject import HandObject
-from common.utils.vis import o3dmesh, o3dmesh_from_trimesh, geom_to_img
+from common.model.handobject import HandObject, recover_hand_verts_from_contact
+from common.utils.vis import o3dmesh, o3dmesh_from_trimesh, geom_to_img, visualize_recon_hand_w_object
 from common.msdf.utils.msdf import get_grid, calc_local_grid_all_pts_gpu
+from common.evaluation.eval_fns import calculate_metrics
 from einops import rearrange
 
 
@@ -200,3 +204,194 @@ class GraspDiffTrainer(LGCDiffTrainer):
         pred_img = geom_to_img([pred_mesh, obj_mesh], w=400, h=400, scale=0.5, half_range=0.12)
         gt_img = geom_to_img([gt_mesh, obj_mesh], w=400, h=400, scale=0.5, half_range=0.12)
         return np.concatenate([gt_img, pred_img], axis=0)
+    
+    def test_step(self, batch, batch_idx):
+        self.grid_coords = self.grid_coords.to(self.device)
+        self.mano_layer.to(self.device)
+        handobject = HandObject(self.cfg.data, self.device, mano_layer=self.mano_layer, normalize=True)
+        obj_hulls = getattr(self.trainer.datamodule, 'test_set').obj_hulls
+        obj_name = batch['objName'][0]
+        obj_hulls = obj_hulls[obj_name]
+        obj_mesh_dict = getattr(self.trainer.datamodule, 'test_set').simp_obj_mesh
+        n_grids = batch['objMsdf'].shape[1]
+        obj_mesh = trimesh.Trimesh(obj_mesh_dict[obj_name]['verts'], obj_mesh_dict[obj_name]['faces'])
+
+        ## Test the reconstrucion 
+        n_samples = self.cfg.test.get('n_samples', 1)
+        handobject.load_from_batch_obj_only(batch, n_samples, obj_template=obj_mesh, obj_hulls=obj_hulls)
+        # lg_contact = handobject.ml_contact
+        # obj_msdf = handobject.obj_msdf[:, :, :self.msdf_k**3].view(-1, self.msdf_k, self.msdf_k, self.msdf_k)
+        # obj_msdf_center = handobject.obj_msdf[:, :, self.msdf_k**3:] # B x 3
+
+        obj_msdf_grid = handobject.obj_msdf[:, :, :self.msdf_k**3].view(-1, 1, self.msdf_k, self.msdf_k, self.msdf_k) # (B*N) x 1 x k x k x k
+        obj_msdf_center = handobject.obj_msdf[:, :, self.msdf_k**3:] # B x N x 3
+        obj_feat, multi_scale_obj_cond = self.grid_ae.encode_object(obj_msdf_grid)
+        obj_pc = torch.cat([obj_msdf_center, obj_feat.unsqueeze(0)], dim=-1)
+
+        cat_noise = torch.randn(n_samples, n_grids * self.cfg.ae.feat_dim + self.hand_ae.latent_dim, device=self.device)
+        ## 'x' only indicates the latent shape; latents are sampled inside the model
+        input_data = {'x': cat_noise, 'obj_pc': obj_pc.permute(0, 2, 1).to(self.device), 'obj_msdf': handobject.obj_msdf}
+
+        def project_latent(latent):
+            """Closure that captures obj context to project latent through hand mesh."""
+            return self._project_latent(latent, n_grids, obj_msdf_grid, obj_msdf_center, multi_scale_obj_cond, obj_mesh=handobject.obj_models[0], part_ids=handobject.hand_part_ids)
+
+        self.vis_geoms = []
+        self._proj_step = 0
+        samples = self.diffusion.sample(self.model, input_data, k=n_samples, proj_fn=None, progress=True)
+
+        hand_latent, grid_latent = samples[:, :self.cfg.generator.unet.d_y], samples[:, self.cfg.generator.unet.d_y:].view(n_samples, n_grids, -1)
+
+        # Visualize hand geometries at every 100 steps along with object
+        if self.vis_geoms:
+            obj_geom = o3dmesh_from_trimesh(handobject.obj_models[0], color=[0.7, 0.7, 0.7])
+            all_geoms = []
+            for i, hand_geom in enumerate(self.vis_geoms):
+                offset = np.array([i * 0.25, 0, 0])
+                h = deepcopy(hand_geom).translate(offset)
+                o = deepcopy(obj_geom).translate(offset)
+                all_geoms.extend([h, o])
+            o3d.visualization.draw_geometries(all_geoms, window_name='Projection Progress (every 100 steps)')
+
+        grid_latent = grid_latent.reshape(n_samples*n_grids, -1)
+        ## repeat the multi-scale obj cond here
+        multi_scale_obj_cond = [cond.repeat(n_samples, 1, 1, 1, 1) for cond in multi_scale_obj_cond]
+        recon_lg_contact = self.grid_ae.decode(grid_latent, multi_scale_obj_cond)
+        recon_lg_contact = recon_lg_contact.permute(0, 2, 3, 4, 1)  # B x K x K x K x (1 + cse_dim)
+        recon_lg_contact = recon_lg_contact.view(n_samples, n_grids, self.msdf_k, self.msdf_k, self.msdf_k, -1)
+        recon_lg_contact[..., 0][recon_lg_contact[..., 0] < 0.03] = 0  ## maskout low contact prob
+
+        pred_grid_contact = recon_lg_contact[..., 0].reshape(n_samples, -1)  # B x N x K^3
+        obj_msdf_center = obj_msdf_center.repeat(n_samples, 1, 1)  # B x N x 3
+        grid_coords = obj_msdf_center[:, :, None, :] + self.grid_coords.view(-1, 3)[None, None, :, :]  # B x N x K^3 x 3
+        pred_grid_cse = recon_lg_contact[..., 1:].reshape(n_samples, -1, self.cse_dim)
+        pred_targetWverts = self.hand_cse.emb2Wvert(pred_grid_cse.view(n_samples, -1, self.cse_dim))
+
+        if self.cfg.pose_optimizer.name == 'hand_ae':
+            pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
+                self.hand_cse, None,
+                pred_grid_contact.reshape(n_samples, -1), pred_grid_cse.reshape(n_samples, -1, self.cse_dim),
+                grid_coords=grid_coords.reshape(n_samples, -1, 3),
+                mask_th = 2
+            )
+            recon_param, _ = self.hand_ae(pred_hand_verts.permute(0, 2, 1), mask=pred_verts_mask.unsqueeze(1), is_training=False)
+            nrecon_trans, recon_pose, recon_betas = torch.split(recon_param, [3, 48, 10], dim=1)
+            recon_trans = nrecon_trans * 0.2
+            handV, handJ, _ = self.mano_layer(recon_pose, th_betas=recon_betas, th_trans=recon_trans)
+        elif self.cfg.pose_optimizer.name == 'lg_base':
+            with torch.enable_grad():
+                mano_trans, global_pose, mano_pose, mano_shape = optimize_pose_wrt_local_grids(
+                            self.mano_layer, grid_centers=obj_msdf_center, target_pts=grid_coords.view(n_samples, -1, 3),
+                            target_W_verts=pred_targetWverts, weights=pred_grid_contact,
+                            n_iter=self.cfg.pose_optimizer.n_opt_iter, lr=self.cfg.pose_optimizer.opt_lr,
+                            grid_scale=self.cfg.msdf.scale, w_repulsive=self.cfg.pose_optimizer.w_repulsive)
+            
+            handV, handJ, _ = self.mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
+        elif self.cfg.pose_optimizer.name == 'hybrid':
+            pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
+                self.hand_cse, None,
+                pred_grid_contact.reshape(n_samples, -1), pred_grid_cse.reshape(n_samples, -1, self.cse_dim),
+                grid_coords=grid_coords.reshape(n_samples, -1, 3),
+                mask_th = 2
+            )
+            recon_params, init_handV, init_handJ = self.hand_ae.decode(hand_latent)
+            # recon_params = self.hand_ae.decoder(hand_latent)
+            recon_params[:, :3] = self.hand_ae.denormalize_trans(recon_params[:, :3])
+            # with torch.enable_grad():
+            #     mano_trans, global_pose, mano_pose, mano_shape = optimize_pose_wrt_local_grids(
+            #                 self.mano_layer, grid_centers=obj_msdf_center, target_pts=grid_coords.view(n_samples, -1, 3),
+            #                 target_W_verts=pred_targetWverts, weights=pred_grid_contact,
+            #                 n_iter=self.cfg.pose_optimizer.n_opt_iter, lr=self.cfg.pose_optimizer.opt_lr,
+            #                 grid_scale=self.cfg.msdf.scale, w_repulsive=self.cfg.pose_optimizer.w_repulsive,
+            #                 w_reg_loss=self.cfg.pose_optimizer.w_regularization, init_pose=recon_params)
+            # handV, handJ, _ = self.mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
+            handV, handJ = init_handV, init_handJ
+
+        handV, handJ = handV.detach().cpu().numpy(), handJ.detach().cpu().numpy()
+
+        param_list = [{'dataset_name': 'grab', 'frame_name': f"{obj_name}_{i}", 'hand_model': trimesh.Trimesh(handV[i], self.closed_mano_faces),
+                       'obj_name': obj_name, 'hand_joints': handJ[i], 'obj_model': handobject.obj_models[0], 'obj_hulls': handobject.obj_hulls[0],
+                       'idx': i} for i in range(handV.shape[0])]
+            
+        result = calculate_metrics(param_list, metrics=self.cfg.test.criteria, pool=self.pool, reduction='none')
+
+        self.all_results.append(result)
+        self.sample_joints.append(handJ)
+
+        # Log raw per-sample metrics to wandb
+        if not self.debug:
+            # Option 1: Log each sample as individual rows (creates distributions in wandb)
+            for i in range(len(next(iter(result.values())))):
+                sample_metrics = {f"sample/{metric_name}": float(metric_values[i])
+                                 for metric_name, metric_values in result.items()}
+                wandb.log(sample_metrics, commit=False)
+
+            # Option 2 (alternative): Use wandb Table for structured logging
+            # table_data = [[obj_names[i]] + [float(result[m][i]) for m in result.keys()]
+            #               for i in range(batch_size)]
+            # table = wandb.Table(data=table_data, columns=["object"] + list(result.keys()))
+            # wandb.log({f"test_metrics_batch_{batch_idx}": table})
+        ## Visualization
+        # for vis_idx in range(handV.shape[0]):
+        # gt_geoms = handobject.get_vis_geoms(idx=vis_idx, obj_templates=obj_meshes)
+        pred_ho = copy(handobject)
+        pred_ho.hand_verts = torch.tensor(handV, dtype=torch.float32)
+        pred_ho.hand_joints = torch.tensor(handJ, dtype=torch.float32)
+
+        pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
+            self.hand_cse, None,
+            pred_grid_contact.reshape(n_samples, -1),
+            pred_grid_cse.reshape(n_samples, -1, self.cse_dim),
+            grid_coords=grid_coords.reshape(n_samples, -1, 3),
+            mask_th = 2
+        )
+
+        # Visualize all samples
+        recon_imgs = []
+        pred_imgs = []
+        for vis_idx in range(n_samples):
+            recon_img, pred_geoms = visualize_recon_hand_w_object(
+                hand_verts=pred_hand_verts[vis_idx].detach().cpu().numpy(),
+                hand_verts_mask=pred_verts_mask[vis_idx].detach().cpu().numpy(),
+                hand_faces=self.mano_layer.th_faces.detach().cpu().numpy(),
+                obj_mesh=handobject.obj_models[vis_idx],
+                part_ids=handobject.hand_part_ids,
+                msdf_center=obj_msdf_center[vis_idx].detach().cpu().numpy(),
+                grid_scale=self.cfg.msdf.scale,
+                h=400, w=400)
+            recon_imgs.append(recon_img)
+
+            if self.debug:
+                print(result)
+                ho_geoms = pred_ho.get_vis_geoms(idx=vis_idx)
+                o3d.visualization.draw_geometries(pred_geoms + [g['geometry'].translate((0, 0.25, 0)) if 'geometry' in g else g.translate((0, 0.25, 0)) for g in ho_geoms], window_name='Predicted Hand-Object')
+            else:
+                pred_img = pred_ho.vis_img(idx=vis_idx, h=400, w=400)
+                pred_imgs.append(pred_img)
+
+        # Concatenate all sample images horizontally
+        recon_img_grid = np.concatenate(recon_imgs, axis=0)
+        if not self.debug:
+            pred_img_grid = np.concatenate(pred_imgs, axis=0)
+
+        if hasattr(self.logger, 'experiment'):
+            if hasattr(self.logger.experiment, 'add_image'):
+                # TensorBoardLogger
+                global_step = self.current_epoch * len(eval(f'self.trainer.datamodule.test_dataloader()')) + batch_idx
+                self.logger.experiment.add_image(f'test/Surrounding_hands', recon_img_grid, global_step, dataformats='HWC')
+                # self.logger.experiment.add_image(f'test/Sampled_grasp', pred_img_grid, global_step, dataformats='HWC')
+            elif hasattr(self.logger.experiment, 'log') and not self.debug:
+                # WandbLogger - add row to table
+                self.test_images_table.add_data(
+                    batch_idx,
+                    obj_name,
+                    wandb.Image(recon_img_grid),
+                    wandb.Image(pred_img_grid),
+                    float(np.mean(result.get("Simulation Displacement", [0]))),
+                    float(np.mean(result.get("Penetration Depth", [0]))),
+                    float(np.mean(result.get("Intersection Volume", [0])))
+                )
+            # o3d.visualization.draw(pred_geoms)
+            # o3d.visualization.draw(gt_geoms + [g['geometry'].translate((0, 0.25, 0)) if 'geometry' in g else g for g in pred_geoms])
+
+        return result

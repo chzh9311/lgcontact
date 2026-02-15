@@ -61,7 +61,7 @@ class LGCDiffTrainer(L.LightningModule):
                                     use_pca=cfg.pose_optimizer.use_pca, ncomps=cfg.pose_optimizer.ncomps, flat_hand_mean=True)
         object.__setattr__(self, 'mano_layer', mano_layer.eval().requires_grad_(False))
         self.closed_mano_faces = np.load(osp.join('data', 'misc', 'closed_mano_r_faces.npy'))
-        cse_ckpt = torch.load(cfg.data.hand_cse_path)
+        cse_ckpt = torch.load(cfg.data.hand_cse_path, weights_only=False)
 
         handF = self.mano_layer.th_faces
         # Initialize model and load state
@@ -419,7 +419,7 @@ class LGCDiffTrainer(L.LightningModule):
             hand_verts=gt_rec_hand_verts[vis_idx].detach().cpu().numpy(),
             hand_verts_mask=gt_rec_verts_mask[vis_idx].detach().cpu().numpy(), **common_kwargs)
         gt_img, _ = visualize_recon_hand_w_object(
-            hand_verts=handobject.hand_verts[vis_idx].detach().cpu().numpy() @ rot.T,
+            hand_verts=handobject.hand_verts[vis_idx].detach().cpu().numpy(),
             hand_verts_mask=handobject.hand_vert_mask[vis_idx].any(dim=0).detach().cpu().numpy(), **common_kwargs)
         return np.concatenate([gt_img, gt_rec_img, pred_img], axis=0)
 
@@ -578,12 +578,12 @@ class LGCDiffTrainer(L.LightningModule):
             handV, handJ, _ = self.mano_layer(recon_pose, th_betas=recon_betas, th_trans=recon_trans)
         else:
             with torch.enable_grad():
-                global_pose, mano_pose, mano_shape, mano_trans = optimize_pose_wrt_local_grids(
+                mano_trans, global_pose, mano_pose, mano_shape = optimize_pose_wrt_local_grids(
                             self.mano_layer, grid_centers=obj_msdf_center, target_pts=grid_coords.view(n_samples, -1, 3),
                             target_W_verts=pred_targetWverts, weights=pred_grid_contact,
                             n_iter=self.cfg.pose_optimizer.n_opt_iter, lr=self.cfg.pose_optimizer.opt_lr,
                             grid_scale=self.cfg.msdf.scale, w_repulsive=self.cfg.pose_optimizer.w_repulsive)
-            
+
             handV, handJ, _ = self.mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
 
         handV, handJ = handV.detach().cpu().numpy(), handJ.detach().cpu().numpy()

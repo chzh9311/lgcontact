@@ -215,11 +215,11 @@ class MLCTrainer(L.LightningModule):
         pred_targetWverts = self.handcse.emb2Wvert(pred_grid_cse.view(batch_size, -1, self.cse_dim))
 
         with torch.enable_grad():
-            global_pose, mano_pose, mano_shape, mano_trans = optimize_pose_wrt_local_grids(
+            mano_trans, global_pose, mano_pose, mano_shape = optimize_pose_wrt_local_grids(
                         self.mano_layer, target_pts=grid_coords.view(batch_size, -1, 3),
                         target_W_verts=pred_targetWverts, weights=pred_grid_contact,
                         n_iter=self.cfg.pose_optimizer.n_opt_iter, lr=self.cfg.pose_optimizer.opt_lr)
-        
+
         handV, handJ, _ = self.mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
 
         handV, handJ = handV.detach().cpu().numpy(), handJ.detach().cpu().numpy()

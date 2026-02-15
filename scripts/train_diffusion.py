@@ -19,13 +19,16 @@ from common.utils.misc import set_seed, load_pl_ckpt
 from lightning.pytorch.callbacks import ModelCheckpoint
 
 OmegaConf.register_new_resolver("add", lambda x, y: x + y, replace=True)
-@hydra.main(config_path="../config", config_name="mlcdiff")
+@hydra.main(version_base=None, config_path="../config", config_name="mlcdiff")
 def main(cfg):
     # Set seed for reproducibility FIRST
     if hasattr(cfg, 'seed'):
         set_seed(cfg.seed)
     else:
         set_seed(42)  # default seed
+
+    # Set matmul precision for better performance on Tensor Cores
+    torch.set_float32_matmul_precision('medium')
 
     # print("Configuration:")
     # print(OmegaConf.to_yaml(cfg))
@@ -102,11 +105,11 @@ def main(cfg):
         pl_model = trainer_module.load_from_checkpoint(cfg.val.get('ckpt_path', None), grid_ae=gridae, model=model, diffusion=diffusion, hand_ae=hand_ae, cfg=cfg)
         trainer.validate(pl_model, datamodule=data_module)
     else:
-        sd = torch.load(cfg.ckpt_path, map_location='cpu')['state_dict']
+        sd = torch.load(cfg.ckpt_path, map_location='cpu', weights_only=False)['state_dict']
         print('total keys in ckpt:', len(sd.keys()))
         load_pl_ckpt(gridae, sd, prefix='grid_ae.')
         load_pl_ckpt(model, sd, prefix='model.')
-        # load_pl_ckpt(hand_ae, sd, prefix='hand_ae.')
+        load_pl_ckpt(hand_ae, sd, prefix='hand_ae.')
         unused_keys = [k for k in sd.keys() if not (k.startswith('grid_ae.') or k.startswith('model.') or k.startswith('hand_ae.'))]
         print(f'Unused keys in ckpt: {unused_keys}')
 

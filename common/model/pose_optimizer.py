@@ -145,7 +145,9 @@ def optimize_pose_contactopt(mano_layer, obj_verts, obj_normals, obj_contact_tar
     return global_pose, mano_pose, mano_shape, mano_trans, init_pose
 
 
-def optimize_pose_wrt_local_grids(mano_layer, grid_centers, target_pts, target_W_verts, weights, n_iter=1200, lr=0.01, grid_scale=0.01, w_repulsive=1.0):
+def optimize_pose_wrt_local_grids(mano_layer, grid_centers, target_pts, target_W_verts, weights,
+                                  n_iter=1200, lr=0.01, grid_scale=0.01, w_repulsive=1.0,
+                                  w_reg_loss=0.001, init_pose=None):
     """
     The loss used in pose optimization:
      * L2 loss between weighted target points and hand vertices
@@ -164,23 +166,45 @@ def optimize_pose_wrt_local_grids(mano_layer, grid_centers, target_pts, target_W
 
     contact_grid_mask = (weights.view(batch_size, num_grids, -1) > 0).any(dim=-1) # B x num_grids
     n_non_contact_grids = torch.sum(~contact_grid_mask).item()
-    ## Initialization
-    handV, handJ, _ = mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
-    root = handJ[:, 0:1]
-    Rs, ts = cp_match(target_W_verts @ handV - root, target_pts - root, weights.unsqueeze(-1))
-    global_pose = matrix_to_axis_angle(Rs)
-    mano_trans = ts
+
+    if init_pose is not None:
+        # init_pose format: [trans(3), full_pose(48), betas(10)] = 61 dims
+        # full_pose = [global_pose(3), finger_pose(45)]
+        mano_trans = init_pose[:, :3].clone()
+        full_pose = init_pose[:, 3:51].clone()
+        global_pose = full_pose[:, :3]
+        mano_pose = full_pose[:, 3:]
+        mano_shape = init_pose[:, 51:].clone()
+
+    else:
+        ## Initialization
+        handV, handJ, _ = mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
+        root = handJ[:, 0:1]
+        Rs, ts = cp_match(target_W_verts @ handV - root, target_pts - root, weights.unsqueeze(-1))
+        global_pose = matrix_to_axis_angle(Rs)
+        mano_trans = ts
 
     mano_pose.requires_grad = True
     mano_shape.requires_grad = True
     global_pose.requires_grad = True
-    mano_trans.requires_grad = True 
-    hand_opt_params = [global_pose, mano_pose, mano_shape, mano_trans]
-    optimizer = torch.optim.Adam(hand_opt_params, lr=lr)
+    mano_trans.requires_grad = True
+    hand_opt_params = [mano_trans, global_pose, mano_pose, mano_shape]
+    optimizer = torch.optim.AdamW(hand_opt_params, lr=lr)
+
+    # Determine if regularization loss should be used
+    use_reg_loss = init_pose is not None
+
     for it in range(n_iter):
         handV, handJ, _ = mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
         optimizer.zero_grad()
-        contact_loss = torch.mean(weights.unsqueeze(-1) * F.mse_loss(target_W_verts @ handV, target_pts, reduction='none')) * 10000
+
+        # Dictionary to organize losses
+        losses = {}
+
+        # Contact loss: weighted MSE between predicted and target points
+        losses['contact'] = torch.mean(weights.unsqueeze(-1) * F.mse_loss(target_W_verts @ handV, target_pts, reduction='none')) * 10000
+
+        # Repulsive loss: penalize hand vertices near non-contact grids
         grid_dist = torch.cdist(grid_centers, handV)  # B x num_grids x num_hand_verts
         if n_non_contact_grids > 0:
             non_contact_grid_dist = grid_dist[~contact_grid_mask].min(-1)[0]
@@ -189,15 +213,27 @@ def optimize_pose_wrt_local_grids(mano_layer, grid_centers, target_pts, target_W
             non_contact_grid_dist[correct_mask] = (non_contact_grid_dist[correct_mask] - grid_scale + 0.5)**2 + grid_scale - 0.25
             n_non_contact_grid_dist = non_contact_grid_dist / grid_scale * 2 + 1
             n_non_contact_c = sdf_to_contact(n_non_contact_grid_dist, None, method=2)
-            repulsive_loss = torch.sum(n_non_contact_c) / n_non_contact_grids 
-            # repulsive_loss = torch.sum(non_contact_grid_dist[non_contact_grid_dist < grid_scale] / grid_scale) / n_non_contact_grids
+            losses['repulsive'] = torch.sum(n_non_contact_c) / n_non_contact_grids
         else:
-            repulsive_loss = torch.tensor(0.0, device=target_pts.device)
-        loss = contact_loss + w_repulsive * repulsive_loss
-        
+            losses['repulsive'] = torch.tensor(0.0, device=target_pts.device)
+
+        # Regularization loss: only when init_pose is provided
+        if use_reg_loss:
+            pred_param = torch.cat(hand_opt_params, dim=1)
+            pose_diff = pred_param - init_pose
+            losses['reg'] = torch.mean(pose_diff**2)
+
+        # Total loss
+        loss = losses['contact'] + w_repulsive * losses['repulsive']
+        if use_reg_loss:
+            loss += w_reg_loss * losses['reg']
+
         loss.backward()
         optimizer.step()
+
+        # Logging every 100 iterations
         if it % 100 == 99:
-            print(f"Iter {it} | Loss: {loss.item():.6f} | Contact Loss: {contact_loss.item():.6f} | Repulsive Loss: {repulsive_loss.item():.6f}")
+            loss_strs = [f"{k}: {v.item():.6f}" for k, v in losses.items()]
+            print(f"Iter {it} | Loss: {loss.item():.6f} | {' | '.join(loss_strs)}")
     
     return [p.detach() for p in hand_opt_params]

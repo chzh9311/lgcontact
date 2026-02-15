@@ -60,7 +60,7 @@ class BaseHOIDataset(Dataset):
         else:
             self.grid_contact_ds = None
 
-        self.hand_cse = torch.load(cfg.get('hand_cse_path', 'data/misc/hand_cse.ckpt'))['state_dict']['embedding_tensor'].detach().cpu().numpy()
+        self.hand_cse = torch.load(cfg.get('hand_cse_path', 'data/misc/hand_cse.ckpt'), weights_only=False)['state_dict']['embedding_tensor'].detach().cpu().numpy()
         ## Calculate partitions
 
     def _load_data(self):
