@@ -14,7 +14,7 @@ from matplotlib import pyplot as plt
 from copy import deepcopy
 from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_rotation_6d
 
-from common.model.pose_optimizer import optimize_pose_wrt_local_grids
+from common.model.pose_optimizer import optimize_pose_by_contact, optimize_pose_wrt_local_grids
 
 from .lgcdifftrainer import LGCDiffTrainer
 from common.model.handobject import HandObject, recover_hand_verts_from_contact
@@ -296,16 +296,23 @@ class GraspDiffTrainer(LGCDiffTrainer):
             )
             recon_params, init_handV, init_handJ = self.hand_ae.decode(hand_latent)
             # recon_params = self.hand_ae.decoder(hand_latent)
-            recon_params[:, :3] = self.hand_ae.denormalize_trans(recon_params[:, :3])
-            # with torch.enable_grad():
-            #     mano_trans, global_pose, mano_pose, mano_shape = optimize_pose_wrt_local_grids(
-            #                 self.mano_layer, grid_centers=obj_msdf_center, target_pts=grid_coords.view(n_samples, -1, 3),
-            #                 target_W_verts=pred_targetWverts, weights=pred_grid_contact,
-            #                 n_iter=self.cfg.pose_optimizer.n_opt_iter, lr=self.cfg.pose_optimizer.opt_lr,
-            #                 grid_scale=self.cfg.msdf.scale, w_repulsive=self.cfg.pose_optimizer.w_repulsive,
-            #                 w_reg_loss=self.cfg.pose_optimizer.w_regularization, init_pose=recon_params)
-            # handV, handJ, _ = self.mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
-            handV, handJ = init_handV, init_handJ
+            with torch.enable_grad():
+                mano_trans, global_pose, mano_pose, mano_shape = optimize_pose_wrt_local_grids(
+                            self.mano_layer, grid_centers=obj_msdf_center, target_pts=grid_coords.view(n_samples, -1, 3),
+                            target_W_verts=pred_targetWverts, weights=pred_grid_contact, grid_sdfs=obj_msdf_grid.squeeze(1),
+                            dist2contact_fn=self.grid_dist_to_contact,
+                            n_iter=self.cfg.pose_optimizer.n_opt_iter, lr=self.cfg.pose_optimizer.opt_lr,
+                            grid_scale=self.cfg.msdf.scale, w_repulsive=self.cfg.pose_optimizer.w_repulsive,
+                            w_reg_loss=self.cfg.pose_optimizer.w_regularization, init_pose=recon_params)
+                # mano_trans, global_pose, mano_pose, mano_shape = optimize_pose_by_contact(
+                #             self.mano_layer, grid_centers=obj_msdf_center, target_pts=grid_coords.view(n_samples, -1, 3),
+                #             target_W_verts=pred_targetWverts, pred_contact=pred_grid_contact, dist2contact_fn=self.grid_dist_to_contact,
+                #             n_iter=self.cfg.pose_optimizer.n_opt_iter, lr=self.cfg.pose_optimizer.opt_lr,
+                #             grid_scale=self.cfg.msdf.scale, w_repulsive=self.cfg.pose_optimizer.w_repulsive,
+                #             w_reg_loss=self.cfg.pose_optimizer.w_regularization, init_pose=recon_params)
+
+            handV, handJ, _ = self.mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
+            # handV, handJ = init_handV, init_handJ
 
         handV, handJ = handV.detach().cpu().numpy(), handJ.detach().cpu().numpy()
 
@@ -314,6 +321,10 @@ class GraspDiffTrainer(LGCDiffTrainer):
                        'idx': i} for i in range(handV.shape[0])]
             
         result = calculate_metrics(param_list, metrics=self.cfg.test.criteria, pool=self.pool, reduction='none')
+
+        # Print average of all metrics
+        avg_metrics = {k: v.mean() for k, v in result.items()}
+        print(f"Average metrics: {avg_metrics}")
 
         self.all_results.append(result)
         self.sample_joints.append(handJ)
