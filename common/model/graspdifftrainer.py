@@ -288,12 +288,12 @@ class GraspDiffTrainer(LGCDiffTrainer):
             
             handV, handJ, _ = self.mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
         elif self.cfg.pose_optimizer.name == 'hybrid':
-            pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
-                self.hand_cse, None,
-                pred_grid_contact.reshape(n_samples, -1), pred_grid_cse.reshape(n_samples, -1, self.cse_dim),
-                grid_coords=grid_coords.reshape(n_samples, -1, 3),
-                mask_th = 2
-            )
+            # pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
+            #     self.hand_cse, None,
+            #     pred_grid_contact.reshape(n_samples, -1), pred_grid_cse.reshape(n_samples, -1, self.cse_dim),
+            #     grid_coords=grid_coords.reshape(n_samples, -1, 3),
+            #     mask_th = 2
+            # )
             recon_params, init_handV, init_handJ = self.hand_ae.decode(hand_latent)
             # recon_params = self.hand_ae.decoder(hand_latent)
             with torch.enable_grad():
