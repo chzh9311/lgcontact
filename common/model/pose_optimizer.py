@@ -145,7 +145,96 @@ def optimize_pose_contactopt(mano_layer, obj_verts, obj_normals, obj_contact_tar
     return global_pose, mano_pose, mano_shape, mano_trans, init_pose
 
 
+def optimize_pose_by_contact(mano_layer, grid_centers, target_pts, pred_contact, target_W_verts, dist2contact_fn,
+                            n_iter=1200, lr=0.01, grid_scale=0.01, w_repulsive=1.0,
+                            w_reg_loss=0.001, init_pose=None):
+    """
+    A simpler version of pose optimization that only uses the repulsive loss from local grids.
+    This is used in the ablation study to verify the effect of the contact loss.
+    """
+    batch_size, num_grids = grid_centers.shape[:2]
+    global_pose = torch.zeros((batch_size, 3), dtype=target_pts.dtype, device=target_pts.device)
+    batch_size, num_grids = grid_centers.shape[:2]
+    global_pose = torch.zeros((batch_size, 3), dtype=target_pts.dtype, device=target_pts.device)
+    mano_trans = torch.zeros((batch_size, 3), dtype=target_pts.dtype, device=target_pts.device)
+    
+    mano_pose = torch.zeros((batch_size, mano_layer.ncomps), dtype=target_pts.dtype, device=target_pts.device)
+    mano_shape = torch.zeros((batch_size, 10), dtype=target_pts.dtype, device=target_pts.device)
+
+    contact_grid_mask = (pred_contact.view(batch_size, num_grids, -1) > 0).any(dim=-1) # B x num_grids
+    contact_point_mask = contact_grid_mask.view(batch_size, num_grids, 1).repeat(1, 1, 512).view(batch_size, -1) # B x num_grids x 3 -> B x (num_grids * 3)
+    n_non_contact_grids = torch.sum(~contact_grid_mask).item()
+
+    if init_pose is not None:
+        # init_pose format: [trans(3), full_pose(48), betas(10)] = 61 dims
+        # full_pose = [global_pose(3), finger_pose(45)]
+        mano_trans = init_pose[:, :3].clone()
+        full_pose = init_pose[:, 3:51].clone()
+        global_pose = full_pose[:, :3]
+        mano_pose = full_pose[:, 3:]
+        mano_shape = init_pose[:, 51:].clone()
+        init_handV, init_handJ, _ = mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
+        init_handV = init_handV.detach()
+        init_handJ = init_handJ.detach()
+
+    else:
+        ## Initialization
+        handV, handJ, _ = mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
+        root = handJ[:, 0:1]
+        Rs, ts = cp_match(target_W_verts @ handV - root, target_pts - root, pred_contact.unsqueeze(-1))
+        global_pose = matrix_to_axis_angle(Rs)
+        mano_trans = ts
+    
+    mano_pose.requires_grad = True
+    mano_shape.requires_grad = True
+    global_pose.requires_grad = True
+    mano_trans.requires_grad = True
+    hand_opt_params = [mano_trans, global_pose, mano_pose, mano_shape]
+    optimizer = torch.optim.AdamW(hand_opt_params, lr=lr)
+
+    # Determine if regularization loss should be used
+    use_reg_loss = init_pose is not None
+    zero_contact = torch.zeros_like(pred_contact).to(pred_contact.device).float()
+
+    for it in range(n_iter):
+        handV, handJ, _ = mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
+        optimizer.zero_grad()
+
+        losses = {}
+        ## Contact loss: truly aligning the contact values
+        corr_pts = target_W_verts @ handV # (B x N x 3)
+        distance = torch.norm(corr_pts - target_pts, dim=-1)  # (B x N)
+        contact = dist2contact_fn(distance)  # (B x N)
+        contact_diff = (contact - pred_contact) * contact_point_mask
+
+        ### option1: use all contact
+        losses['contact'] = F.l1_loss(contact_diff, zero_contact)
+
+        if use_reg_loss:
+            pred_param = torch.cat(hand_opt_params, dim=1)
+            pose_diff = pred_param - init_pose
+            losses['reg'] = torch.mean(pose_diff**2)
+            # recon_diff = (torch.norm(handV - init_handV, dim=-1).mean() + torch.norm(handJ - init_handJ, dim=-1).mean()) / 2
+            # losses['reg'] = recon_diff 
+
+        # Total loss
+        loss = losses['contact']
+        if use_reg_loss:
+            loss += w_reg_loss * losses['reg']
+
+        loss.backward()
+        optimizer.step()
+
+        # Logging every 100 iterations
+        if it % 100 == 99:
+            loss_strs = [f"{k}: {v.item():.6f}" for k, v in losses.items()]
+            print(f"Iter {it} | Loss: {loss.item():.6f} | {' | '.join(loss_strs)}")
+    
+    return [p.detach() for p in hand_opt_params]
+
+
 def optimize_pose_wrt_local_grids(mano_layer, grid_centers, target_pts, target_W_verts, weights,
+                                  grid_sdfs, dist2contact_fn,
                                   n_iter=1200, lr=0.01, grid_scale=0.01, w_repulsive=1.0,
                                   w_reg_loss=0.001, init_pose=None):
     """
@@ -206,16 +295,27 @@ def optimize_pose_wrt_local_grids(mano_layer, grid_centers, target_pts, target_W
 
         # Repulsive loss: penalize hand vertices near non-contact grids
         grid_dist = torch.cdist(grid_centers, handV)  # B x num_grids x num_hand_verts
+        repul_loss = torch.tensor(0.0, device=target_pts.device)
         if n_non_contact_grids > 0:
-            non_contact_grid_dist = grid_dist[~contact_grid_mask].min(-1)[0]
-            correct_mask = non_contact_grid_dist > grid_scale
+            # non_contact_grid_dist = grid_dist[~contact_grid_mask].min(-1)[0]
+            # correct_mask = non_contact_grid_dist > grid_scale
             # increate the effect distance quickly beyond the grid scale
-            non_contact_grid_dist[correct_mask] = (non_contact_grid_dist[correct_mask] - grid_scale + 0.5)**2 + grid_scale - 0.25
-            n_non_contact_grid_dist = non_contact_grid_dist / grid_scale * 2 + 1
-            n_non_contact_c = sdf_to_contact(n_non_contact_grid_dist, None, method=2)
-            losses['repulsive'] = torch.sum(n_non_contact_c) / n_non_contact_grids
-        else:
-            losses['repulsive'] = torch.tensor(0.0, device=target_pts.device)
+            # non_contact_grid_dist[correct_mask] = (non_contact_grid_dist[correct_mask] - grid_scale + 0.5)**2 + grid_scale - 0.25
+            # n_non_contact_grid_dist = non_contact_grid_dist / grid_scale * 2 + 1
+            # n_non_contact_c = sdf_to_contact(n_non_contact_grid_dist, None, method=2)
+            # losses['repulsive'] = torch.sum(n_non_contact_c) / n_non_contact_grids
+
+            ## Option2: use SDF values to indicate penetrations directly
+            for b in range(batch_size):
+                contact_grid_mask_b = contact_grid_mask[b]
+                non_contact_grid_points = target_pts[b].view(num_grids, -1, 3)[~contact_grid_mask_b].view(-1, 3)  # num_non_contact_grids x 3
+                non_contact_grid_sdfs = grid_sdfs.view(num_grids, -1)[~contact_grid_mask_b].clone().view(-1)  # num_non_contact_grids
+                dist = torch.cdist(non_contact_grid_points, handV[b]).min(dim=-1)[0]  # num_non_contact_grids
+                pred_contact = dist2contact_fn(dist)  # num_non_contact_grids
+                non_contact_grid_sdfs[non_contact_grid_sdfs > 0] = 0  # Only consider negative SDF values (penetrations)
+                repul_loss += - torch.sum(pred_contact * non_contact_grid_sdfs) / (n_non_contact_grids + 1e-8)
+
+        losses['repulsive'] = repul_loss
 
         # Regularization loss: only when init_pose is provided
         if use_reg_loss:

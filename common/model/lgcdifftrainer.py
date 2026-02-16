@@ -15,7 +15,7 @@ from matplotlib import pyplot as plt
 
 from common.manopth.manopth.manolayer import ManoLayer
 from common.model.handobject import recover_hand_verts_from_contact
-from common.model.pose_optimizer import optimize_pose_wrt_local_grids
+from common.model.pose_optimizer import optimize_pose_wrt_local_grids, optimize_pose_by_contact
 from common.model.handobject import HandObject, recover_hand_verts_from_contact
 from common.model.hand_cse.hand_cse import HandCSE
 from common.utils.geometry import GridDistanceToContact
@@ -583,6 +583,12 @@ class LGCDiffTrainer(L.LightningModule):
                             target_W_verts=pred_targetWverts, weights=pred_grid_contact,
                             n_iter=self.cfg.pose_optimizer.n_opt_iter, lr=self.cfg.pose_optimizer.opt_lr,
                             grid_scale=self.cfg.msdf.scale, w_repulsive=self.cfg.pose_optimizer.w_repulsive)
+
+                # mano_trans, global_pose, mano_pose, mano_shape = optimize_pose_by_contact(
+                #             self.mano_layer, grid_centers=obj_msdf_center, target_pts=grid_coords.view(n_samples, -1, 3),
+                #             target_W_verts=pred_targetWverts, pred_contact=pred_grid_contact, dist2contact_fn=self.grid_dist_to_contact,
+                #             n_iter=self.cfg.pose_optimizer.n_opt_iter, lr=self.cfg.pose_optimizer.opt_lr,
+                #             grid_scale=self.cfg.msdf.scale, w_repulsive=self.cfg.pose_optimizer.w_repulsive)
 
             handV, handJ, _ = self.mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
 

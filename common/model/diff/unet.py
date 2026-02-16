@@ -227,7 +227,7 @@ class DualUNetModel(nn.Module):
         )
 
 
-    def forward(self, x_t: torch.Tensor,  ts: torch.Tensor, cond: Dict) -> torch.Tensor:
+    def forward(self, x_t: torch.Tensor,  ts: torch.Tensor, cond: Dict, is_train=True) -> torch.Tensor:
         """ Apply the model to an input batch
 
         Args:
@@ -280,7 +280,7 @@ class DualUNetModel(nn.Module):
             h_global = h_global.squeeze(1)
 
         difference_loss = torch.tensor(0.0, device=h_local.device)
-        if self.global2local_fn is not None:
+        if self.global2local_fn is not None and is_train:
             with torch.no_grad():
                 recon_local = self.global2local_fn(h_global, obj_msdf) # <B, N, d_x>
             # w = (ts / (self.n_timesteps - 1)).view(-1, 1, 1)

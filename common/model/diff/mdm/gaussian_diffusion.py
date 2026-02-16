@@ -1519,12 +1519,13 @@ class DualGaussianDiffusion(GaussianDiffusion):
     def p_mean_variance(
         self, model, x, t, condition=None, clip_denoised=True, denoised_fn=None, model_kwargs=None
     ):
-        # Wrap model to discard the extra difference_loss during sampling
+        # Wrap model to discard the extra difference_loss during sampling and pass is_train=False
         class _UnpackWrapper:
             def __init__(self, m):
                 self._model = m
             def __call__(self, *args, **kwargs):
-                output, _loss = self._model(*args, **kwargs)
+                # Pass is_train=False during sampling
+                output, _loss = self._model(*args, is_train=False, **kwargs)
                 return output
             def __getattr__(self, name):
                 return getattr(self._model, name)
