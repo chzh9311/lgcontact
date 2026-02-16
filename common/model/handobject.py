@@ -764,16 +764,44 @@ class HandObject:
     ## Grid contact visualizations
 
 
-def recover_hand_verts_from_contact(handcse, gt_face_idx, grid_contact, grid_cse, grid_coords, mask_th=0.01):
+def recover_hand_verts_from_contact(handcse, gt_face_idx, grid_contact, grid_cse, grid_coords, mask_th=0.01, chunk_size=0):
     """
     :param grid_contact: (B, N) contact values
     :param grid_cse: (B, N, D) contact signature embeddings
     :param grid_coords: (B, N, 3)
+    :param chunk_size: If > 0, process in chunks to reduce memory peak. If 0, process all at once.
     """
-    targetWverts = handcse.emb2Wvert(grid_cse, gt_face_idx)
-    # verts_mask = torch.sum(targetWverts, dim=1) > 0.01  # (B, 778)
-    weight = (targetWverts * grid_contact.unsqueeze(-1)).transpose(-1, -2)  # (B, 778, K^3)
-    verts_mask = torch.sum(weight, dim=-1) > mask_th  # (B, 778)
-    weight[verts_mask] = weight[verts_mask] / (torch.sum(weight[verts_mask], dim=-1, keepdim=True) + 1e-8)
-    pred_verts = weight @ grid_coords  # (B, 778, 3)
+    batch_size = grid_contact.shape[0]
+
+    # If chunk_size is 0 or batch_size <= chunk_size, process all at once
+    if chunk_size <= 0 or batch_size <= chunk_size:
+        targetWverts = handcse.emb2Wvert(grid_cse, gt_face_idx)
+        # verts_mask = torch.sum(targetWverts, dim=1) > 0.01  # (B, 778)
+        weight = (targetWverts * grid_contact.unsqueeze(-1)).transpose(-1, -2)  # (B, 778, K^3)
+        verts_mask = torch.sum(weight, dim=-1) > mask_th  # (B, 778)
+        weight[verts_mask] = weight[verts_mask] / (torch.sum(weight[verts_mask], dim=-1, keepdim=True) + 1e-8)
+        pred_verts = weight @ grid_coords  # (B, 778, 3)
+        return pred_verts, verts_mask
+
+    # Process in chunks to reduce memory peak
+    pred_verts_list = []
+    verts_mask_list = []
+    for i in range(0, batch_size, chunk_size):
+        end_idx = min(i + chunk_size, batch_size)
+
+        chunk_grid_contact = grid_contact[i:end_idx]
+        chunk_grid_cse = grid_cse[i:end_idx]
+        chunk_grid_coords = grid_coords[i:end_idx]
+
+        targetWverts = handcse.emb2Wvert(chunk_grid_cse, gt_face_idx)
+        weight = (targetWverts * chunk_grid_contact.unsqueeze(-1)).transpose(-1, -2)  # (chunk, 778, K^3)
+        chunk_verts_mask = torch.sum(weight, dim=-1) > mask_th  # (chunk, 778)
+        weight[chunk_verts_mask] = weight[chunk_verts_mask] / (torch.sum(weight[chunk_verts_mask], dim=-1, keepdim=True) + 1e-8)
+        chunk_pred_verts = weight @ chunk_grid_coords  # (chunk, 778, 3)
+
+        pred_verts_list.append(chunk_pred_verts)
+        verts_mask_list.append(chunk_verts_mask)
+
+    pred_verts = torch.cat(pred_verts_list, dim=0)
+    verts_mask = torch.cat(verts_mask_list, dim=0)
     return pred_verts, verts_mask

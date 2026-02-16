@@ -272,7 +272,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
                 self.hand_cse, None,
                 pred_grid_contact.reshape(n_samples, -1), pred_grid_cse.reshape(n_samples, -1, self.cse_dim),
                 grid_coords=grid_coords.reshape(n_samples, -1, 3),
-                mask_th = 2
+                mask_th = 2, chunk_size=10
             )
             recon_param, _ = self.hand_ae(pred_hand_verts.permute(0, 2, 1), mask=pred_verts_mask.unsqueeze(1), is_training=False)
             nrecon_trans, recon_pose, recon_betas = torch.split(recon_param, [3, 48, 10], dim=1)
@@ -354,7 +354,8 @@ class GraspDiffTrainer(LGCDiffTrainer):
             pred_grid_contact.reshape(n_samples, -1),
             pred_grid_cse.reshape(n_samples, -1, self.cse_dim),
             grid_coords=grid_coords.reshape(n_samples, -1, 3),
-            mask_th = 2
+            mask_th=2,
+            chunk_size=10  # Process in chunks of 10 to reduce memory peak
         )
 
         # Visualize all samples
