@@ -11,10 +11,10 @@ from lightning import LightningDataModule
 from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
 from tqdm import tqdm
 from copy import deepcopy
-
 from multiprocessing.pool import Pool
+from pysdf import SDF
 
-from common.msdf.utils.msdf import calculate_contact_mask, calc_local_grid_all_pts
+from common.msdf.utils.msdf import calculate_contact_mask, calc_local_grid_all_pts_gpu
 from common.msdf.simplified_msdf import mesh2msdf
 from common.manopth.manopth.manolayer import ManoLayer
 import open3d as o3d
@@ -47,132 +47,201 @@ class LocalGridDataModule(LightningDataModule):
         """
         data_cfg = deepcopy(self.cfg)
         for split in ['train', 'val', 'test']:
-        # for split in ['val']:
-            masks = []
-            os.makedirs(osp.join(self.preprocessed_dir, self.dataset_name, split), exist_ok=True)
-            self.base_dataset = getattr(self.module, self.cfg.dataset_name.upper() + 'Dataset')(data_cfg, split, load_msdf=False, test_gt=True)
-            # loader = DataLoader(self.base_dataset, batch_size=64, shuffle=False, num_workers=8)
-            # masks = []
-            # if not osp.exists(preprocessed_file):
-            #     for sample in tqdm(loader, total=len(loader), desc="Preparing local grid masks..."):
-            #         obj_rot = sample['objRot']
-            #         obj_t = sample['objTrans']
-            #         objR = axis_angle_to_matrix(obj_rot)
-            #         if self.cfg.dataset_name == 'grab':
-            #             objR = objR.transpose(-1, -2)
-            #         obj_name = sample['objName']
-            #         # simp_obj_mesh = self.base_dataset.simp_obj_mesh[obj_name]
-            #         # Apply rotation and translation to mesh vertices
-            #         # obj_verts = simp_obj_mesh['verts'] @ objR.T + obj_t
-            #         # obj_faces = simp_obj_mesh['faces']
-            #         # obj_mesh = trimesh.Trimesh(vertices=obj_verts, faces=obj_faces, process=False)
-            #         hand_verts = sample['handVerts']
-            #         # result_grid, mask = calculate_local_grid(sample['objSamplePts'], obj_mesh, self.cfg.msdf.scale, self.cfg.msdf.kernel_size,
-            #         #                                 hand_verts, self.hand_cse, device='cuda:0')
-            #         # result_grid = result_grid.detach().cpu().numpy()
-            #         mask, _ = calculate_contact_mask(sample['objSamplePts'], hand_verts, self.cfg.msdf.scale, device='cuda:0')
-            #         mask = mask.detach().cpu().numpy()
+            local_grid_file = osp.join(self.preprocessed_dir, self.dataset_name, split, f'local_grid_values_{self.cfg.msdf.scale*1000:.1f}mm.h5')
+            if not osp.exists(local_grid_file):
+                os.makedirs(osp.join(self.preprocessed_dir, self.dataset_name, split), exist_ok=True)
+                self.base_dataset = getattr(self.module, self.cfg.dataset_name.upper() + 'Dataset')(data_cfg, split, load_msdf=False, test_gt=True)
+                loader = DataLoader(self.base_dataset, batch_size=64, shuffle=False, num_workers=8)
+                device = 'cuda' if torch.cuda.is_available() else 'cpu'
+                kernel_size = self.cfg.msdf.kernel_size
+                total_samples = len(self.base_dataset)
 
-            #         ## Also add samples from non-contact regions
-            #         # contact_indices = np.where(mask)
-            #         # non_contact_indices = np.where(~mask)
-            #         # n_contact_samples = len(contact_indices[0])
-            #         # n_non_contact_samples = int(n_contact_samples * self.cfg.non_contact_rate)
-            #         # if n_non_contact_samples > 0 and len(non_contact_indices[0]) > 0:
-            #         #     n_non_contact_samples = min(n_non_contact_samples, len(non_contact_indices[0]))
-            #         #     selected_idx = np.random.choice(len(non_contact_indices[0]), n_non_contact_samples, replace=False)
-            #         #     selected_non_contact = tuple(idx[selected_idx] for idx in non_contact_indices)
-            #         #     mask[selected_non_contact] = True
+                os.makedirs(osp.dirname(local_grid_file), exist_ok=True)
 
-            #         # Clear GPU cache to prevent memory leaks
-            #         torch.cuda.empty_cache()
+                # Create HDF5 file with resizable datasets
+                n_sample_pts = self.cfg.n_sample_pts
+                batch_write_size = 1000  # Write to H5 file every N samples
 
-                    # Save and immediately clear the results to free memory
-                    # result['local_grids'].append(result_grid)
+                # Buffers for batched writing
+                grid_distance_buffer = []
+                grid_sdf_buffer = []
+                nn_face_idx_buffer = []
+                nn_point_buffer = []
+                grid_sample_idx_buffer = []
+                verts_mask_buffer = []
+                grid_mask_buffer = []
+                ho_dist_buffer = []
 
-            loader = DataLoader(self.base_dataset, batch_size=20, shuffle=False, num_workers=8)
-            local_grid_dir = osp.join(self.preprocessed_dir, self.dataset_name, split, f'local_grid_values_{self.cfg.msdf.scale*1000:.1f}mm_every{self.cfg.downsample_rate[split]}')
-            if not osp.exists(local_grid_dir):
-                os.makedirs(local_grid_dir, exist_ok=True)
-                pool = Pool(processes=20)
-                for idx, sample in tqdm(enumerate(loader), total=len(loader), desc="Preparing local grid data..."):
-                    if split == 'train' and idx < 449:
-                        continue
-                    obj_samples = sample['objSamplePts'].numpy() # (B, N, 3)
-                    hand_verts = sample['handVerts'].numpy() # (B, H, 3)
+                # Estimate initial grid capacity (will grow if needed)
+                grid_alloc_size = int(total_samples * n_sample_pts / 4 * self.cfg.sample_rate[split])  # rough estimate
+                grid_alloc_step = grid_alloc_size  # grow by this much when needed
 
-                    obj_rot = sample['objRot']
-                    obj_t = sample['objTrans']
-                    objR = axis_angle_to_matrix(obj_rot)
-                    if self.dataset_name == 'grab':
-                        objR = objR.transpose(-1, -2)
-                    obj_names = sample['objName']
-                    objR = objR.numpy()
-                    obj_meshes = []
-                    for i, obj_name in enumerate(obj_names):
-                        mesh_dict = self.base_dataset.simp_obj_mesh[obj_name]
-                        obj_verts = (objR[i] @ mesh_dict['verts'].T).T + obj_t[i].numpy()
-                        obj_faces = mesh_dict['faces']
-                        obj_mesh = trimesh.Trimesh(vertices=obj_verts, faces=obj_faces, process=False)
-                        obj_meshes.append(obj_mesh)
+                with h5py.File(local_grid_file, 'w') as f:
+                    # Per-sample datasets: pre-allocate to full size (known upfront)
+                    f.create_dataset('verts_mask', shape=(total_samples, n_sample_pts, 778),
+                                     dtype='bool', compression='gzip', compression_opts=4,
+                                     chunks=(10, n_sample_pts, 778))
+                    f.create_dataset('grid_mask', shape=(total_samples, n_sample_pts),
+                                     dtype='bool', compression='gzip', compression_opts=4,
+                                     chunks=(10, n_sample_pts))
+                    f.create_dataset('ho_dist', shape=(total_samples, n_sample_pts, 778),
+                                     dtype='float32', compression='gzip', compression_opts=4,
+                                     chunks=(10, n_sample_pts, 778))
 
-                    param_list = [{'contact_points': obj_samples[i], 'normalized_coords': self.normalized_coords.numpy(),
-                                'obj_mesh': obj_meshes[i], 'hand_mesh': trimesh.Trimesh(vertices=hand_verts[i], faces=self.mano_faces, process=False),
-                                'kernel_size': self.cfg.msdf.kernel_size, 'grid_scale': self.cfg.msdf.scale, 'hand_cse': self.hand_cse,
-                                'idx': idx * loader.batch_size + i, 'save_dir': local_grid_dir,
-                                } for i in range(len(obj_names))]
-                    pool.map(self.calc_and_save_local_grid, param_list)
-                    # for param in tqdm(param_list):
-                    #     print(f"processing sample idx: {param['idx']}")
-                    #     self.calc_and_save_local_grid(param)
+                    # Per-grid datasets: over-allocate, trim at end
+                    f.create_dataset('grid_distance', shape=(grid_alloc_size, kernel_size, kernel_size, kernel_size, 1),
+                                     maxshape=(None, kernel_size, kernel_size, kernel_size, 1),
+                                     dtype='float32', compression='gzip', compression_opts=4,
+                                     chunks=(10, kernel_size, kernel_size, kernel_size, 1))
+                    f.create_dataset('grid_sdf', shape=(grid_alloc_size, kernel_size, kernel_size, kernel_size, 1),
+                                     maxshape=(None, kernel_size, kernel_size, kernel_size, 1),
+                                     dtype='float32', compression='gzip', compression_opts=4,
+                                     chunks=(10, kernel_size, kernel_size, kernel_size, 1))
+                    f.create_dataset('nn_face_idx', shape=(grid_alloc_size, kernel_size, kernel_size, kernel_size),
+                                     maxshape=(None, kernel_size, kernel_size, kernel_size),
+                                     dtype='int64', compression='gzip', compression_opts=4,
+                                     chunks=(10, kernel_size, kernel_size, kernel_size))
+                    f.create_dataset('nn_point', shape=(grid_alloc_size, kernel_size, kernel_size, kernel_size, 3),
+                                     maxshape=(None, kernel_size, kernel_size, kernel_size, 3),
+                                     dtype='float32', compression='gzip', compression_opts=4,
+                                     chunks=(10, kernel_size, kernel_size, kernel_size, 3))
+                    f.create_dataset('grid_sample_idx', shape=(grid_alloc_size, 2), maxshape=(None, 2), dtype='int32',
+                                     chunks=(1000, 2))
 
-                pool.close()
-                pool.join()
+                    write_idx_grids = 0  # Tracks position in grid_distance
+                    write_idx_samples = 0  # Tracks position in per-sample arrays
+                    sample_counter = 0  # Absolute sample index for grid_to_sample_idx
 
-            preprocessed_mask_file = osp.join(self.preprocessed_dir, self.dataset_name, split, f'local_grid_masks_{self.cfg.msdf.scale*1000:.1f}mm_every{self.cfg.downsample_rate[split]}.npy')
-            if not osp.exists(preprocessed_mask_file):
-                for i in tqdm(range(len(os.listdir(local_grid_dir))), desc="Collecting local grid masks..."):
-                    f = osp.join(local_grid_dir, f'{i:08d}_local_grid.h5')
-                    with h5py.File(f, 'r') as data:
-                        mask = data['grid_mask'][:]
-                        masks.append(mask)
-                    # if cnt > next_save_cnt:
-                    #     concatenated_grids = np.concatenate(result['local_grids'], axis=0)
-                    #     concatenated_masks = np.concatenate(result['mask'], axis=0)
-                    #     with open(osp.join(self.preprocessed_dir, 'grab', split, f'{cnt + 2 - save_gap:08d}-{cnt:08d}_local_grid.pkl'), 'wb') as f:
-                    #         pickle.dump({'local_grids': concatenated_grids, 'mask': concatenated_masks}, f)
-                    #     print(f"Saved local grid for subject-object pair: {prev_sbj}, {prev_obj_name}.")
+                    def flush_buffers():
+                        """Write buffered data to H5 file"""
+                        nonlocal write_idx_grids, write_idx_samples, grid_alloc_size
 
-                    # concatenated_grids = np.concatenate(result['local_grids'], axis=0)
-                    # concatenated_masks = np.concatenate(result['mask'], axis=0)
-                all_mask = np.stack(masks, axis=0)
-                np.save(preprocessed_mask_file, all_mask)
-                # grid_data, verts_mask, grid_mask, nn_face_idx, nn_point = calc_local_grid_all_pts(obj_samples, self.normalized_coords.numpy(), obj_mesh, hand_mesh,
-                #                                         self.cfg.msdf.kernel_size, self.cfg.msdf.scale, self.hand_cse)
-                # pool.apply_async(np.savez_compressed, args=(save_path,), kwds={'grid_data': grid_data, 'verts_mask': verts_mask})
-    
-    @staticmethod
-    def calc_and_save_local_grid(param):
-        contact_points = param['contact_points']
-        normalized_coords = param['normalized_coords']
-        obj_mesh = param['obj_mesh']
-        hand_mesh = param['hand_mesh']
-        kernel_size = param['kernel_size']
-        grid_scale = param['grid_scale']
-        hand_cse = param['hand_cse']
-        idx = param['idx']
-        local_grid_dir = param['save_dir']
-        grid_data, verts_mask, grid_mask, _, nn_face_idx, nn_point = calc_local_grid_all_pts(contact_points, normalized_coords, obj_mesh, hand_mesh,
-                                                        kernel_size, grid_scale, hand_cse)
-        save_path = osp.join(local_grid_dir, f'{idx:08d}_local_grid.h5')
-        with h5py.File(save_path, 'w') as f:
-            f.create_dataset('grid_data', data=grid_data, compression='gzip', compression_opts=4)
-            f.create_dataset('verts_mask', data=verts_mask, compression='gzip', compression_opts=4)
-            f.create_dataset('grid_mask', data=grid_mask, compression='gzip', compression_opts=4)
-            f.create_dataset('nn_face_idx', data=nn_face_idx, compression='gzip', compression_opts=4)
-            f.create_dataset('nn_point', data=nn_point, compression='gzip', compression_opts=4)
-        # return grid_mask
-        print('Saved local grid data to ', save_path)
+                        if not grid_mask_buffer:
+                            return
+
+                        # Calculate total number of grids to write
+                        total_grids = sum(len(buf) for buf in grid_distance_buffer)
+                        total_samples_buf = len(grid_mask_buffer)
+
+                        # Grow grid datasets only if needed
+                        needed = write_idx_grids + total_grids
+                        if needed > grid_alloc_size:
+                            grid_alloc_size = needed + grid_alloc_step
+                            for key in ['grid_distance', 'grid_sdf', 'nn_face_idx', 'nn_point', 'grid_sample_idx']:
+                                f[key].resize(grid_alloc_size, axis=0)
+
+                        # Write grid data
+                        if grid_distance_buffer:
+                            f['grid_distance'][write_idx_grids:write_idx_grids + total_grids] = np.concatenate(grid_distance_buffer, axis=0)
+                            f['grid_sdf'][write_idx_grids:write_idx_grids + total_grids] = np.concatenate(grid_sdf_buffer, axis=0)
+                            f['nn_face_idx'][write_idx_grids:write_idx_grids + total_grids] = np.concatenate(nn_face_idx_buffer, axis=0)
+                            f['nn_point'][write_idx_grids:write_idx_grids + total_grids] = np.concatenate(nn_point_buffer, axis=0)
+                            f['grid_sample_idx'][write_idx_grids:write_idx_grids + total_grids] = np.concatenate(grid_sample_idx_buffer, axis=0)
+
+                        # Write per-sample data (no resize needed, pre-allocated)
+                        if verts_mask_buffer:
+                            f['verts_mask'][write_idx_samples:write_idx_samples + total_samples_buf] = np.stack(verts_mask_buffer, axis=0)
+                            f['grid_mask'][write_idx_samples:write_idx_samples + total_samples_buf] = np.stack(grid_mask_buffer, axis=0)
+                            f['ho_dist'][write_idx_samples:write_idx_samples + total_samples_buf] = np.stack(ho_dist_buffer, axis=0)
+
+                        write_idx_grids += total_grids
+                        write_idx_samples += total_samples_buf
+
+                        # Clear buffers
+                        grid_distance_buffer.clear()
+                        grid_sdf_buffer.clear()
+                        nn_face_idx_buffer.clear()
+                        nn_point_buffer.clear()
+                        grid_sample_idx_buffer.clear()
+                        verts_mask_buffer.clear()
+                        grid_mask_buffer.clear()
+                        ho_dist_buffer.clear()
+
+                    for idx, sample in tqdm(enumerate(loader), total=len(loader), desc="Preparing local grid data..."):
+                        obj_samples = sample['objSamplePts']  # (B, N, 3)
+                        hand_verts = sample['handVerts']  # (B, H, 3)
+                        obj_rot = sample['objRot']
+                        obj_t = sample['objTrans']
+                        objR = axis_angle_to_matrix(obj_rot)
+                        obj_names = sample['objName']
+                        # frame_names = sample['frameName']
+
+                        batch_size = obj_samples.shape[0]
+
+                        # Process each sample in the batch
+                        for i in range(batch_size):
+                            # Move to GPU and call GPU-optimized function
+                            grid_distance, verts_mask, grid_mask, ho_dist, nn_face_idx, nn_point = calc_local_grid_all_pts_gpu(
+                                obj_samples[i].to(device),
+                                self.normalized_coords.to(device),
+                                hand_verts[i].to(device),
+                                self.mano_layer.th_faces.to(device),
+                                kernel_size,
+                                self.cfg.msdf.scale,
+                                apply_grid_mask=True,
+                                sample_rate=self.cfg.sample_rate[split],
+                                far_point_rate=self.cfg.get('far_point_rate', 0.0)
+                            )
+
+                            # Move results back to CPU
+                            grid_distance_np = grid_distance.cpu().numpy()
+                            verts_mask_np = verts_mask.cpu().numpy()
+                            grid_mask_np = grid_mask.cpu().numpy()
+                            ho_dist_np = ho_dist.cpu().numpy()
+                            nn_face_idx_np = nn_face_idx.cpu().numpy()
+                            nn_point_np = nn_point.cpu().numpy()
+
+                            # Get number of active grids for this sample
+                            M = grid_distance_np.shape[0]
+
+                            # Calculate SDF grids for active contact points
+                            # Get transformed object mesh
+                            mesh_dict = self.base_dataset.simp_obj_mesh[obj_names[i]]
+                            obj_verts_transformed = (objR[i].numpy() @ mesh_dict['verts'].T).T + obj_t[i].numpy()
+                            obj_mesh = trimesh.Trimesh(vertices=obj_verts_transformed, faces=mesh_dict['faces'], process=False)
+
+                            # Calculate SDF for grid points of active grids
+                            objSDF = SDF(obj_mesh.vertices, obj_mesh.faces)
+
+                            # Get active contact points and create grid points
+                            active_contact_points = obj_samples[i][grid_mask_np].numpy()  # (M, 3)
+                            grid_points_all = (active_contact_points[:, None, :] +
+                                             self.normalized_coords.numpy()[None, :, :] * self.cfg.msdf.scale)  # (M, K^3, 3)
+                            grid_points_flat = grid_points_all.reshape(-1, 3)  # (M * K^3, 3)
+
+                            # Calculate SDF values
+                            grid_sdf_flat = - objSDF(grid_points_flat)
+                            grid_sdf_np = grid_sdf_flat.reshape(M, kernel_size, kernel_size, kernel_size, 1)
+
+                            # Add to buffers instead of writing immediately
+                            grid_distance_buffer.append(grid_distance_np)
+                            grid_sdf_buffer.append(grid_sdf_np)
+                            nn_face_idx_buffer.append(nn_face_idx_np)
+                            nn_point_buffer.append(nn_point_np)
+                            grid_sample_idx_buffer.append(
+                                np.stack([np.arange(M), np.full(M, sample_counter, dtype=np.int32)], axis=-1))
+                            verts_mask_buffer.append(verts_mask_np)
+                            grid_mask_buffer.append(grid_mask_np)
+                            ho_dist_buffer.append(ho_dist_np)
+                            # frame_names_buffer.append(frame_names[i])
+
+                            sample_counter += 1
+
+                            # Flush buffers periodically
+                            if len(grid_mask_buffer) >= batch_write_size:
+                                flush_buffers()
+
+                            # Clear GPU cache
+                            torch.cuda.empty_cache()
+
+                    # Write any remaining buffered data
+                    flush_buffers()
+
+                    # Trim over-allocated grid datasets to actual size
+                    for key in ['grid_distance', 'grid_sdf', 'nn_face_idx', 'nn_point', 'grid_sample_idx']:
+                        f[key].resize(write_idx_grids, axis=0)
+
+                print(f'Saved local grid data to {local_grid_file}')
 
     def setup(self, stage: str):
         if stage == 'fit':
@@ -191,6 +260,13 @@ class LocalGridDataModule(LightningDataModule):
 
     def test_dataloader(self):
         return DataLoader(self.test_set, batch_size=self.test_batch_size, shuffle=False, num_workers=self.cfg.num_workers)
+
+    def on_after_batch_transfer(self, batch, dataloader_idx):
+        if isinstance(batch, dict):
+            return {k: v.float() if isinstance(v, torch.Tensor) and v.is_floating_point() else v for k, v in batch.items()}
+        elif isinstance(batch, torch.Tensor) and batch.is_floating_point():
+            return batch.float()
+        return batch
 
 
 class HOIDatasetModule(LightningDataModule):

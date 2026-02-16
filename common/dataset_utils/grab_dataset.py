@@ -194,6 +194,8 @@ class GRABDataset(BaseHOIDataset):
             self.obj_hulls[obj_name] = hulls
             obj_model = trimesh.Trimesh(self.obj_info[obj_name]['verts'], self.obj_info[obj_name]['faces'])
             self.obj_model[obj_name] = obj_model
+
+            ## downsample the object sampled points.
             # self.obj_mass[obj_name] = obj_model.volume * 1000 # sum([h.volume for h in hulls]) * 1000 # 1000 kg / m^3
 
         sbj_info = np.load(osp.join(self.data_dir, 'sbj_info.npy'), allow_pickle=True).item()

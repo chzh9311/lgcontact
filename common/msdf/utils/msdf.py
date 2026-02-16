@@ -547,6 +547,10 @@ def nn_dist_to_mesh_gpu(points, hand_verts, faces):
         face_indices: torch.LongTensor (N,), nearest face indices
         closest_points: torch.Tensor (N, 3), nearest points on mesh surface
     """
+    # Kaolin expects double precision (float64)
+    points = points.double()
+    hand_verts = hand_verts.double()
+
     # Kaolin expects batched input: (B, N, 3) and (B, F, 3, 3)
     face_verts = index_vertices_by_faces(
         hand_verts.unsqueeze(0), faces
@@ -567,10 +571,12 @@ def nn_dist_to_mesh_gpu(points, hand_verts, faces):
 
     distances = torch.sqrt(sq_dist.clamp(min=0))
 
-    return distances, face_idx, closest_points
+    # Convert back to float32
+    return distances.float(), face_idx, closest_points.float()
 
 
-def calc_local_grid_all_pts_gpu(contact_points, normalized_coords, hand_verts, faces, kernel_size, grid_scale, apply_grid_mask=True):
+def calc_local_grid_all_pts_gpu(contact_points, normalized_coords, hand_verts, faces, kernel_size, grid_scale,
+                                apply_grid_mask=True, sample_rate=1, far_point_rate=0):
     """
     GPU-accelerated version of calc_local_grid_all_pts using Kaolin.
 
@@ -583,6 +589,10 @@ def calc_local_grid_all_pts_gpu(contact_points, normalized_coords, hand_verts, f
         faces: (F, 3) face indices (LongTensor)
         kernel_size: int, size of the cubic grid
         grid_scale: float, scale of the grid
+        apply_grid_mask: bool, whether to skip grid calculations for contact points with no nearby hand verts
+        sample_rate: float, fraction of grid points to sample for distance calculation (to save memory)
+        far_point_rate: float, fraction of points to add to the mask as "far" points even if they have no nearby hand verts;
+                        The fraction is relative to the number of "near" points that have nearby hand verts. This is to provide negative samples for training.
 
     Returns:
         grid_distance: (M, K, K, K, 1) distances for active grids
@@ -602,20 +612,47 @@ def calc_local_grid_all_pts_gpu(contact_points, normalized_coords, hand_verts, f
     verts_mask = ho_dist < grid_scale  # (N, V)
 
     if apply_grid_mask:
-        grid_mask = verts_mask.any(dim=1)  # (N,)
-        M = grid_mask.sum().item()
+        # Initial grid mask based on nearby hand vertices
+        grid_mask_initial = verts_mask.any(dim=1)  # (N,)
+        n_near_points = grid_mask_initial.sum().item()
 
-        if M == 0:
+        if n_near_points == 0:
             K = kernel_size
             V = hand_verts.shape[0]
             return (
                 torch.empty(0, K, K, K, 1, device=device),
                 verts_mask,
-                grid_mask,
+                torch.zeros(N, dtype=torch.bool, device=device),
                 ho_dist,
                 torch.empty(0, K, K, K, dtype=torch.long, device=device),
                 torch.empty(0, K, K, K, 3, device=device),
             )
+
+        # Step 1: Calculate number of masked points after sampling
+        n_sampled_near = int(n_near_points * sample_rate)
+
+        # Step 2: Calculate number of far points to add
+        n_far_points = int(n_sampled_near * far_point_rate)
+
+        # Step 3: Sample points from the initial mask
+        if sample_rate < 1.0 and n_sampled_near > 0:
+            near_indices = torch.where(grid_mask_initial)[0]
+            sampled_indices = near_indices[torch.randperm(n_near_points, device=device)[:n_sampled_near]]
+            grid_mask = torch.zeros(N, dtype=torch.bool, device=device)
+            grid_mask[sampled_indices] = True
+        else:
+            grid_mask = grid_mask_initial.clone()
+
+        # Step 4: Add far points to the mask
+        if far_point_rate > 0 and n_far_points > 0:
+            far_candidates = torch.where(~grid_mask_initial)[0]
+            n_available_far = far_candidates.shape[0]
+            if n_available_far > 0:
+                n_far_points = min(n_far_points, n_available_far)
+                far_indices = far_candidates[torch.randperm(n_available_far, device=device)[:n_far_points]]
+                grid_mask[far_indices] = True
+
+        M = grid_mask.sum().item()
 
         # Build grid points for active contact points
         grid_points_flat = (

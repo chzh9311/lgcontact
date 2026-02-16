@@ -170,7 +170,7 @@ def vis_local_grid_interact(cfg):
     # test_loader = dm.test_dataloader()
     print(f"Validation dataset size: {len(dm.val_set)}")
     for batch_idx, batch in tqdm(enumerate(val_loader), total=len(val_loader), desc="Visualizing validation data"):
-        grid_data = batch['localGrid']  # (B, K, K, K, C)
+        grid_data = torch.cat([batch['gridSDF'], batch['gridContact'], batch['gridHandCSE']], dim=-1)  # (B, K, K, K, C)
         batch_size = grid_data.shape[0]
         for b in range(10):
             # break
@@ -187,7 +187,6 @@ def vis_local_grid_interact(cfg):
             # Handle rotation - check if it's axis-angle or matrix
             if obj_rot.shape == (3,):
                 from pytorch3d.transforms import axis_angle_to_matrix
-                import torch
                 objR = axis_angle_to_matrix(torch.from_numpy(obj_rot)).numpy()
                 if dm.val_set.dataset_name == 'grab':
                     objR = objR.T
@@ -308,8 +307,8 @@ def fit_mano_beta(cfg):
 if __name__ == "__main__":
     # vis_msdf_data_sample()
     # test_obj()
-    # vis_local_grid_interact()
+    vis_local_grid_interact()
     # test_pointvae()
     # compare_ckpt()
     # test_hoi4d_datamodule()
-    test_manolayer()
+    # test_manolayer()

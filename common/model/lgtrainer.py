@@ -28,7 +28,8 @@ class LGTrainer(L.LightningModule):
         self.loss_weights = cfg.train.loss_weights
         self.lr = cfg.train.lr
         self.mano_layer = ManoLayer(mano_root=cfg.data.mano_root, side='right',
-                                    use_pca=False, ncomps=45, flat_hand_mean=True)
+                                    use_pca=False, ncomps=45, flat_hand_mean=True).requires_grad_(False)
+        self.hand_part_ids = torch.argmax(self.mano_layer.th_weights, dim=-1).detach().cpu().numpy()
         cse_ckpt = torch.load(cfg.data.hand_cse_path)
 
         handF = self.mano_layer.th_faces
@@ -50,13 +51,14 @@ class LGTrainer(L.LightningModule):
     
     def train_val_step(self, batch, batch_idx, stage):
         self.grid_coords = self.grid_coords.to(self.device)
-        grid_sdf, gt_grid_contact = batch['localGrid'][..., 0], batch['localGrid'][..., 1:]
+        grid_sdf = batch['gridSDF'].squeeze(-1)
+        gt_grid_contact = torch.cat([batch['gridContact'], batch['gridHandCSE']], dim=-1)
 
         recon_cgrid, posterior, obj_feat = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
         recon_cgrid = recon_cgrid.permute(0, 2, 3, 4, 1)
         contact, contact_hat = gt_grid_contact[..., 0], recon_cgrid[..., 0]
         cse, cse_hat = gt_grid_contact[..., 1:], recon_cgrid[..., 1:]
-        self.check_latents(posterior)
+        # self.check_latents(posterior)
 
         batch_size = grid_sdf.shape[0]
         pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
@@ -87,6 +89,7 @@ class LGTrainer(L.LightningModule):
                 pred_hand_verts=batch['nHandVerts'],
                 hand_faces=self.mano_layer.th_faces,
                 pred_mask=batch['handVertMask'],
+                part_ids=self.hand_part_ids,
                 batch_idx=0
             )
             pred_geoms = self.visualize_grid_and_hand(
@@ -97,6 +100,7 @@ class LGTrainer(L.LightningModule):
                 pred_mask=batch['handVertMask'],
                 gt_mask=batch['handVertMask'],
                 gt_hand_verts=batch['nHandVerts'],
+                part_ids=self.hand_part_ids,
                 batch_idx=0
             )
             if self.debug:
@@ -230,7 +234,7 @@ class LGTrainer(L.LightningModule):
     
     @staticmethod
     def visualize_grid_and_hand(grid_coords, grid_contact, pred_hand_verts, hand_faces, pred_mask,
-                                 batch_idx=0, gt_hand_verts=None, gt_mask=None):
+                                part_ids, batch_idx=0, gt_hand_verts=None, gt_mask=None):
         """
         Visualize grid points colored by contact likelihood and masked hand mesh.
 
@@ -288,10 +292,8 @@ class LGTrainer(L.LightningModule):
 
         # 2. Create predicted masked hand mesh and isolated vertices
         pred_geometries = extract_masked_mesh_components(
-            pred_hand_verts_np, hand_faces_np, pred_mask_np,
+            pred_hand_verts_np, hand_faces_np, pred_mask_np, part_ids=part_ids,
             create_geometries=True,
-            mesh_color=[0.8, 0.6, 0.4],  # Skin color for prediction
-            isolated_color=[1.0, 0.0, 0.0]  # Red for isolated points
         )
         geometries.extend(pred_geometries)
 
@@ -310,10 +312,8 @@ class LGTrainer(L.LightningModule):
 
             # Create GT masked hand mesh and isolated vertices
             gt_geometries = extract_masked_mesh_components(
-                gt_hand_verts_np, hand_faces_np, gt_mask_np,
+                gt_hand_verts_np, hand_faces_np, gt_mask_np, part_ids=part_ids,
                 create_geometries=True,
-                mesh_color=[0.4, 0.8, 0.4],  # Green color for GT
-                isolated_color=[0.0, 1.0, 0.0]  # Green for isolated GT points
             )
             geometries.extend(gt_geometries)
 

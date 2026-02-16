@@ -42,7 +42,7 @@ class Conv3D(nn.Module):
         self.conv = nn.Sequential(
             nn.Conv3d(in_channels, out_channels, kernel_size, stride, padding),
             nn.BatchNorm3d(out_channels),
-            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            nn.ReLU(True),
         )
 
     def forward(self, x):
@@ -55,7 +55,7 @@ class Deconv3D(nn.Module):
         self.conv = nn.Sequential(
             nn.ConvTranspose3d(in_channels, out_channels, kernel_size, stride, padding),
             nn.BatchNorm3d(out_channels),
-            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            nn.ReLU(True),
         )
 
     def forward(self, x):
@@ -72,14 +72,14 @@ class Bottleneck(nn.Module):
 
     def __init__(self, in_dim, res_h_dim):
         super(Bottleneck, self).__init__()
-        self.relu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+        self.relu = nn.ReLU(True)
         self.res_block = nn.Sequential(
             nn.Conv3d(in_dim, res_h_dim, kernel_size=1,
                       stride=1, bias=False),
-            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            nn.ReLU(True),
             nn.Conv3d(res_h_dim, res_h_dim, kernel_size=3,
                       stride=1, padding=1, bias=False),
-            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            nn.ReLU(True),
             nn.Conv3d(res_h_dim, in_dim, kernel_size=1,
                       stride=1, bias=False)
         )
@@ -133,7 +133,7 @@ class ResnetBlockFC(nn.Module):
 
         self.fc_0 = nn.Linear(size_in, size_h)
         self.fc_1 = nn.Linear(size_h, size_out)
-        self.actvn = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+        self.actvn = nn.ReLU()
 
         if size_in == size_out:
             self.shortcut = None

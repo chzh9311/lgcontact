@@ -47,6 +47,7 @@ class BaseHOIDataset(Dataset):
         self._load_data()
 
         if self.downsample_rate > 1:
+            print(f"Downsampling data with rate {self.downsample_rate} for split {self.split}")
             self.rh_data = self.sample_frames(self.rh_data)
             self.object_data = self.sample_frames(self.object_data)
             self.frame_names = self.sample_frames(self.frame_names)
@@ -87,8 +88,6 @@ class BaseHOIDataset(Dataset):
             return len(self.frame_names)
 
     def __getitem__(self, idx):
-        # obj_sample_pts = self.obj_info[obj_name]['samples'] # n_sample x 3
-        # obj_sample_normals = self.obj_info[obj_name]['sample_normals'] # n_sample x 3
         sample = {}
         if self.augment:
             reorder_id, Rot = grid_reorder_id_and_rot(self.msdf_kernel_size, np.random.randint(0, 12))
@@ -99,6 +98,8 @@ class BaseHOIDataset(Dataset):
             obj_name = fname_path[3].split('_')[0]
             obj_rot = self.object_data['global_orient'][idx]
             obj_trans = self.object_data['transl'][idx]
+            obj_sample_pts = self.obj_info[obj_name]['samples'] # n_sample x 3
+            obj_sample_normals = self.obj_info[obj_name]['sample_normals'] # n_sample x 3
 
             ## Transform the vertices:
             objR = axis_angle_to_matrix(obj_rot).detach().cpu().numpy()
@@ -109,8 +110,8 @@ class BaseHOIDataset(Dataset):
             # if self.augment:
             #     objR = Rot @ objR
             #     objt = (Rot @ objt[:, np.newaxis])[:, 0]
-            # obj_sample_pts = obj_sample_pts @ objR.T + objt[np.newaxis, :]
-            # obj_sample_normals = obj_sample_normals @ objR.T
+            obj_sample_pts = obj_sample_pts @ objR.T + objt[np.newaxis, :]
+            obj_sample_normals = obj_sample_normals @ objR.T
 
             if self.hand_sides is not None:
                 hand_side = self.hand_sides[idx]
@@ -130,8 +131,8 @@ class BaseHOIDataset(Dataset):
                 'frameName': '/'.join(fname_path[2:]),
                 'objName': obj_name,
                 'sbjId': sbj_id,
-                # 'objSamplePts': obj_sample_pts,
-                # 'objSampleNormals': obj_sample_normals,
+                'objSamplePts': obj_sample_pts,
+                'objSampleNormals': obj_sample_normals,
                 'objTrans': objt,
                 'objRot': Rotation.from_matrix(objR).as_rotvec(),
                 'handSide': hand_side,

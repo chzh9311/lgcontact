@@ -33,16 +33,22 @@ class LocalGridDataset(Dataset):
         self.preprocessed_dir = cfg.get('preprocessed_dir', 'data/preprocessed')
         self.downsample_rate = cfg.downsample_rate[split]
         self.split = split
-        mask_file = osp.join(cfg.preprocessed_dir, self.dataset_name, split, f'local_grid_masks_{self.grid_scale*1000:.1f}mm_every{self.downsample_rate}.npy')
-        if not osp.exists(mask_file):
-            raise FileNotFoundError(f"Mask file not found: {mask_file}. Please run LocalGridDataModule.prepare_data() first.")
-        self.masks = np.load(mask_file)
+
+        # Load local grid data from H5 file
+        local_grid_file = osp.join(cfg.preprocessed_dir, self.dataset_name, split,
+                                   f'local_grid_values_{self.grid_scale*1000:.1f}mm.h5')
+        if not osp.exists(local_grid_file):
+            raise FileNotFoundError(f"Local grid file not found: {local_grid_file}. Please run LocalGridDataModule.prepare_data() first.")
+
+        self.local_grid_file = local_grid_file
+        # Open H5 file to get dataset length
+        with h5py.File(local_grid_file, 'r') as f:
+            self.n_grids = f['grid_distance'].shape[0]  # Total number of grid data items
+
         hand_cse_sd = torch.load(cfg.get('hand_cse_path', 'data/misc/hand_cse.ckpt'), weights_only=True)['state_dict']
         self.hand_cse = hand_cse_sd['embedding_tensor'].detach().cpu().numpy()
         self.mano_faces = hand_cse_sd['cano_faces'].detach().cpu().numpy()
         self.obj_info = {}
-        all_samples = np.stack(np.meshgrid(np.arange(self.masks.shape[0]), np.arange(self.masks.shape[1]), indexing='ij'), axis=-1)
-        self.idx2sample = all_samples[self.masks, :].reshape(-1, 2)
         self.close_mano_faces = np.load(osp.join('data', 'misc', 'closed_mano_r_faces.npy'), allow_pickle=True)
         ## Downsample data
         # self.idx2sample = self.idx2sample[::cfg.downsample_rate[split], :]
@@ -71,15 +77,31 @@ class LocalGridDataset(Dataset):
         raise NotImplementedError("This method should be implemented in subclasses.")
     
     def __len__(self):
-        return self.idx2sample.shape[0]
+        return self.n_grids
     
     def __getitem__(self, idx):
-        sample_idx, point_idx = self.idx2sample[idx].tolist()
+        # sample_idx, point_idx = self.idx2sample[idx].tolist()
+        with h5py.File(self.local_grid_file, 'r') as grid_data_raw:
+
+            point_idx, sample_idx = grid_data_raw['grid_sample_idx'][idx]
+            # frame_name = grid_data_raw['frame_names'][sample_idx].decode('utf-8')
+
+            verts_mask = grid_data_raw['verts_mask'][sample_idx]
+            grid_mask = grid_data_raw['grid_mask'][sample_idx]
+            # Convert unmasked point_idx to masked array index
+            # masked_point_idx = np.sum(grid_mask[:point_idx]).item()
+            # masked_point_idx = np.searchsorted(np.where(grid_mask)[0], point_idx)
+            grid_sdf = grid_data_raw['grid_sdf'][idx]
+            grid_distance = grid_data_raw['grid_distance'][idx]
+            ## TODO: do shape transformation for nn_face_idx and nn_point when saving data.
+            nn_face_idx = grid_data_raw['nn_face_idx'][idx].reshape(self.kernel_size**3)
+            nn_point = grid_data_raw['nn_point'][idx].reshape(self.kernel_size**3, 3)
+
         fname_path = self.frame_names[sample_idx].split('/')
         sbj_id = fname_path[2]
         obj_name = fname_path[3].split('_')[0]
-        obj_sample_pt = self.obj_info[obj_name]['samples'][point_idx] # 3
-        obj_sample_normal = self.obj_info[obj_name]['sample_normals'][point_idx] # 3
+        obj_sample_pt = self.obj_info[obj_name]['samples'][grid_mask][point_idx] # 3
+        # obj_sample_normal = self.obj_info[obj_name]['sample_normals'][point_idx] # 3
         obj_rot = self.object_data['global_orient'][sample_idx]
         obj_trans = self.object_data['transl'][sample_idx]
         
@@ -88,7 +110,7 @@ class LocalGridDataset(Dataset):
             objR = objR.T
         objt = obj_trans.detach().cpu().numpy()
         obj_sample_pt = (objR @ obj_sample_pt.reshape(3, 1)).reshape(3) + objt
-        obj_sample_normal = (objR @ obj_sample_normal.reshape(3, 1)).reshape(3)
+        # obj_sample_normal = (objR @ obj_sample_normal.reshape(3, 1)).reshape(3)
 
         obj_mesh = self.simp_obj_mesh[obj_name]
         obj_verts = (objR @ obj_mesh['verts'].T).T + objt
@@ -101,28 +123,15 @@ class LocalGridDataset(Dataset):
             th_trans=hdata['transl'][sample_idx][None, :])
         nhandV = handV[0].detach().cpu().numpy() - obj_sample_pt[np.newaxis, :]
 
-        grid_file_path = osp.join(self.preprocessed_dir, self.dataset_name, self.split,
-                                  f'local_grid_values_{self.grid_scale*1000:.1f}mm_every{self.downsample_rate}',
-                                  f'{sample_idx:08d}_local_grid.h5')
-        with h5py.File(grid_file_path, 'r') as grid_data_raw:
-            verts_mask = grid_data_raw['verts_mask'][point_idx]
-            grid_mask = grid_data_raw['grid_mask'][:]
-            # Convert unmasked point_idx to masked array index
-            masked_point_idx = np.sum(grid_mask[:point_idx]).item()
-            # masked_point_idx = np.searchsorted(np.where(grid_mask)[0], point_idx)
-            grid_data = grid_data_raw['grid_data'][masked_point_idx]
-            ## TODO: do shape transformation for nn_face_idx and nn_point when saving data.
-            nn_face_idx = grid_data_raw['nn_face_idx'][masked_point_idx].reshape(self.kernel_size**3)
-            nn_point= grid_data_raw['nn_point'][masked_point_idx].reshape(self.kernel_size**3, 3)
-            nn_point = nn_point - obj_sample_pt[np.newaxis, :]
+        nn_point = nn_point - obj_sample_pt[np.newaxis, :]
 
         nn_vert_idx = self.mano_faces[nn_face_idx] # N,  3
         face_verts = nhandV[nn_vert_idx]  # (N, 3, 3)
         face_cse = self.hand_cse[nn_vert_idx]  # (M * K^3, 3, cse_dim)
-        w = np.linalg.inv(face_verts.transpose((0, 2, 1))) @ nn_point[:, :, np.newaxis]  # (M * K^3, 3, 1)
+        w = np.linalg.solve(face_verts.transpose((0, 2, 1)), nn_point[:, :, np.newaxis])  # (M * K^3, 3, 1)
         # Make sure weights are all positive and normalized
         w = np.clip(w, 0, 1)
-        w = w / np.sum(w, axis=1, keepdims=True)  # (M * K^3, 3, 1)
+        w = w / (np.sum(w, axis=1, keepdims=True) + 1e-8)  # (M * K^3, 3, 1)
 
         grid_hand_cse = np.sum(face_cse * w, axis=1).reshape(self.kernel_size, self.kernel_size, self.kernel_size, -1)  # (N, cse_dim)
 
@@ -130,19 +139,21 @@ class LocalGridDataset(Dataset):
         # grid_data, verts_mask = calc_local_grid_1pt(self.normalized_coords.numpy(), obj_mesh, hand_mesh,
         #                                         self.kernel_size, self.grid_scale, self.hand_cse)
         ## contact data
-        grid_data = torch.from_numpy(grid_data).float()
-        grid_data[:, :, :, 1] = self.grid_dist_to_contact(grid_data[:, :, :, 1])
-        grid_data[:, :, :, 0] = grid_data[:, :, :, 0] / self.grid_scale / np.sqrt(3)  # Normalize SDF
-        grid_data = torch.cat([grid_data, torch.from_numpy(grid_hand_cse).float()], dim=-1).numpy()
+        grid_sdf = torch.from_numpy(grid_sdf).float()
+        grid_distance = torch.from_numpy(grid_distance).float()
+        grid_contact = self.grid_dist_to_contact(grid_distance)
+        grid_sdf = grid_sdf / self.grid_scale / np.sqrt(3)  # Normalize SDF
 
         sample = {
-                  'localGrid': grid_data,
+                  'gridSDF': grid_sdf,
+                  'gridContact': grid_contact,
+                  'gridHandCSE': grid_hand_cse,
                   'objSamplePt': obj_sample_pt,
-                  'objSampleNormal': obj_sample_normal,
+                #   'objSampleNormal': obj_sample_normal,
                   'objRot': obj_rot,
                   'objTrans': obj_trans,
                   'nHandVerts': nhandV,
-                  'handVertMask': verts_mask,
+                  'handVertMask': verts_mask[grid_mask][point_idx],
                   'obj_name': obj_name,
                   'face_idx': nn_face_idx,
                   'cse_weights': w.squeeze(-1),
