@@ -33,7 +33,7 @@ test:
   batch_size: ${test.n_samples}
 
 checkpoint:
-  dirpath: logs/checkpoints/gridae/${ae.obj_feat_dim}latent/
+  dirpath: logs/checkpoints/gridae/${ae.feat_dim}latent/
   filename: best
   save_top_k: 3
 

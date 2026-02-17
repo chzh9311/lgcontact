@@ -18,7 +18,7 @@ from common.model.pose_optimizer import optimize_pose_by_contact, optimize_pose_
 
 from .lgcdifftrainer import LGCDiffTrainer
 from common.model.handobject import HandObject, recover_hand_verts_from_contact
-from common.utils.vis import o3dmesh, o3dmesh_from_trimesh, geom_to_img, visualize_recon_hand_w_object
+from common.utils.vis import o3dmesh, o3dmesh_from_trimesh, geom_to_img, visualize_recon_hand_w_object, visualize_grid_contact
 from common.msdf.utils.msdf import get_grid, calc_local_grid_all_pts_gpu
 from common.evaluation.eval_fns import calculate_metrics
 from einops import rearrange
@@ -206,6 +206,8 @@ class GraspDiffTrainer(LGCDiffTrainer):
         return np.concatenate([gt_img, pred_img], axis=0)
     
     def test_step(self, batch, batch_idx):
+        # if batch_idx < 3:  # TODO: temporary skip for debugging
+        #     return {}
         self.grid_coords = self.grid_coords.to(self.device)
         self.mano_layer.to(self.device)
         handobject = HandObject(self.cfg.data, self.device, mano_layer=self.mano_layer, normalize=True)
@@ -288,22 +290,23 @@ class GraspDiffTrainer(LGCDiffTrainer):
             
             handV, handJ, _ = self.mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
         elif self.cfg.pose_optimizer.name == 'hybrid':
-            # pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
-            #     self.hand_cse, None,
-            #     pred_grid_contact.reshape(n_samples, -1), pred_grid_cse.reshape(n_samples, -1, self.cse_dim),
-            #     grid_coords=grid_coords.reshape(n_samples, -1, 3),
-            #     mask_th = 2
-            # )
+            recon_hand_verts, recon_verts_mask = recover_hand_verts_from_contact(
+                self.hand_cse, None,
+                pred_grid_contact.reshape(n_samples, -1), pred_grid_cse.reshape(n_samples, -1, self.cse_dim),
+                grid_coords=grid_coords.reshape(n_samples, -1, 3),
+                mask_th = 2, chunk_size=10
+            )
             recon_params, init_handV, init_handJ = self.hand_ae.decode(hand_latent)
             # recon_params = self.hand_ae.decoder(hand_latent)
             with torch.enable_grad():
-                mano_trans, global_pose, mano_pose, mano_shape = optimize_pose_wrt_local_grids(
+                params, contact_mask = optimize_pose_wrt_local_grids(
                             self.mano_layer, grid_centers=obj_msdf_center, target_pts=grid_coords.view(n_samples, -1, 3),
                             target_W_verts=pred_targetWverts, weights=pred_grid_contact, grid_sdfs=obj_msdf_grid.squeeze(1),
-                            dist2contact_fn=self.grid_dist_to_contact,
+                            dist2contact_fn=self.grid_dist_to_contact, recon_hand_verts=recon_hand_verts, recon_verts_mask=recon_verts_mask,
                             n_iter=self.cfg.pose_optimizer.n_opt_iter, lr=self.cfg.pose_optimizer.opt_lr,
                             grid_scale=self.cfg.msdf.scale, w_repulsive=self.cfg.pose_optimizer.w_repulsive,
                             w_reg_loss=self.cfg.pose_optimizer.w_regularization, init_pose=recon_params)
+                mano_trans, global_pose, mano_pose, mano_shape = params
                 # mano_trans, global_pose, mano_pose, mano_shape = optimize_pose_by_contact(
                 #             self.mano_layer, grid_centers=obj_msdf_center, target_pts=grid_coords.view(n_samples, -1, 3),
                 #             target_W_verts=pred_targetWverts, pred_contact=pred_grid_contact, dist2contact_fn=self.grid_dist_to_contact,
@@ -361,6 +364,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
         # Visualize all samples
         recon_imgs = []
         pred_imgs = []
+        contact_mask_imgs = []
         for vis_idx in range(n_samples):
             recon_img, pred_geoms = visualize_recon_hand_w_object(
                 hand_verts=pred_hand_verts[vis_idx].detach().cpu().numpy(),
@@ -373,16 +377,27 @@ class GraspDiffTrainer(LGCDiffTrainer):
                 h=400, w=400)
             recon_imgs.append(recon_img)
 
+            # Visualize contact mask
+            contact_img, contact_geoms = visualize_grid_contact(
+                contact_pts=obj_msdf_center[vis_idx].detach().cpu().numpy(),
+                pt_contact=contact_mask[vis_idx].detach().cpu().numpy().astype(float),
+                grid_scale=self.cfg.msdf.scale,
+                obj_mesh=handobject.obj_models[vis_idx],
+                w=400, h=400)
+            contact_mask_imgs.append(contact_img)
+
             if self.debug:
-                print(result)
+                # print(result)
                 ho_geoms = pred_ho.get_vis_geoms(idx=vis_idx)
-                o3d.visualization.draw_geometries(pred_geoms + [g['geometry'].translate((0, 0.25, 0)) if 'geometry' in g else g.translate((0, 0.25, 0)) for g in ho_geoms], window_name='Predicted Hand-Object')
+                contact_geoms_offset = [g['geometry'].translate((0, 0.5, 0)) if isinstance(g, dict) else g.translate((0, 0.5, 0)) for g in contact_geoms]
+                o3d.visualization.draw_geometries(pred_geoms + [g['geometry'].translate((0, 0.25, 0)) if isinstance(g, dict) else g.translate((0, 0.25, 0)) for g in ho_geoms] + contact_geoms_offset, window_name='Predicted Hand-Object')
             else:
                 pred_img = pred_ho.vis_img(idx=vis_idx, h=400, w=400)
                 pred_imgs.append(pred_img)
 
-        # Concatenate all sample images horizontally
+        # Concatenate all sample images vertically
         recon_img_grid = np.concatenate(recon_imgs, axis=0)
+        contact_mask_img_grid = np.concatenate(contact_mask_imgs, axis=0)
         if not self.debug:
             pred_img_grid = np.concatenate(pred_imgs, axis=0)
 
@@ -399,6 +414,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
                     obj_name,
                     wandb.Image(recon_img_grid),
                     wandb.Image(pred_img_grid),
+                    wandb.Image(contact_mask_img_grid),
                     float(np.mean(result.get("Simulation Displacement", [0]))),
                     float(np.mean(result.get("Penetration Depth", [0]))),
                     float(np.mean(result.get("Intersection Volume", [0])))

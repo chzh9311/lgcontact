@@ -457,7 +457,7 @@ class LGCDiffTrainer(L.LightningModule):
             #     wandb.define_metric(metric, summary='mean')
             # Initialize W&B table for test images
             self.test_images_table = wandb.Table(columns=[
-                "batch_idx", "obj_name", "surrounding_hands", "sampled_grasp",
+                "batch_idx", "obj_name", "surrounding_hands", "sampled_grasp", "contact_mask",
                 "sim_displacement", "penetration_depth", "intersection_volume"
             ])
 
