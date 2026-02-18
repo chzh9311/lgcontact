@@ -547,10 +547,6 @@ def nn_dist_to_mesh_gpu(points, hand_verts, faces):
         face_indices: torch.LongTensor (N,), nearest face indices
         closest_points: torch.Tensor (N, 3), nearest points on mesh surface
     """
-    # Kaolin expects double precision (float64)
-    points = points.double()
-    hand_verts = hand_verts.double()
-
     # Kaolin expects batched input: (B, N, 3) and (B, F, 3, 3)
     face_verts = index_vertices_by_faces(
         hand_verts.unsqueeze(0), faces
@@ -571,8 +567,7 @@ def nn_dist_to_mesh_gpu(points, hand_verts, faces):
 
     distances = torch.sqrt(sq_dist.clamp(min=0))
 
-    # Convert back to float32
-    return distances.float(), face_idx, closest_points.float()
+    return distances, face_idx, closest_points
 
 
 def calc_local_grid_all_pts_gpu(contact_points, normalized_coords, hand_verts, faces, kernel_size, grid_scale,
