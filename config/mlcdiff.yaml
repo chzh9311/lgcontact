@@ -2,7 +2,7 @@ defaults:
   - _self_
   - msdf: sparse
   - data: grab_multi_contact
-  - ae: gridae_128latent
+  - ae: gridae_128latent_v2
   - hand_ae: handvae_16latent
   - generator: dual_ldm
   - pose_optimizer: hybrid
@@ -26,7 +26,7 @@ train:
     # consistency_contact_loss: 5.0
     # consistency_cse_loss: 1.0
   
-  resume_ckpt: logs/wandb_logs/LG3DContact/dual_diff_epoch1/checkpoints/last.ckpt
+  resume_ckpt: null #logs/wandb_logs/LG3DContact/dual_diff_epoch1/checkpoints/last.ckpt
 
 val:
   batch_size: 32
@@ -67,7 +67,7 @@ physics:
   k: 0.2
   mu: 0.8
   pene_th: 1e-3 # 1mm
-  eps: 1e-3 # Disabled for training
+  eps: 1e-3 
 
 run_phase: train
 test_gt: false

@@ -1495,7 +1495,7 @@ class DualGaussianDiffusion(GaussianDiffusion):
         terms = {}
 
         condition = model.condition(data)
-        model_output, difference_loss = model(x_t, self._scale_timesteps(ts), condition)
+        model_output, recon_LVClatent = model(x_t, self._scale_timesteps(ts), condition)
 
         target = {
             ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
@@ -1512,9 +1512,9 @@ class DualGaussianDiffusion(GaussianDiffusion):
             F.mse_loss(recon_handJ, kwargs['gt_handJ'], reduction="mean")) / 2 * 1000 ## mm
 
         terms["latent_mse"] = F.mse_loss(model_output, target, reduction="mean")
-        terms["difference_loss"] = difference_loss
+        # terms["difference_loss"] = difference_loss
 
-        return terms
+        return terms, model_output, recon_LVClatent
 
     def p_mean_variance(
         self, model, x, t, condition=None, clip_denoised=True, denoised_fn=None, model_kwargs=None

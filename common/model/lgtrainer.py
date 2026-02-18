@@ -125,7 +125,8 @@ class LGTrainer(L.LightningModule):
     
     def test_step(self, batch, batch_idx):
         self.grid_coords = self.grid_coords.to(self.device)
-        grid_sdf, gt_grid_contact = batch['localGrid'][..., 0], batch['localGrid'][..., 1:]
+        grid_sdf = batch['gridSDF'].squeeze(-1)
+        gt_grid_contact = torch.cat([batch['gridContact'], batch['gridHandCSE']], dim=-1)
         recon_cgrid, posterior, obj_feat = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
         # recon_grid_contact, z_e, obj_feat = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
         recon_cgrid = recon_cgrid.permute(0, 2, 3, 4, 1)
@@ -148,7 +149,7 @@ class LGTrainer(L.LightningModule):
         #     batch_idx=0
         # )
 
-        gt_rec_error = masked_rec_loss(gt_rec_hand_verts, batch['nHandVerts'], gt_rec_verts_mask)
+        gt_rec_error = masked_rec_loss(gt_rec_hand_verts, batch['nHandVerts'], gt_rec_verts_mask) * 1000
         pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
             self.handcse, None,
             recon_cgrid[..., 0].reshape(batch_size, -1),
@@ -170,20 +171,20 @@ class LGTrainer(L.LightningModule):
         # all_geoms = gt_geoms + [g.translate((self.cfg.msdf.scale * 3, 0, 0)) for g in pred_geoms]
         # o3d.visualization.draw_geometries(all_geoms, window_name='GT and Pred Local Grid Visualization')
 
-        pred_rec_error = masked_rec_loss(pred_hand_verts, batch['nHandVerts'], pred_verts_mask)
+        pred_rec_error = masked_rec_loss(pred_hand_verts, batch['nHandVerts'], gt_rec_verts_mask) * 1000
         loss_dict = {'test/gt_rec_error': gt_rec_error,
                      'test/pred_rec_error': pred_rec_error}
         ## Test zero-contact grid reconstruction
         # gt_grid_contact[..., 0] = 0.0
-        gt_grid_contact[:] = 0
-        recon_cgrid, posterior, obj_feat = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
-        recon_cgrid = recon_cgrid.permute(0, 2, 3, 4, 1)
-        zero_contact_rec_error = F.l1_loss(recon_cgrid[..., 0], gt_grid_contact[..., 0])
-        loss_dict['test/zero_contact_rec_error'] = zero_contact_rec_error
-        loss_dict['test/zero_contact_rec_max'] = torch.max(torch.abs(recon_cgrid[..., 0]))
+        # gt_grid_contact[:] = 0
+        # recon_cgrid, posterior, obj_feat = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
+        # recon_cgrid = recon_cgrid.permute(0, 2, 3, 4, 1)
+        # zero_contact_rec_error = F.l1_loss(recon_cgrid[..., 0], gt_grid_contact[..., 0])
+        # loss_dict['test/zero_contact_rec_error'] = zero_contact_rec_error
+        # loss_dict['test/zero_contact_rec_max'] = torch.max(torch.abs(recon_cgrid[..., 0]))
         print(loss_dict)
 
-        self.log_dict(loss_dict, prog_bar=True, on_epoch=True)
+        self.log_dict(loss_dict, prog_bar=True, on_step=False, on_epoch=True)
 
         ## GT visualization
         # vis_idx = 0

@@ -279,19 +279,20 @@ class DualUNetModel(nn.Module):
         if y_in_shape == 2:
             h_global = h_global.squeeze(1)
 
-        difference_loss = torch.tensor(0.0, device=h_local.device)
         if self.global2local_fn is not None and is_train:
             with torch.no_grad():
                 recon_local = self.global2local_fn(h_global, obj_msdf) # <B, N, d_x>
-            # w = (ts / (self.n_timesteps - 1)).view(-1, 1, 1)
-            ## Gradually fuze the global info back to local.
-            ## t=0: only reconstructed; t=999: only diffused
-            # h_local = (h_local + recon_local) / 2
-            # h_local = (1-w) * recon_local + w * h_local
-            difference_loss = F.mse_loss(h_local, recon_local.detach())
+                # w = (ts / (self.n_timesteps - 1)).view(-1, 1, 1)
+                ## Gradually fuze the global info back to local.
+                ## t=0: only reconstructed; t=999: only diffused
+                # h_local = (h_local + recon_local) / 2
+                # h_local = (1-w) * recon_local + w * h_local
+                # difference_loss = F.mse_loss(h_local, recon_local.detach())
+        else:
+            recon_local = torch.zeros_like(h_local, device=h_local.device).float()
 
         x_ret = torch.cat([h_global, h_local.reshape(h_local.shape[0], self.n_pts * self.d_x)], dim=-1)
-        return x_ret, difference_loss
+        return x_ret, recon_local
 
     def condition(self, data: Dict) -> Dict:
         """ Obtain scene feature with scene model

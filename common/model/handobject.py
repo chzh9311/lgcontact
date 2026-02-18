@@ -24,7 +24,7 @@ from common.msdf.utils.msdf import msdf2mlcontact, get_grid, get_grid_points, ca
 from common.utils.geometry import GridDistanceToContact
 
 class HandObject:
-    def __init__(self, cfg, device, mano_layer=None, normalize=True):
+    def __init__(self, cfg, device, mano_layer=None, normalize=True, apply_grid_mask=False):
         self.device = device
         self.cfg = cfg
         if mano_layer is None:
@@ -35,6 +35,7 @@ class HandObject:
         self.closed_hand_faces = np.load("data/misc/closed_mano_r_faces.npy")
         self.hand_cse = torch.load(cfg.get('hand_cse_path', 'data/misc/hand_cse.ckpt'), weights_only=True)['state_dict']['embedding_tensor'].detach().to(self.device)
         self.hand_part_ids = torch.argmax(self.mano_layer.th_weights, dim=-1).detach().cpu().numpy()
+        self.apply_grid_mask = apply_grid_mask ## Only apply this mask when training the old version of GRIDAE for backward compatibility.
         self.hand_verts = None
         self.hand_pose = None
         self.hand_root_rot = None
@@ -248,7 +249,8 @@ class HandObject:
                     hand_verts=self.hand_verts[b],
                     faces=mano_faces,
                     kernel_size=K,
-                    grid_scale=scale
+                    grid_scale=scale,
+                    apply_grid_mask=self.apply_grid_mask
                 )
 
                 all_grid_mask[b] = grid_mask

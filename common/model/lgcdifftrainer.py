@@ -52,7 +52,8 @@ class LGCDiffTrainer(L.LightningModule):
         self.pretrained_keys = []
         if cfg.run_phase == 'train':
             self._load_pretrained_weights(cfg.ae.get('pretrained_weight', None), target_prefix='grid_ae')
-            self._freeze_pretrained_weights()
+            self.grid_ae.eval()
+            self.grid_ae.requires_grad_(False)
 
         # if cfg.pose_optimizer.name == 'hand_ae':
         #     self._load_pretrained_weights(cfg.hand_ae.get('pretrained_weight', None), target_prefix='hand_ae')
@@ -174,13 +175,13 @@ class LGCDiffTrainer(L.LightningModule):
         print(f"Frozen {frozen_count} pretrained parameters in grid_ae")
         print(f"Set {bn_count} BatchNorm layers to eval mode (prevents running stats drift)")
 
-    def on_fit_start(self):
-        """
-        Called after checkpoint restoration but before training starts.
-        Freezes pretrained weights here to ensure they remain frozen even when resuming.
-        """
-        if self.cfg.run_phase == 'train' and hasattr(self, 'pretrained_keys'):
-            self._freeze_pretrained_weights()
+    # def on_fit_start(self):
+    #     """
+    #     Called after checkpoint restoration but before training starts.
+    #     Freezes pretrained weights here to ensure they remain frozen even when resuming.
+    #     """
+    #     if self.cfg.run_phase == 'train' and hasattr(self, 'pretrained_keys'):
+    #         self._freeze_pretrained_weights()
 
     def training_step(self, batch, batch_idx):
         total_loss = self.train_val_step(batch, batch_idx, stage='train')
