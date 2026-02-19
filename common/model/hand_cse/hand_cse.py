@@ -16,20 +16,22 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 
 class HandCSE(nn.Module):
-    def __init__(self, n_verts=778, emb_dim=16, cano_verts=None, cano_faces=None):
+    def __init__(self, n_verts=778, emb_dim=16, cano_verts=None, cano_faces=None, is_train=False):
         super(HandCSE, self).__init__()
         self.emb_dim = emb_dim
         self.n_verts = n_verts
+        self.is_train = is_train
         self.register_parameter('embedding_tensor', nn.Parameter(torch.randn(n_verts, emb_dim)))
         self.register_buffer("cano_faces", torch.as_tensor(cano_faces).long())
-        # dist_mat_path = os.path.join('data', 'misc', 'hand_geo_dist_matrix.npy')
-        # if os.path.exists(dist_mat_path):
-        #     self.geo_dist_matrix = np.load(dist_mat_path)
-        # else:
-        #     self.geo_dist_matrix = self.geo_distance_matrix(cano_verts, cano_faces)
-        #     np.save(dist_mat_path, self.geo_dist_matrix)
-        
-        # self.geo_dist_matrix = torch.as_tensor(self.geo_dist_matrix).float()
+        if is_train:
+            dist_mat_path = os.path.join('data', 'misc', 'hand_geo_dist_matrix.npy')
+            if os.path.exists(dist_mat_path):
+                self.geo_dist_matrix = np.load(dist_mat_path)
+            else:
+                self.geo_dist_matrix = self.geo_distance_matrix(cano_verts, cano_faces)
+                np.save(dist_mat_path, self.geo_dist_matrix)
+            
+            self.geo_dist_matrix = torch.as_tensor(self.geo_dist_matrix).float()
 
     def forward(self):
         Pemb = torch.exp(-torch.square(torch.cdist(self.embedding_tensor, self.embedding_tensor)))
@@ -151,10 +153,11 @@ class HandCSE(nn.Module):
 
 def train():
     device = 'cuda:0'
-    mano_layer = ManoLayer(mano_root='data/mano/models', use_pca=False, side='right', flat_hand_mean=True)
+    emb_dim = 16
+    mano_layer = ManoLayer(mano_root='data/misc/mano_v1_2/models', use_pca=False, side='right', flat_hand_mean=True)
     handV, handJ, _ = mano_layer(th_pose_coeffs=torch.zeros(1, 48))
     handF = mano_layer.th_faces
-    handcse = HandCSE(cano_verts=handV[0].cpu().numpy(), cano_faces=handF.cpu().numpy(), emb_dim=16).to(device)
+    handcse = HandCSE(cano_verts=handV[0].cpu().numpy(), cano_faces=handF.cpu().numpy(), emb_dim=emb_dim, is_train=True).to(device)
     optimizer = torch.optim.Adam(handcse.parameters(), lr=1e-3)
     n_iters = 10000
     for it in range(n_iters):
@@ -173,7 +176,7 @@ def train():
         'state_dict': handcse.state_dict(),
         'emb_dim': handcse.emb_dim,
     }
-    checkpoint_path = os.path.join('data', 'misc', 'hand_cse.ckpt')
+    checkpoint_path = os.path.join('common', 'model', 'hand_cse', f'hand_cse_{emb_dim}.ckpt')
     torch.save(checkpoint, checkpoint_path)
     print(f"Model checkpoint saved to {checkpoint_path}")
 
@@ -224,10 +227,11 @@ def visualize_distance_from_point(vertices, faces, cse_features, source_idx, col
 
 def test():
     # Load checkpoint
-    checkpoint_path = os.path.join('data', 'misc', 'hand_cse.ckpt')
+    emb_dim = 16
+    checkpoint_path = os.path.join('common', 'model', 'hand_cse', f'hand_cse_{emb_dim}.ckpt')
     checkpoint = torch.load(checkpoint_path)
 
-    mano_layer = ManoLayer(mano_root='data/mano/models', use_pca=False, side='right', flat_hand_mean=True)
+    mano_layer = ManoLayer(mano_root='data/misc/mano_v1_2/models', use_pca=False, side='right', flat_hand_mean=True)
     handV, handJ, _ = mano_layer(th_pose_coeffs=torch.zeros(1, 48))
     handF = mano_layer.th_faces
 
@@ -304,5 +308,5 @@ def test():
 
 
 if __name__ == '__main__':
-    # train()
-    test()
+    train()
+    # test()
