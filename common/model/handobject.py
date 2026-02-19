@@ -10,7 +10,7 @@ from matplotlib import pyplot as plt
 
 from common.manopth.manopth.manolayer import ManoLayer
 from common.utils.physics import StableLoss
-from common.utils.vis import (o3dmesh_from_trimesh, o3d_arrow, geom_to_img, extract_masked_mesh_components,
+from common.utils.vis import (parse_hex_color, o3dmesh_from_trimesh, o3d_arrow, geom_to_img, extract_masked_mesh_components,
                                visualize_grid_contact, visualize_local_grid_with_hand, visualize_recon_hand_w_object)
 from common.utils.misc import linear_normalize
 from common.utils.geometry import (
@@ -442,7 +442,7 @@ class HandObject:
         :param pt_idx: MSDF centre index within the sample
         :return: list of Open3D geometries
         """
-        _, obj_mesh, _ = self._load_templates(idx, obj_templates)
+        obj_mesh, _ = self._load_templates(idx, obj_templates)
         K = self.cfg.msdf.kernel_size
         K3 = K ** 3
         scale = self.cfg.msdf.scale
@@ -488,6 +488,179 @@ class HandObject:
 
         return geoms
 
+    def vis_grid_detail(self, obj_templates, idx=0, pt_idx=0):
+        """
+        Two side-by-side panels for one MSDF grid cell:
+          Left  — SDF-coloured grid points + object mesh fragment inside the bbox
+          Right — contact-coloured grid points + hand mesh fragment inside the bbox
+
+        :param obj_templates: list of trimesh objects (one per batch element)
+        :param idx: batch index
+        :param pt_idx: MSDF centre index within the sample
+        :return: list of Open3D geometries for draw_geometries
+        """
+        obj_mesh, _ = self._load_templates(idx, obj_templates)
+        K  = self.cfg.msdf.kernel_size
+        K3 = K ** 3
+        scale = self.cfg.msdf.scale
+
+        center      = self.obj_msdf[idx, pt_idx, -3:].detach().cpu().numpy()          # (3,)
+        sdf_flat    = self.obj_msdf[idx, pt_idx, :K3].detach().cpu().numpy()           # (K^3,)
+        contact_flat = self.ml_contact[idx, pt_idx, :, :, :, 0].reshape(-1).detach().cpu().numpy()  # (K^3,)
+
+        # Grid point world coordinates
+        indices = np.array([(i, j, k) for i in range(K)
+                            for j in range(K) for k in range(K)])
+        coords      = (2 * indices - (K - 1)) / (K - 1)          # (K^3, 3), range [-1,1]
+        grid_pts    = center[None, :] + coords * scale             # (K^3, 3)
+
+        # ── helpers ──────────────────────────────────────────────────────────
+
+        def _bbox_lineset(origin, color):
+            pts = np.array([origin + scale * np.array([sx, sy, sz])
+                            for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)])
+            edges = [[0,1],[0,2],[0,4],[1,3],[1,5],[2,3],[2,6],[3,7],[4,5],[4,6],[5,7],[6,7]]
+            ls = o3d.geometry.LineSet()
+            ls.points = o3d.utility.Vector3dVector(pts)
+            ls.lines  = o3d.utility.Vector2iVector(edges)
+            ls.colors = o3d.utility.Vector3dVector([color] * len(edges))
+            return ls
+
+        def _clip_mesh_to_box(tmesh, box_center, box_half):
+            """Return o3d mesh containing only faces whose centroid lies inside the bbox."""
+            verts = np.asarray(tmesh.vertices)
+            faces = np.asarray(tmesh.faces)
+            face_centers = verts[faces].mean(axis=1)               # (F, 3)
+            inside = np.all(np.abs(face_centers - box_center) <= box_half, axis=1)
+            if not inside.any():
+                return None
+            kept_faces  = faces[inside]
+            used_verts, inv = np.unique(kept_faces, return_inverse=True)
+            new_verts   = verts[used_verts]
+            new_faces   = inv.reshape(-1, 3)
+            m = o3d.geometry.TriangleMesh()
+            m.vertices  = o3d.utility.Vector3dVector(new_verts)
+            m.triangles = o3d.utility.Vector3iVector(new_faces)
+            m.compute_vertex_normals()
+            return m
+
+        # ── SDF coloring (blue inside / red outside) ─────────────────────────
+        sdf_min, sdf_max = sdf_flat.min(), sdf_flat.max()
+        sdf_colors = np.zeros((K3, 3))
+        neg = sdf_flat < 0
+        if sdf_min < 0:
+            t = np.clip(np.abs(sdf_flat[neg]) / abs(sdf_min), 0, 1)
+            sdf_colors[neg]  = np.stack([1-t, 1-t, np.ones_like(t)], axis=1)
+        pos = ~neg
+        if sdf_max > 0:
+            t = np.clip(sdf_flat[pos] / sdf_max, 0, 1)
+            sdf_colors[pos]  = np.stack([np.ones_like(t), 1-t, 1-t], axis=1)
+
+        # ── contact coloring (inferno) ────────────────────────────────────────
+        cmap = plt.colormaps['inferno']
+        contact_colors = cmap(np.clip(contact_flat, 0, 1))[:, :3]
+
+        # ── panel offset: 2.5 × bbox width along X ───────────────────────────
+        offset = np.array([scale * 2.5, 0.0, 0.0])
+
+        left_geoms = []
+        right_geoms = []
+
+        # ── LEFT PANEL: SDF grid + clipped object mesh ────────────────────────
+        pcd_sdf = o3d.geometry.PointCloud()
+        pcd_sdf.points = o3d.utility.Vector3dVector(grid_pts)
+        pcd_sdf.colors = o3d.utility.Vector3dVector(sdf_colors)
+        left_geoms.append(pcd_sdf)
+        left_geoms.append(_bbox_lineset(center, [0.2, 0.8, 0.2]))
+
+        obj_clip = _clip_mesh_to_box(obj_mesh, center, np.full(3, scale))
+        if obj_clip is not None:
+            obj_clip.paint_uniform_color(parse_hex_color("#2A5E8C"))
+            obj_clip.compute_vertex_normals()
+            left_geoms.append(obj_clip)
+
+        # ── RIGHT PANEL: contact grid + clipped hand mesh ─────────────────────
+        pcd_contact = o3d.geometry.PointCloud()
+        pcd_contact.points = o3d.utility.Vector3dVector(grid_pts)
+        pcd_contact.colors = o3d.utility.Vector3dVector(contact_colors)
+        right_geoms.append(pcd_contact)
+        right_geoms.append(_bbox_lineset(center, [0.2, 0.8, 0.2]))
+
+        hand_verts = self.hand_verts[idx].detach().cpu().numpy()
+        hand_tmesh = trimesh.Trimesh(hand_verts, self.closed_hand_faces.copy(), process=False)
+        hand_clip  = _clip_mesh_to_box(hand_tmesh, center, np.full(3, scale))
+        if hand_clip is not None:
+            hand_clip.paint_uniform_color(parse_hex_color("#F27141"))
+            hand_clip.compute_vertex_normals()
+            right_geoms.append(hand_clip)
+
+        return left_geoms, right_geoms
+
+    def vis_all_grids_with_hand(self, obj_templates, idx=0, grid_idx=0):
+        """
+        Visualize all MSDF grid bounding boxes together with the hand mesh and object.
+        Each grid is drawn as a semi-transparent axis-aligned cube (bbox = 2*scale per side).
+        No per-grid features (contact/CSE) are encoded in the color.
+
+        :param obj_templates: list of trimesh objects (one per batch element)
+        :param idx: batch index
+        :param grid_idx: index of specific grid to highlight (default 0)
+        :return: list of geometry dicts for o3d.visualization.draw (supports transparency)
+        """
+        obj_mesh, _ = self._load_templates(idx, obj_templates)
+        scale = self.cfg.msdf.scale
+        K = self.cfg.msdf.kernel_size
+
+        grid_centers = self.obj_msdf[idx, :, K**3:].detach().cpu().numpy()  # (N, 3)
+        N = grid_centers.shape[0]
+
+        box_color = parse_hex_color("#102540")
+        highlight_color = parse_hex_color("#B26FE0")
+
+        # 12 edges of a unit box, reused for every wireframe
+        _corners = np.array([
+            [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
+            [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1],
+        ], dtype=np.float64)
+        _edges = [
+            [0,1],[1,2],[2,3],[3,0],  # bottom face
+            [4,5],[5,6],[6,7],[7,4],  # top face
+            [0,4],[1,5],[2,6],[3,7],  # verticals
+        ]
+
+        geom_list = []
+
+        for i in range(N):
+            center = grid_centers[i]
+            corners = _corners * (2 * scale) + (center - scale)
+            if i == grid_idx:
+                # Solid filled box for the highlighted grid
+                box = o3d.geometry.TriangleMesh.create_box(
+                    width=2 * scale, height=2 * scale, depth=2 * scale)
+                box.translate(center - scale * np.ones(3))
+                box.paint_uniform_color(highlight_color)
+                box.compute_vertex_normals()
+                geom_list.append(box)
+            else:
+                # Wireframe LineSet for non-highlighted grids
+                ls = o3d.geometry.LineSet()
+                ls.points = o3d.utility.Vector3dVector(corners)
+                ls.lines = o3d.utility.Vector2iVector(_edges)
+                ls.colors = o3d.utility.Vector3dVector([box_color] * len(_edges))
+                geom_list.append(ls)
+
+        hand_verts = self.hand_verts[idx].detach().cpu().numpy()
+        hand_mesh = trimesh.Trimesh(hand_verts, self.closed_hand_faces.copy())
+        hand_o3d = o3dmesh_from_trimesh(hand_mesh, color="#F27141")
+        hand_o3d.compute_vertex_normals()
+        geom_list.append(hand_o3d)
+
+        obj_o3d = o3dmesh_from_trimesh(obj_mesh, color="#2A5E8C")
+        obj_o3d.compute_vertex_normals()
+        geom_list.append(obj_o3d)
+
+        return geom_list
+
     def vis_recon_hand_w_object(self, obj_templates, handcse, idx=0, mask_th=0.02, h=500, w=500):
         """
         Reconstruct hand vertices from ml_contact via recover_hand_verts_from_contact,
@@ -499,7 +672,7 @@ class HandObject:
         :param mask_th: threshold for vertex mask in recover_hand_verts_from_contact
         :return: (img, vis_geoms)
         """
-        _, obj_mesh, _ = self._load_templates(idx, obj_templates)
+        obj_mesh, _ = self._load_templates(idx, obj_templates)
 
         K = self.cfg.msdf.kernel_size
         K3 = K ** 3

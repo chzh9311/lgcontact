@@ -11,6 +11,7 @@ from common.utils.vis import visualize_local_grid, visualize_local_grid_with_han
 from common.msdf.utils.msdf import get_grid
 from common.dataset_utils.hoi4d_dataset import HOI4DHandDataModule
 from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
+from common.model.handobject import HandObject
 # from common.model.vae.grid_vae import MLCVAE
 from tqdm import tqdm
 import numpy as np
@@ -109,53 +110,42 @@ OmegaConf.register_new_resolver("add", lambda x, y: x + y, replace=True)
 @hydra.main(config_path="../config", config_name="mlcdiff")
 def vis_msdf_data_sample(cfg):
     dm = HOIDatasetModule(cfg)
+    mano_layer = ManoLayer(mano_root=cfg.data.mano_root, use_pca=False, side='right', flat_hand_mean=True, ncomps=45)
 
-    # Prepare data (preprocessing like M-SDF generation)
     print("Preparing data...")
     dm.prepare_data()
 
-    # Setup validation dataset
-    print("Setting up validation dataset...")
-    dm.setup('validate')
+    print("Setting up train dataset...")
+    dm.setup('fit')
 
-    # Get validation dataloader (use num_workers=0 to avoid multiprocessing issues)
-    val_loader = DataLoader(dm.val_set, batch_size=dm.val_batch_size, shuffle=False,
-                            num_workers=4, collate_fn=dm.collate_fn)
-    print(f"Validation dataset size: {len(dm.val_set)}")
-    print(f"Number of batches: {len(val_loader)}")
-    print(f"Batch size: {dm.val_batch_size}")
+    train_loader = DataLoader(dm.train_set, batch_size=1, shuffle=False,
+                              num_workers=4, collate_fn=dm.collate_fn)
+    print(f"Train dataset size: {len(dm.train_set)}")
+    print(f"Number of batches: {len(train_loader)}")
+    print(f"Batch size: {dm.train_batch_size}")
 
-    # Track handTrans min/max per dimension across all batches
-    hand_trans_min = None
-    hand_trans_max = None
+    obj_info = dm.train_set.obj_info
 
-    # Iterate through validation dataloader
-    print("\nTesting validation batches...")
-    for batch_idx, batch in enumerate(tqdm(val_loader, desc="Processing batches")):
-        # Track handTrans range
-        if 'handTrans' in batch:
-            hand_trans = batch['handTrans']  # (B, 3)
-            batch_min = hand_trans.min(dim=0).values  # (3,)
-            batch_max = hand_trans.max(dim=0).values  # (3,)
+    print("\nVisualizing contact grids with hand...")
+    for batch_idx, batch in enumerate(tqdm(train_loader, desc="Processing batches")):
+        handobject = HandObject(cfg.data, device='cpu', mano_layer=mano_layer)
+        obj_templates = [trimesh.Trimesh(obj_info[name]['verts'], obj_info[name]['faces'], process=False)
+                         for name in batch['objName']]
+        handobject.load_from_batch(batch, obj_templates=obj_templates)
 
-            if hand_trans_min is None:
-                hand_trans_min = batch_min
-                hand_trans_max = batch_max
-            else:
-                hand_trans_min = torch.minimum(hand_trans_min, batch_min)
-                hand_trans_max = torch.maximum(hand_trans_max, batch_max)
-
-    # Print handTrans range summary
-    print(f"\n{'='*50}")
-    print("handTrans range across all batches:")
-    if hand_trans_min is not None:
-        for dim in range(3):
-            dim_name = ['X', 'Y', 'Z'][dim]
-            print(f"  {dim_name}: min={hand_trans_min[dim].item():.6f}, max={hand_trans_max[dim].item():.6f}, range={hand_trans_max[dim].item() - hand_trans_min[dim].item():.6f}")
-    else:
-        print("  handTrans not found in batch")
-
-    print("\nDataModule validation complete!")
+        batch_size = handobject.batch_size
+        n_grids = handobject.obj_msdf.shape[1]
+        for b in range(batch_size):
+            obj_name = batch['objName'][b]
+            print(f"  Batch {batch_idx}, sample {b} ({obj_name}), {n_grids} grids")
+            grid_idx = 21
+            left_geoms, right_geoms = handobject.vis_grid_detail(obj_templates, idx=b, pt_idx=grid_idx)
+            o3d.visualization.draw_geometries(
+                left_geoms,
+                window_name=f"Batch {batch_idx} | Sample {b} ({obj_name}) | Grid {grid_idx} — SDF")
+            o3d.visualization.draw_geometries(
+                right_geoms,
+                window_name=f"Batch {batch_idx} | Sample {b} ({obj_name}) | Grid {grid_idx} — Contact")
 
 
 @hydra.main(config_path="../config", config_name="gridae")
@@ -164,12 +154,18 @@ def vis_local_grid_interact(cfg):
     mano_layer = ManoLayer(mano_root = cfg.data.mano_root, use_pca=False, side='right', flat_hand_mean=True, ncomps=45)
     hand_faces = mano_layer.th_faces.numpy()
     dm.prepare_data()
-    dm.setup('validate')
+    phase = 'test'
+    dm.setup(phase)
     # train_loader = dm.train_dataloader()
-    val_loader = dm.val_dataloader()
+    if phase == 'validate' or phase == 'train':
+        loader = dm.val_dataloader()
+        dataset = dm.val_set
+    else:
+        loader = dm.test_dataloader()
+        dataset = dm.test_set
     # test_loader = dm.test_dataloader()
-    print(f"Validation dataset size: {len(dm.val_set)}")
-    for batch_idx, batch in tqdm(enumerate(val_loader), total=len(val_loader), desc="Visualizing validation data"):
+    print(f"{phase} dataset size: {len(dataset)}")
+    for batch_idx, batch in tqdm(enumerate(loader), total=len(loader), desc=f"Visualizing {phase} data"):
         grid_data = torch.cat([batch['gridSDF'], batch['gridContact'], batch['gridHandCSE']], dim=-1)  # (B, K, K, K, C)
         batch_size = grid_data.shape[0]
         for b in range(10):
@@ -183,12 +179,12 @@ def vis_local_grid_interact(cfg):
             obj_name = batch['obj_name'][b]
 
             # Reconstruct object mesh
-            obj_mesh_data = dm.val_set.simp_obj_mesh[obj_name]
+            obj_mesh_data = dataset.simp_obj_mesh[obj_name]
             # Handle rotation - check if it's axis-angle or matrix
             if obj_rot.shape == (3,):
                 from pytorch3d.transforms import axis_angle_to_matrix
                 objR = axis_angle_to_matrix(torch.from_numpy(obj_rot)).numpy()
-                if dm.val_set.dataset_name == 'grab':
+                if dataset.dataset_name == 'grab':
                     objR = objR.T
             else:
                 objR = obj_rot
@@ -199,7 +195,7 @@ def vis_local_grid_interact(cfg):
 
             # Visualize
             print(f"\nVisualizing sample {b} from batch {batch_idx} (object: {obj_name})")
-            geoms = visualize_local_grid_with_hand(local_grid, hand_verts, hand_faces, dm.val_set.hand_cse, cfg.msdf.kernel_size,
+            geoms = visualize_local_grid_with_hand(local_grid, hand_verts, hand_faces, dataset.hand_cse, cfg.msdf.kernel_size,
                                            cfg.msdf.scale, contact_point=contact_point, obj_mesh=obj_mesh)
             o3d.visualization.draw_geometries(geoms)
             # break
@@ -305,9 +301,9 @@ def fit_mano_beta(cfg):
 
 
 if __name__ == "__main__":
-    # vis_msdf_data_sample()
+    vis_msdf_data_sample()
     # test_obj()
-    vis_local_grid_interact()
+    # vis_local_grid_interact()
     # test_pointvae()
     # compare_ckpt()
     # test_hoi4d_datamodule()

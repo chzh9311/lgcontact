@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .encoder import GridEncoder3D
-from .decoder import GridDecoder3D
+from .encoder import GridEncoder3D, GridEncoder3Dv2
+from .decoder import GridDecoder3D, GridDecoder3Dv2
 from common.msdf.utils.msdf import get_grid
 from common.model.layers import DiagonalGaussianDistribution
 
@@ -92,7 +92,31 @@ class GRIDAEResidual(GRIDAEAbstract):
         self.grid_coords = get_grid(cfg.msdf.kernel_size) * cfg.msdf.scale
 
 
-class GRIDAE3DConv(GRIDAEAbstract):
+class GRIDAEResidualv2(GRIDAEAbstract):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
+        self.obj_encoder = GridEncoder3Dv2(in_dim=cfg.obj_in_dim,
+                                         h_dims=cfg.obj_h_dims,
+                                         res_expansion=cfg.obj_res_expansion,
+                                         n_res_layers=cfg.obj_n_res_layers,
+                                         feat_dim=cfg.obj_feat_dim,
+                                         N=cfg.kernel_size,
+                                         condition_dim=None)
+        self.encoder = GridEncoder3Dv2(in_dim=cfg.in_dim,
+                                     h_dims=cfg.h_dims,
+                                     res_expansion=cfg.res_expansion,
+                                     n_res_layers=cfg.n_res_layers,
+                                     feat_dim=cfg.feat_dim*2,
+                                     N=cfg.kernel_size,
+                                     condition_dim=cfg.obj_h_dims + [cfg.obj_feat_dim])
+        # pass continuous latent vector through discretization bottleneck
+        # decode the discrete latent representation
+        # self.obj_decoder = Decoder(h_dims[-1], h_dims[::-1], obj_in_dim, obj_n_res_layers, obj_res_h_dim, condition=True, final_layer=False)
+        self.decoder = GridDecoder3Dv2(latent_dim=cfg.feat_dim,
+                                     h_dims=cfg.h_dims[::-1],
+                                     res_expansion=cfg.res_expansion,
+                                     n_res_layers=cfg.n_res_layers,
+                                     out_dim=cfg.out_dim,
+                                     N=cfg.kernel_size,
+                                     condition_dim=[cfg.obj_feat_dim] + cfg.obj_h_dims[::-1])

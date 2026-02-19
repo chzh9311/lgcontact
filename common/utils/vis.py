@@ -8,6 +8,12 @@ from sklearn.manifold import Isomap
 from common.utils.geometry import point_set_register, get_v2v_rot
 import os
 
+def parse_hex_color(hex_color: str):
+    if len(hex_color) == 6:
+        hex_color = hex_color.lstrip("#")
+    color = [int(hex_color[i:i+2], 16) / 255.0 for i in (1, 3, 5)]
+    return color
+
 def o3dmesh(vert, face, color=None):
     """
     Input: vert_list, face_list: list of numpy arrays of shape [N, 3]
@@ -21,6 +27,9 @@ def o3dmesh(vert, face, color=None):
     if color is None:
         # color = np.clip(np.random.randn(3), 0, 1)
         color = cmap(np.random.rand())[:3]
+    if isinstance(color, str):
+        color = parse_hex_color(color)
+    
     mesh.paint_uniform_color(color)
     mesh.compute_vertex_normals()
 

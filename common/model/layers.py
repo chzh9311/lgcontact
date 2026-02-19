@@ -89,6 +89,50 @@ class Bottleneck(nn.Module):
         x = self.relu(x)
         return x
 
+class MLPBottleNeck(nn.Module):
+    """
+    One residual layer inputs:
+    - in_dim : the input dimension
+    - h_dim : the hidden layer dimension
+    - res_h_dim : the hidden dimension of the residual block
+    Actually a bottleneck architecture
+    """
+
+    def __init__(self, in_dim, expansion_factor=4):
+        super(MLPBottleNeck, self).__init__()
+        self.leakyrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+        self.res_block = nn.Sequential(
+            nn.LayerNorm(in_dim),
+            nn.Linear(in_dim, in_dim * expansion_factor),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            nn.Linear(in_dim * expansion_factor, in_dim),
+        )
+
+    def forward(self, x):
+        x = x + self.res_block(x)
+        x = self.leakyrelu(x)
+        return x
+
+
+class MLPResStack(nn.Module):
+    """
+    A stack of residual layers inputs:
+    - in_dim : the input dimension
+    - h_dim : the hidden layer dimension
+    - res_h_dim : the hidden dimension of the residual block
+    - n_res_layers : number of layers to stack
+    """
+
+    def __init__(self, in_dim, expansion_factor, n_res_layers):
+        super(MLPResStack, self).__init__()
+        self.n_res_layers = n_res_layers
+        self.stack = nn.ModuleList(
+            [MLPBottleNeck(in_dim, expansion_factor) for _ in range(n_res_layers)])
+
+    def forward(self, x):
+        for layer in self.stack:
+            x = layer(x)
+        return x
 
 class ResidualStack(nn.Module):
     """
