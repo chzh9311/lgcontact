@@ -23,11 +23,6 @@ OmegaConf.register_new_resolver("add", lambda x, y: x + y, replace=True)
 @hydra.main(version_base=None, config_path="../config", config_name="mlcdiff")
 def main(cfg):
     # Set seed for reproducibility FIRST
-    if hasattr(cfg, 'seed'):
-        set_seed(cfg.seed)
-    else:
-        set_seed(42)  # default seed
-
     # Set matmul precision for better performance on Tensor Cores
     torch.set_float32_matmul_precision('medium')
 
@@ -109,6 +104,11 @@ def main(cfg):
         pl_model = trainer_module.load_from_checkpoint(cfg.val.get('ckpt_path', None), grid_ae=gridae, model=model, diffusion=diffusion, hand_ae=hand_ae, cfg=cfg)
         trainer.validate(pl_model, datamodule=data_module)
     else:
+        if hasattr(cfg, 'seed'):
+            set_seed(cfg.seed)
+        else:
+            set_seed(42)  # default seed
+
         sd = torch.load(cfg.ckpt_path, map_location='cpu', weights_only=False)['state_dict']
         print('total keys in ckpt:', len(sd.keys()))
         load_pl_ckpt(gridae, sd, prefix='grid_ae.')

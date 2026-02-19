@@ -66,7 +66,6 @@ class LGTrainer(L.LightningModule):
             contact_hat.reshape(batch_size, -1),
             cse_hat.reshape(batch_size, -1, cse.shape[-1]),
             grid_coords=self.grid_coords.view(1, -1, 3).repeat(batch_size, 1, 1),
-            mask_th = 2
         )
         loss_dict = self.loss_net(gt_grid_contact, recon_cgrid, posterior, pred_hand_verts,
                                   batch['nHandVerts'], batch['handVertMask'], gt_face_idx=batch['face_idx'],
@@ -124,19 +123,23 @@ class LGTrainer(L.LightningModule):
         return loss_dict[f'{stage}/total_loss']
     
     def test_step(self, batch, batch_idx):
+
         self.grid_coords = self.grid_coords.to(self.device)
         grid_sdf = batch['gridSDF'].squeeze(-1)
         gt_grid_contact = torch.cat([batch['gridContact'], batch['gridHandCSE']], dim=-1)
-        recon_cgrid, posterior, obj_feat = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
-        # recon_grid_contact, z_e, obj_feat = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
-        recon_cgrid = recon_cgrid.permute(0, 2, 3, 4, 1)
         batch_size = grid_sdf.shape[0]
+        ## Explore latent space properties:
+        # print("Random latent contact stats - avg contact value: {:.4f}, ratio of samples with contact > 0.03: {:.4f}".format(avg_contact, contact_ratio))
+
+        posterior, obj_feat, obj_cond = self.model.encode(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
+        # recon_grid_contact, z_e, obj_feat = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
+        recon_cgrid = self.model.decode(posterior.sample(), obj_cond=obj_cond)
+        recon_cgrid = recon_cgrid.permute(0, 2, 3, 4, 1)
 
         gt_rec_hand_verts, gt_rec_verts_mask = recover_hand_verts_from_contact(
             self.handcse, batch['face_idx'],
             gt_grid_contact[..., 0].view(batch_size, -1), gt_grid_contact[..., 1:].view(batch_size, -1, gt_grid_contact.shape[-1]-1),
             grid_coords=self.grid_coords.view(1, -1, 3).repeat(batch_size, 1, 1),
-            mask_th = 2
         )
         # gt_geoms = self.visualize_grid_and_hand(
         #     grid_coords=self.grid_coords.view(-1, 3),
@@ -155,7 +158,6 @@ class LGTrainer(L.LightningModule):
             recon_cgrid[..., 0].reshape(batch_size, -1),
             recon_cgrid[..., 1:].reshape(batch_size, -1, gt_grid_contact.shape[-1] - 1),
             grid_coords=self.grid_coords.view(1, -1, 3).repeat(batch_size, 1, 1),
-            mask_th=2
         )
         # pred_geoms = self.visualize_grid_and_hand(
         #     grid_coords=self.grid_coords.view(-1, 3),
@@ -172,8 +174,20 @@ class LGTrainer(L.LightningModule):
         # o3d.visualization.draw_geometries(all_geoms, window_name='GT and Pred Local Grid Visualization')
 
         pred_rec_error = masked_rec_loss(pred_hand_verts, batch['nHandVerts'], gt_rec_verts_mask) * 1000
-        loss_dict = {'test/gt_rec_error': gt_rec_error,
-                     'test/pred_rec_error': pred_rec_error}
+        loss_dict = {'test/gt_rec_error': gt_rec_error.item(),
+                     'test/pred_rec_error': pred_rec_error.item()}
+        
+        ## Test random sampling from latent space
+        random_z = torch.randn_like(posterior.mode())
+        random_recon_cgrid = self.model.decode(random_z, obj_cond=obj_cond)
+        random_c = random_recon_cgrid[:, 0].reshape(batch_size, -1)
+        contact_value = random_c.max(dim=-1).values
+        loss_dict.update({
+            'test/avg_contact_values': contact_value.mean().item(),
+            'test/contact_ratio': (contact_value > 0.03).float().mean().item(),
+            'test/in_ratio': (contact_value > 0.5).float().mean().item()
+        })
+
         ## Test zero-contact grid reconstruction
         # gt_grid_contact[..., 0] = 0.0
         # gt_grid_contact[:] = 0

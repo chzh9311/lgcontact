@@ -83,7 +83,7 @@ class MLCTrainer(L.LightningModule):
             contact_hat.reshape(batch_size, -1),
             cse_hat.reshape(batch_size, -1, self.cse_dim),
             grid_coords=grid_coords.view(batch_size, -1, 3),
-            mask_th = 0.02
+            # mask_th = 0.02
         )
 
         loss_dict = self.loss_net(recon_lg_contact, lg_contact, mu, logvar,
@@ -202,7 +202,7 @@ class MLCTrainer(L.LightningModule):
                 self.handcse, None,
                 sample_contact.reshape(batch_size, -1), sample_cse.reshape(batch_size, -1, self.cse_dim),
                 grid_coords=grid_coords.reshape(batch_size, -1, 3),
-                mask_th = 0.02
+                # mask_th = 0.02
             )
             # handobject.load_from_batch_object_only(batch)
             # obj_msdf = handobject.obj_msdf[:, :, :self.msdf_k**3].view(-1, self.msdf_k, self.msdf_k, self.msdf_k)

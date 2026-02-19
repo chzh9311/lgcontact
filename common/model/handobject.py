@@ -766,7 +766,7 @@ class HandObject:
     ## Grid contact visualizations
 
 
-def recover_hand_verts_from_contact(handcse, gt_face_idx, grid_contact, grid_cse, grid_coords, mask_th=0.01, chunk_size=0):
+def recover_hand_verts_from_contact(handcse, gt_face_idx, grid_contact, grid_cse, grid_coords, rel_mask_th=0.28, chunk_size=0):
     """
     :param grid_contact: (B, N) contact values
     :param grid_cse: (B, N, D) contact signature embeddings
@@ -780,7 +780,11 @@ def recover_hand_verts_from_contact(handcse, gt_face_idx, grid_contact, grid_cse
         targetWverts = handcse.emb2Wvert(grid_cse, gt_face_idx)
         # verts_mask = torch.sum(targetWverts, dim=1) > 0.01  # (B, 778)
         weight = (targetWverts * grid_contact.unsqueeze(-1)).transpose(-1, -2)  # (B, 778, K^3)
-        verts_mask = torch.sum(weight, dim=-1) > mask_th  # (B, 778)
+        all_weight = torch.sum(weight, dim=-1)  # (B, 778)
+        # Adaptive threshold: keep top rel_mask_th proportion of vertices
+        k = max(1, int(all_weight.shape[1] * (1 - rel_mask_th)))
+        threshold = all_weight.kthvalue(k, dim=1).values  # (B,)
+        verts_mask = all_weight > threshold.unsqueeze(1)  # (B, 778)
         weight[verts_mask] = weight[verts_mask] / (torch.sum(weight[verts_mask], dim=-1, keepdim=True) + 1e-8)
         pred_verts = weight @ grid_coords  # (B, 778, 3)
         return pred_verts, verts_mask
@@ -797,7 +801,10 @@ def recover_hand_verts_from_contact(handcse, gt_face_idx, grid_contact, grid_cse
 
         targetWverts = handcse.emb2Wvert(chunk_grid_cse, gt_face_idx)
         weight = (targetWverts * chunk_grid_contact.unsqueeze(-1)).transpose(-1, -2)  # (chunk, 778, K^3)
-        chunk_verts_mask = torch.sum(weight, dim=-1) > mask_th  # (chunk, 778)
+        chunk_all_weight = torch.sum(weight, dim=-1)  # (chunk, 778)
+        chunk_k = max(1, int(chunk_all_weight.shape[1] * (1 - rel_mask_th)))
+        chunk_threshold = chunk_all_weight.kthvalue(chunk_k, dim=1).values  # (chunk,)
+        chunk_verts_mask = chunk_all_weight > chunk_threshold.unsqueeze(1)  # (chunk, 778)
         weight[chunk_verts_mask] = weight[chunk_verts_mask] / (torch.sum(weight[chunk_verts_mask], dim=-1, keepdim=True) + 1e-8)
         chunk_pred_verts = weight @ chunk_grid_coords  # (chunk, 778, 3)
 

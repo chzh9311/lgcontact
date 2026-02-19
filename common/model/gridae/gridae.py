@@ -47,9 +47,7 @@ class GRIDAEAbstract(nn.Module):
         ## Adding skip connections for object decoder
         # dec_obj_cond = self.obj_decoder(obj_feat, cond=enc_obj_cond[::-1])
 
-        c_hat, cse_hat, _ = self.decoder(z, cond=obj_cond[::-1])
-        x_hat = torch.cat([c_hat, cse_hat], dim=1)
-
+        x_hat = self.decode(z, obj_cond=obj_cond)
         return x_hat, posterior, obj_feat
     
     def inference(self, z_e, obj_msdf):

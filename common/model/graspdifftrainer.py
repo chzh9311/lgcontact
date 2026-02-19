@@ -59,7 +59,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
                 faces=hand_faces,
                 kernel_size=k,
                 grid_scale=self.cfg.msdf.scale,
-                apply_grid_mask=True
+                apply_grid_mask=False
             )
 
             if grid_mask.any():
@@ -105,6 +105,11 @@ class GraspDiffTrainer(LGCDiffTrainer):
         self.grid_coords = self.grid_coords.view(-1, 3).to(self.device)
         handobject = HandObject(self.cfg.data, self.device, mano_layer=self.mano_layer, apply_grid_mask=self.cfg.ae.name == 'GRIDAEOld')
         handobject.load_from_batch(batch, pool=self.pool)
+
+        # mask = handobject.hand_vert_mask.any(dim=1) # B, H
+        # print(f"Average number of visible hand vertices: {torch.sum(mask, dim=1).float().mean().item()}")
+        # return
+
         lg_contact = handobject.ml_contact
         batch_size, n_grids = lg_contact.shape[:2]
         obj_msdf = handobject.obj_msdf[:, :, :self.msdf_k**3].view(-1, 1, self.msdf_k, self.msdf_k, self.msdf_k)
@@ -144,20 +149,25 @@ class GraspDiffTrainer(LGCDiffTrainer):
         losses['difference_loss'] = F.mse_loss(pred_grid_latent, recon_LVClatent.reshape(batch_size, -1), reduction='mean')
 
         ## For stable loss
-        # pred_grid_latent = rearrange(pred_grid_latent, 'b (n l) -> (b n) l', n=n_grids)
-        # recon_grid_contact = self.grid_ae.decode(pred_grid_latent, multi_scale_obj_cond)  # (B*N) x c x k x k x k
-        # lgc = rearrange(recon_grid_contact[:, 0], '(b n) k1 k2 k3 -> b (n k1 k2 k3)', b=batch_size, n=n_grids)
-        # sdf_vals = handobject.obj_msdf[:, :, :self.msdf_k**3]        # (B, N, K^3)
-        # sdf_flat = sdf_vals.reshape(batch_size, n_grids * self.msdf_k**3)
-        # sdf_flat = sdf_flat * self.msdf_scale * np.sqrt(3)
-        # centres = handobject.obj_msdf[:, :, self.msdf_k**3:]          # (B, N, 3)
-        # sdf_grad = handobject.msdf_grad.reshape(batch_size, n_grids * self.msdf_k**3, 3)
-        # n_adj_pt = handobject.n_adj_pt.view(batch_size, n_grids * self.msdf_k**3)
-        # all_pts = centres.unsqueeze(2) + handobject.normalized_coords[None, None, :, :] * self.msdf_scale
-        # stable_loss = self.stable_loss(sdf_flat, all_pts.view(batch_size, -1, 3), lgc, sdf_grad, n_adj_pt,
-        #                         obj_mass=handobject.obj_mass, gravity_direction=torch.FloatTensor([[0, 0, -1]]).to(self.device),
-        #                         J=handobject.obj_inertia)
-        # losses['stable_loss'] = stable_loss.mean()
+        pred_grid_latent = rearrange(pred_grid_latent, 'b (n l) -> (b n) l', n=n_grids)
+        recon_grid_contact = self.grid_ae.decode(pred_grid_latent, multi_scale_obj_cond)  # (B*N) x c x k x k x k
+        lgc = rearrange(recon_grid_contact[:, 0], '(b n) k1 k2 k3 -> b (n k1 k2 k3)', b=batch_size, n=n_grids)
+        lgc = torch.where(lgc < 0.03, torch.zeros_like(lgc), lgc)
+        sdf_vals = handobject.obj_msdf[:, :, :self.msdf_k**3]        # (B, N, K^3)
+        sdf_flat = sdf_vals.reshape(batch_size, n_grids * self.msdf_k**3)
+        sdf_flat = sdf_flat * self.msdf_scale * np.sqrt(3)
+        centres = handobject.obj_msdf[:, :, self.msdf_k**3:]          # (B, N, 3)
+        sdf_grad = handobject.msdf_grad.reshape(batch_size, n_grids * self.msdf_k**3, 3)
+        n_adj_pt = handobject.n_adj_pt.view(batch_size, n_grids * self.msdf_k**3)
+        all_pts = centres.unsqueeze(2) + handobject.normalized_coords[None, None, :, :] * self.msdf_scale
+        stable_loss = self.stable_loss(sdf_flat, all_pts.view(batch_size, -1, 3), lgc, sdf_grad, n_adj_pt,
+                                obj_mass=handobject.obj_mass, gravity_direction=torch.FloatTensor([[0, 0, -1]]).to(self.device),
+                                J=handobject.obj_inertia)
+        losses['stable_loss'] = stable_loss.mean()
+
+        ## Debugging code:
+        # if batch_idx % 10 == 0:
+        #     print(recon_grid_contact[:, 0].max().item())
 
         total_loss = sum([losses[k] * self.loss_weights[k] for k in losses.keys()])
         losses['total_loss'] = total_loss
@@ -172,7 +182,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
         else:
             self.log_dict(loss_dict, prog_bar=True, sync_dist=True)
 
-        if batch_idx % self.cfg[stage].vis_every_n_batches == 0 and batch_idx > 0:
+        if batch_idx % self.cfg[stage].vis_every_n_batches == 0:#  and batch_idx > 0:
             vis_idx = 0
             vis_data = {k: v[vis_idx:vis_idx+1] for k, v in input_data.items()}
             condition = self.model.condition(vis_data)
@@ -293,7 +303,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
                 self.hand_cse, None,
                 pred_grid_contact.reshape(n_samples, -1), pred_grid_cse.reshape(n_samples, -1, self.cse_dim),
                 grid_coords=grid_coords.reshape(n_samples, -1, 3),
-                mask_th = 2, chunk_size=10
+                chunk_size=10
             )
             recon_param, _ = self.hand_ae(pred_hand_verts.permute(0, 2, 1), mask=pred_verts_mask.unsqueeze(1), is_training=False)
             nrecon_trans, recon_pose, recon_betas = torch.split(recon_param, [3, 48, 10], dim=1)
@@ -313,7 +323,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
                 self.hand_cse, None,
                 pred_grid_contact.reshape(n_samples, -1), pred_grid_cse.reshape(n_samples, -1, self.cse_dim),
                 grid_coords=grid_coords.reshape(n_samples, -1, 3),
-                mask_th = 2, chunk_size=10
+                chunk_size=10
             )
             recon_params, init_handV, init_handJ = self.hand_ae.decode(hand_latent)
             # recon_params = self.hand_ae.decoder(hand_latent)
@@ -376,7 +386,6 @@ class GraspDiffTrainer(LGCDiffTrainer):
             pred_grid_contact.reshape(n_samples, -1),
             pred_grid_cse.reshape(n_samples, -1, self.cse_dim),
             grid_coords=grid_coords.reshape(n_samples, -1, 3),
-            mask_th=2,
             chunk_size=10  # Process in chunks of 10 to reduce memory peak
         )
 

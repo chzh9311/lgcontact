@@ -8,6 +8,7 @@ import importlib
 from common.dataset_utils.datamodules import LocalGridDataModule
 from common.model.lgtrainer import LGTrainer
 from common.model.gridae import gridae
+from common.model.gridae.old.gridae import GRIDAE as GRIDAEOld
 from lightning.pytorch.callbacks import ModelCheckpoint
 # from common.model.gridvqvae.gridvqvae import GRIDVQVAE
 
@@ -34,8 +35,11 @@ def main(cfg):
                                     log_model=True, save_dir='logs/wandb_logs')
 
     # Initialize the model, data module, and trainer
-    model_class = getattr(gridae, cfg.ae.name)
-    model = model_class(cfg.ae)
+    if cfg.ae.name == 'GRIDAEOld':
+        model = GRIDAEOld(cfg.ae, obj_1d_feat=False)
+    else:
+        model_class = getattr(gridae, cfg.ae.name)
+        model = model_class(cfg.ae)
     checkpoint_callback = ModelCheckpoint(
         monitor='val/total_loss',
         dirpath=cfg.checkpoint.dirpath,
