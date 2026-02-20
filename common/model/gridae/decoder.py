@@ -26,8 +26,6 @@ class GridDecoder3D(nn.Module):
         )
         self.residual_layer = ResidualStack(h_dims[0], res_h_dim=res_h_dim, n_res_layers=n_res_layers)
         self.deconv_layers = nn.ModuleList()
-        self.actvn = nn.ModuleList()
-        self.bn = nn.ModuleList()
         self.upsample_layers = nn.ModuleList()
 
         for i in range(self.num_layers):
@@ -95,10 +93,8 @@ class GridDecoder3Dv2(nn.Module):
             nn.Linear(4*latent_dim, h_dims[0]*(self.init_N)**3),
             nn.LeakyReLU(0.2, inplace=True)
         )
-        self.residual_layer = MLPResStack(h_dims[0], expansion_factor=res_expansion, n_res_layers=n_res_layers)
+        self.residual_layer = MLPResStack(h_dims[0]*(self.init_N)**3, expansion_factor=res_expansion, n_res_layers=n_res_layers)
         self.deconv_layers = nn.ModuleList()
-        self.actvn = nn.ModuleList()
-        self.bn = nn.ModuleList()
         self.upsample_layers = nn.ModuleList()
 
         for i in range(self.num_layers):
@@ -112,7 +108,7 @@ class GridDecoder3Dv2(nn.Module):
 
             # Pool layer (not used after the last layer group)
             if i < self.num_layers - 1:
-                self.upsample_layers.append(Deconv3D(h_dims[i], h_dims[i], kernel_size=2, stride=2, padding=0))
+                self.upsample_layers.append(Deconv3D(out_channels, out_channels, kernel_size=2, stride=2, padding=0))
 
         self.final_cse = nn.Conv3d(h_dims[-1], out_dim-1, kernel_size=1,
                             stride=1, padding=0)

@@ -44,7 +44,7 @@ trainer: ## For instantiating pytorch-lightning Trainer
   accelerator: gpu
   devices: [0]
   precision: 32
-  # enable_progress_bar: true
+  enable_progress_bar: false
   enable_model_summary: true
   # strategy: ddp_find_unused_parameters_true
   # limit_train_batches: 100

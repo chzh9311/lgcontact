@@ -154,8 +154,6 @@ class GridEncoder3Dv2(nn.Module):
             # Second conv: 3x3 to process features
             conv2 = Conv3D(h_dims[i] + condition_dim[i], h_dims[i], kernel_size=3, stride=1, padding=1)
             self.conv_layers.append(nn.ModuleList([conv1, conv2]))
-            self.actvn.append(nn.ModuleList([nn.ReLU(), nn.ReLU()]))
-            self.bn.append(nn.ModuleList([nn.BatchNorm3d(h_dims[i]), nn.BatchNorm3d(h_dims[i])]))
 
             # Pool layer (not used after the last layer group)
             if i < self.num_layers - 1:
