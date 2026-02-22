@@ -47,6 +47,7 @@ class LGTrainer(L.LightningModule):
     
     def validation_step(self, batch, batch_idx):
         total_loss = self.train_val_step(batch, batch_idx, stage='val')
+
         return total_loss
     
     def train_val_step(self, batch, batch_idx, stage):
@@ -60,10 +61,21 @@ class LGTrainer(L.LightningModule):
         contact, contact_hat = gt_grid_contact[..., 0], recon_cgrid[..., 0]
         cse, cse_hat = gt_grid_contact[..., 1:], recon_cgrid[..., 1:]
         # self.check_latents(posterior)
-
         batch_size = grid_sdf.shape[0]
         loss_dict = self.loss_net(x=gt_grid_contact, x_hat=recon_cgrid, posterior=posterior, gt_face_idx=batch['face_idx'],
                                   gt_w=batch['cse_weights'], proc=stage)
+
+        if stage == 'val':
+            pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
+                self.handcse, batch['face_idx'],
+                contact_hat.reshape(batch_size, -1),
+                cse_hat.reshape(batch_size, -1, cse.shape[-1]),
+                grid_coords=self.grid_coords.view(1, -1, 3).repeat(batch_size, 1, 1),
+            )
+            rec_loss = masked_rec_loss(pred_hand_verts, batch['nHandVerts'], batch['handVertMask']) * 10000
+            loss_dict[f'{stage}/rec_loss'] = rec_loss
+            loss_dict[f'{stage}/total_loss'] = rec_loss
+        
         # recon_loss = F.mse_loss(recon_grid_contact, gt_grid_contact.permute(0, 4, 1, 2, 3))
         # loss_dict = {f'{stage}/embedding_loss': loss, f'{stage}/recon_loss': recon_loss, f'{stage}/perplexity': perplexity}
         # total_loss = sum(loss_dict.values())
@@ -76,12 +88,13 @@ class LGTrainer(L.LightningModule):
             self.log_dict(loss_dict, prog_bar=False, sync_dist=True)
         if batch_idx % self.cfg[stage].vis_every_n_batches == 0 and batch_idx > 0:
             pred_grid_contact = recon_cgrid
-            pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
-                self.handcse, batch['face_idx'],
-                contact_hat.reshape(batch_size, -1),
-                cse_hat.reshape(batch_size, -1, cse.shape[-1]),
-                grid_coords=self.grid_coords.view(1, -1, 3).repeat(batch_size, 1, 1),
-            )
+            if stage == 'train':
+                pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
+                    self.handcse, batch['face_idx'],
+                    contact_hat.reshape(batch_size, -1),
+                    cse_hat.reshape(batch_size, -1, cse.shape[-1]),
+                    grid_coords=self.grid_coords.view(1, -1, 3).repeat(batch_size, 1, 1),
+                )
             gt_geoms = self.visualize_grid_and_hand(
                 grid_coords=self.grid_coords.view(-1, 3),
                 grid_contact=gt_grid_contact[..., 0].reshape(batch_size, -1),
