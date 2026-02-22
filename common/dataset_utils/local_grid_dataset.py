@@ -2,9 +2,9 @@ import os
 import os.path as osp
 import pickle
 import importlib
+from collections import defaultdict
 import numpy as np
 from copy import deepcopy
-import trimesh
 import torch
 from torch.utils.data import Dataset, DataLoader
 from pytorch3d.transforms import axis_angle_to_matrix
@@ -41,9 +41,44 @@ class LocalGridDataset(Dataset):
             raise FileNotFoundError(f"Local grid file not found: {local_grid_file}. Please run LocalGridDataModule.prepare_data() first.")
 
         self.local_grid_file = local_grid_file
-        # Open H5 file to get dataset length
+        # Load small arrays into RAM; build per-grid-item scalar lookups to avoid
+        # expensive random chunk reads into large H5 datasets at __getitem__ time.
         with h5py.File(local_grid_file, 'r') as f:
-            self.n_grids = f['grid_distance'].shape[0]  # Total number of grid data items
+            self.n_grids = f['grid_distance'].shape[0]
+            # grid_mask: (n_frames, n_pts) bool — 66 MB, load fully
+            self._grid_mask = f['grid_mask'][:]  # (n_frames, n_pts)
+            # grid_sample_idx: (n_grids, 2) int — 64 MB, load fully
+            grid_sample_idx = f['grid_sample_idx'][:]  # (n_grids, 2): [point_idx, sample_idx]
+            # verts_mask: (n_frames, n_pts, 778) bool — 51 GB on disk, do NOT load fully.
+            # Precompute the (778,) bool row per grid item needed at __getitem__ time.
+            # Read verts_mask in chunks aligned to H5 chunk boundaries to minimise I/O.
+            verts_mask_ds = f['verts_mask']
+            n_frames = verts_mask_ds.shape[0]
+            n_verts = verts_mask_ds.shape[2]
+            chunk_rows = verts_mask_ds.chunks[0] if verts_mask_ds.chunks else 1  # H5 chunk size along frame axis
+            self._hand_vert_mask = np.empty((self.n_grids, n_verts), dtype=bool)
+            # Build a mapping: sample_idx -> list of (gi, point_idx) pairs
+            sample_to_grids = defaultdict(list)
+            for gi, (point_idx, sample_idx) in enumerate(grid_sample_idx):
+                sample_to_grids[sample_idx].append((gi, point_idx))
+            # Iterate frames in sorted order, reading chunk_rows at a time
+            print(f"Precomputing handVertMask: reading {n_frames} frames "
+                  f"in chunks of {chunk_rows} from verts_mask...")
+            for chunk_start in tqdm(range(0, n_frames, chunk_rows), desc='Loading verts_mask'):
+                chunk_end = min(chunk_start + chunk_rows, n_frames)
+                chunk = verts_mask_ds[chunk_start:chunk_end]  # (chunk_rows, n_pts, 778)
+                for frame_idx in range(chunk_start, chunk_end):
+                    if frame_idx not in sample_to_grids:
+                        continue
+                    local_idx = frame_idx - chunk_start
+                    frame_mask = self._grid_mask[frame_idx]            # (n_pts,) bool
+                    masked_rows = chunk[local_idx][frame_mask]          # (n_masked, 778)
+                    for gi, point_idx in sample_to_grids[frame_idx]:
+                        self._hand_vert_mask[gi] = masked_rows[point_idx]
+            self._grid_sample_idx = grid_sample_idx
+        # Per-worker H5 handle, initialized lazily in __getitem__ to avoid
+        # multiprocessing fork issues and repeated open/close overhead.
+        self._h5_handle = None
 
         hand_cse_sd = torch.load(cfg.get('hand_cse_path', 'data/misc/hand_cse.ckpt'), weights_only=True)['state_dict']
         self.hand_cse = hand_cse_sd['embedding_tensor'].detach().cpu().numpy()
@@ -80,22 +115,25 @@ class LocalGridDataset(Dataset):
         return self.n_grids
     
     def __getitem__(self, idx):
+        # Lazily open the H5 file once per worker process, keeping it open for all subsequent reads.
+        if self._h5_handle is None:
+            self._h5_handle = h5py.File(self.local_grid_file, 'r')
+        grid_data_raw = self._h5_handle
+
         # sample_idx, point_idx = self.idx2sample[idx].tolist()
-        with h5py.File(self.local_grid_file, 'r') as grid_data_raw:
+        point_idx, sample_idx = self._grid_sample_idx[idx]
+        # frame_name = grid_data_raw['frame_names'][sample_idx].decode('utf-8')
 
-            point_idx, sample_idx = grid_data_raw['grid_sample_idx'][idx]
-            # frame_name = grid_data_raw['frame_names'][sample_idx].decode('utf-8')
-
-            verts_mask = grid_data_raw['verts_mask'][sample_idx]
-            grid_mask = grid_data_raw['grid_mask'][sample_idx]
-            # Convert unmasked point_idx to masked array index
-            # masked_point_idx = np.sum(grid_mask[:point_idx]).item()
-            # masked_point_idx = np.searchsorted(np.where(grid_mask)[0], point_idx)
-            grid_sdf = grid_data_raw['grid_sdf'][idx]
-            grid_distance = grid_data_raw['grid_distance'][idx]
-            ## TODO: do shape transformation for nn_face_idx and nn_point when saving data.
-            nn_face_idx = grid_data_raw['nn_face_idx'][idx].reshape(self.kernel_size**3)
-            nn_point = grid_data_raw['nn_point'][idx].reshape(self.kernel_size**3, 3)
+        hand_vert_mask = self._hand_vert_mask[idx]   # (778,) bool, preloaded
+        grid_mask = self._grid_mask[sample_idx]       # (n_pts,) bool, preloaded
+        # Convert unmasked point_idx to masked array index
+        # masked_point_idx = np.sum(grid_mask[:point_idx]).item()
+        # masked_point_idx = np.searchsorted(np.where(grid_mask)[0], point_idx)
+        grid_sdf = grid_data_raw['grid_sdf'][idx]
+        grid_distance = grid_data_raw['grid_distance'][idx]
+        ## TODO: do shape transformation for nn_face_idx and nn_point when saving data.
+        nn_face_idx = grid_data_raw['nn_face_idx'][idx].reshape(self.kernel_size**3)
+        nn_point = grid_data_raw['nn_point'][idx].reshape(self.kernel_size**3, 3)
 
         fname_path = self.frame_names[sample_idx].split('/')
         sbj_id = fname_path[2]
@@ -112,16 +150,13 @@ class LocalGridDataset(Dataset):
         obj_sample_pt = (objR @ obj_sample_pt.reshape(3, 1)).reshape(3) + objt
         # obj_sample_normal = (objR @ obj_sample_normal.reshape(3, 1)).reshape(3)
 
-        obj_mesh = self.simp_obj_mesh[obj_name]
-        obj_verts = (objR @ obj_mesh['verts'].T).T + objt
-        obj_faces = obj_mesh['faces']
-        obj_mesh = trimesh.Trimesh(vertices=obj_verts, faces=obj_faces, process=False)
-
         hdata = self.rh_data
-        handV, handJ, part_T = self.rh_models[sbj_id](
-            th_pose_coeffs=torch.cat([hdata['global_orient'][sample_idx], hdata['fullpose'][sample_idx].view(45)], dim=0)[None, :],
-            th_trans=hdata['transl'][sample_idx][None, :])
+        with torch.no_grad():
+            handV, _, _ = self.rh_models[sbj_id](
+                th_pose_coeffs=torch.cat([hdata['global_orient'][sample_idx], hdata['fullpose'][sample_idx].view(45)], dim=0)[None, :],
+                th_trans=hdata['transl'][sample_idx][None, :])
         nhandV = handV[0].detach().cpu().numpy() - obj_sample_pt[np.newaxis, :]
+        # nhandV = np.random.rand(778, 3)
 
         nn_point = nn_point - obj_sample_pt[np.newaxis, :]
 
@@ -153,7 +188,7 @@ class LocalGridDataset(Dataset):
                   'objRot': obj_rot,
                   'objTrans': obj_trans,
                   'nHandVerts': nhandV,
-                  'handVertMask': verts_mask[grid_mask][point_idx],
+                  'handVertMask': hand_vert_mask,
                   'obj_name': obj_name,
                   'face_idx': nn_face_idx,
                   'cse_weights': w.squeeze(-1),

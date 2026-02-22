@@ -110,7 +110,7 @@ class HandCSE(nn.Module):
         pseudo_inv = torch.linalg.inv(vert_cse @ vert_cse.transpose(2, 3) + 1e-6 * torch.eye(3).to(pred_cse.device)) @ vert_cse 
         # gt_coef = (pseudo_inv @ gt_cse.unsqueeze(3)).squeeze(3)  # (B, n_pts, 3)
         pred_coef = (pseudo_inv @ pred_cse.unsqueeze(3)).squeeze(3)  # (B, n_pts, 3)
-        loss = F.l1_loss(pred_coef, gt_coef)
+        loss = F.l1_loss(pred_coef, gt_coef, reduction='none').mean(dim=-1)
         return loss
 
     

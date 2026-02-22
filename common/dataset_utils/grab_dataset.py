@@ -207,6 +207,7 @@ class GRABDataset(BaseHOIDataset):
         sbj_info = np.load(osp.join(self.data_dir, 'sbj_info.npy'), allow_pickle=True).item()
         self.rh_models = {}
         self.lh_models = {}
+        self.cano_joints_cache = {}  # pre-computed canonical joints per subject
         for sbj_id in sbj_info.keys():
             self.rh_models[sbj_id] = ManoLayer(mano_root=self.mano_root,
                                                side='right',
@@ -214,6 +215,9 @@ class GRABDataset(BaseHOIDataset):
                                                flat_hand_mean=True,
                                                use_pca=False,
                                                ncomps=45)
+            with torch.no_grad():
+                _, canoJ, _ = self.rh_models[sbj_id](th_pose_coeffs=torch.zeros(1, 48))
+            self.cano_joints_cache[sbj_id] = canoJ[0].detach().cpu().numpy()
 
 class GRABLocalGridDataset(LocalGridDataset):
     """
@@ -247,6 +251,7 @@ class GRABLocalGridDataset(LocalGridDataset):
 
         sbj_info = np.load(osp.join(self.dataset_path, 'sbj_info.npy'), allow_pickle=True).item()
         self.rh_models = {}
+        self.cano_joints_cache = {}  # pre-computed canonical joints per subject
         frame_names = np.load(osp.join(self.dataset_path, self.split, 'frame_names.npz'))['frame_names']
         self.frame_names = np.array(frame_names, dtype=np.dtypes.StringDType())
         for sbj_id in sbj_info.keys():
@@ -256,3 +261,6 @@ class GRABLocalGridDataset(LocalGridDataset):
                                                flat_hand_mean=True,
                                                use_pca=False,
                                                ncomps=45)
+            with torch.no_grad():
+                _, canoJ, _ = self.rh_models[sbj_id](th_pose_coeffs=torch.zeros(1, 48))
+            self.cano_joints_cache[sbj_id] = canoJ[0].detach().cpu().numpy()

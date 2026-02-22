@@ -152,9 +152,12 @@ class BaseHOIDataset(Dataset):
                 th_pose_coeffs=torch.cat([hand_rot, hand_pose], dim=0).unsqueeze(0),
                 th_trans=hand_trans.unsqueeze(0))
             handV, handJ, part_T = handV[0].detach().cpu().numpy(), handJ[0].detach().cpu().numpy(), part_T[0].detach().cpu().numpy()
-            ## canonical joints for calculating transformations
-            canoV, canoJ, _ = hmodels[sbj_id](th_pose_coeffs = torch.zeros(1, 48))
-            canoJ = canoJ[0].detach().cpu().numpy()
+            ## canonical joints for calculating transformations (use cache if available)
+            if hasattr(self, 'cano_joints_cache') and sbj_id in self.cano_joints_cache:
+                canoJ = self.cano_joints_cache[sbj_id]
+            else:
+                _, canoJt, _ = hmodels[sbj_id](th_pose_coeffs=torch.zeros(1, 48))
+                canoJ = canoJt[0].detach().cpu().numpy()
             # model = ManoLayer(mano_root=self.mano_root, flat_hand_mean=True)
             hand_part_ids = torch.argmax(hmodels[sbj_id].th_weights, dim=-1).detach().cpu().numpy()
 
@@ -401,9 +404,12 @@ class BaseOnlineHOIDataset(BaseHOIDataset):
                 th_pose_coeffs=torch.cat([hand_rot, hand_pose], dim=0).unsqueeze(0),
                 th_trans=hand_trans.unsqueeze(0))
             handV, handJ, part_T = handV[0].detach().cpu().numpy(), handJ[0].detach().cpu().numpy(), part_T[0].detach().cpu().numpy()
-            ## canonical joints for calculating transformations
-            canoV, canoJ, _ = hmodels[sbj_id](th_pose_coeffs = torch.zeros(1, 48))
-            canoJ = canoJ[0].detach().cpu().numpy()
+            ## canonical joints for calculating transformations (use cache if available)
+            if hasattr(self, 'cano_joints_cache') and sbj_id in self.cano_joints_cache:
+                canoJ = self.cano_joints_cache[sbj_id]
+            else:
+                _, canoJt, _ = hmodels[sbj_id](th_pose_coeffs=torch.zeros(1, 48))
+                canoJ = canoJt[0].detach().cpu().numpy()
             # model = ManoLayer(mano_root=self.mano_root, flat_hand_mean=True)
             hand_part_ids = torch.argmax(hmodels[sbj_id].th_weights, dim=-1).detach().cpu().numpy()
 

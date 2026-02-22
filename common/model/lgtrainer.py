@@ -53,6 +53,7 @@ class LGTrainer(L.LightningModule):
         self.grid_coords = self.grid_coords.to(self.device)
         grid_sdf = batch['gridSDF'].squeeze(-1)
         gt_grid_contact = torch.cat([batch['gridContact'], batch['gridHandCSE']], dim=-1)
+        hand_in_mask = batch['handVertMask'].any(dim=1)
 
         recon_cgrid, posterior, obj_feat = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
         recon_cgrid = recon_cgrid.permute(0, 2, 3, 4, 1)
@@ -61,14 +62,7 @@ class LGTrainer(L.LightningModule):
         # self.check_latents(posterior)
 
         batch_size = grid_sdf.shape[0]
-        pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
-            self.handcse, batch['face_idx'],
-            contact_hat.reshape(batch_size, -1),
-            cse_hat.reshape(batch_size, -1, cse.shape[-1]),
-            grid_coords=self.grid_coords.view(1, -1, 3).repeat(batch_size, 1, 1),
-        )
-        loss_dict = self.loss_net(gt_grid_contact, recon_cgrid, posterior, pred_hand_verts,
-                                  batch['nHandVerts'], batch['handVertMask'], gt_face_idx=batch['face_idx'],
+        loss_dict = self.loss_net(x=gt_grid_contact, x_hat=recon_cgrid, posterior=posterior, gt_face_idx=batch['face_idx'],
                                   gt_w=batch['cse_weights'], proc=stage)
         # recon_loss = F.mse_loss(recon_grid_contact, gt_grid_contact.permute(0, 4, 1, 2, 3))
         # loss_dict = {f'{stage}/embedding_loss': loss, f'{stage}/recon_loss': recon_loss, f'{stage}/perplexity': perplexity}
@@ -80,8 +74,14 @@ class LGTrainer(L.LightningModule):
             self.log_dict(loss_dict, prog_bar=False, sync_dist=True, on_step=False, on_epoch=True)
         else:
             self.log_dict(loss_dict, prog_bar=False, sync_dist=True)
-        if batch_idx % self.cfg[stage].vis_every_n_batches == 0:
+        if batch_idx % self.cfg[stage].vis_every_n_batches == 0 and batch_idx > 0:
             pred_grid_contact = recon_cgrid
+            pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
+                self.handcse, batch['face_idx'],
+                contact_hat.reshape(batch_size, -1),
+                cse_hat.reshape(batch_size, -1, cse.shape[-1]),
+                grid_coords=self.grid_coords.view(1, -1, 3).repeat(batch_size, 1, 1),
+            )
             gt_geoms = self.visualize_grid_and_hand(
                 grid_coords=self.grid_coords.view(-1, 3),
                 grid_contact=gt_grid_contact[..., 0].reshape(batch_size, -1),
@@ -214,35 +214,32 @@ class LGTrainer(L.LightningModule):
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr)
         return optimizer
     
-    def loss_net(self, x, x_hat, posterior, pred_hand_verts, gt_hand_verts, gt_verts_mask, gt_face_idx, gt_w, proc='train'):
+    def loss_net(self, x, x_hat, posterior, gt_face_idx, gt_w, proc='train'):
         """
         Compute the loss for training the GRIDAE
         1. Reconstruction loss between x and x_hat
         2. Regularization loss on z_e (KL-divergence)
         """
-        contact, contact_hat = x[..., 0], x_hat[..., 0]
+        contact, contact_hat = x[..., 0], x_hat[..., 0] ## (B, K, K, K)
         cse, cse_hat = x[..., 1:], x_hat[..., 1:]
         contact_diff = contact - contact_hat
         cse_diff = (cse - cse_hat) * contact[..., None] # weighing by contact likelihood
-        cse_value_loss = F.mse_loss(cse_diff, torch.zeros_like(cse_diff))
+        cse_value_loss = F.l1_loss(cse_diff, torch.zeros_like(cse_diff))
         cse_rec_loss = self.handcse.cse_rec_loss(cse_hat.reshape(x.shape[0], -1, cse.shape[-1]), gt_face_idx, gt_w)
+        cse_rec_loss = (cse_rec_loss * contact.reshape(x.shape[0], -1)).mean()
         contact_loss = F.mse_loss(contact_diff, torch.zeros_like(contact_diff))
         # kl_loss = kl_div_normal(z_e)
         kl_loss = posterior.kl().mean()
-        rec_loss = masked_rec_loss(pred_hand_verts, gt_hand_verts, gt_verts_mask)
-        if self.cfg.train.rec_loss_start_epoch is not None and self.current_epoch >= self.cfg.train.rec_loss_start_epoch:
-            w_rec = self.loss_weights.w_rec
-        else:
-            w_rec = 0.0
-
+        # rec_loss = masked_rec_loss(pred_hand_verts, gt_hand_verts, gt_verts_mask)
+        
         loss_dict = {
             f'{proc}/contact_loss': contact_loss,
             f'{proc}/cse_rec_loss': cse_rec_loss,
             f'{proc}/cse_value_loss': cse_value_loss,
             f'{proc}/kl_loss': kl_loss,
-            f'{proc}/rec_loss': rec_loss,
+            # f'{proc}/rec_loss': rec_loss,
             f'{proc}/total_loss': self.loss_weights.w_contact * contact_loss + self.loss_weights.w_cse_rec * cse_rec_loss\
-                + self.loss_weights.w_cse_value * cse_value_loss + self.loss_weights.w_kl * kl_loss + w_rec * rec_loss
+                + self.loss_weights.w_cse_value * cse_value_loss + self.loss_weights.w_kl * kl_loss
         }
         return loss_dict
     
