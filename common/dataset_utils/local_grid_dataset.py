@@ -76,6 +76,11 @@ class LocalGridDataset(Dataset):
                     for gi, point_idx in sample_to_grids[frame_idx]:
                         self._hand_vert_mask[gi] = masked_rows[point_idx]
             self._grid_sample_idx = grid_sample_idx
+        # Global validity mask: grid items where at least one hand vertex lies inside the grid.
+        # Used to restrict training to meaningful contact examples.
+        self._valid_indices = np.where(self._hand_vert_mask.any(axis=-1))[0]
+        print(f"Valid grid items (hand inside grid): {len(self._valid_indices)} / {self.n_grids} "
+              f"({100 * len(self._valid_indices) / self.n_grids:.1f}%)")
         # Per-worker H5 handle, initialized lazily in __getitem__ to avoid
         # multiprocessing fork issues and repeated open/close overhead.
         self._h5_handle = None
@@ -112,28 +117,30 @@ class LocalGridDataset(Dataset):
         raise NotImplementedError("This method should be implemented in subclasses.")
     
     def __len__(self):
-        return self.n_grids
-    
+        return len(self._valid_indices)
+
     def __getitem__(self, idx):
+        # Remap through valid indices so only grid items with hand inside the grid are exposed.
+        raw_idx = self._valid_indices[idx]
         # Lazily open the H5 file once per worker process, keeping it open for all subsequent reads.
         if self._h5_handle is None:
             self._h5_handle = h5py.File(self.local_grid_file, 'r')
         grid_data_raw = self._h5_handle
 
         # sample_idx, point_idx = self.idx2sample[idx].tolist()
-        point_idx, sample_idx = self._grid_sample_idx[idx]
+        point_idx, sample_idx = self._grid_sample_idx[raw_idx]
         # frame_name = grid_data_raw['frame_names'][sample_idx].decode('utf-8')
 
-        hand_vert_mask = self._hand_vert_mask[idx]   # (778,) bool, preloaded
-        grid_mask = self._grid_mask[sample_idx]       # (n_pts,) bool, preloaded
+        hand_vert_mask = self._hand_vert_mask[raw_idx]   # (778,) bool, preloaded
+        grid_mask = self._grid_mask[sample_idx]           # (n_pts,) bool, preloaded
         # Convert unmasked point_idx to masked array index
         # masked_point_idx = np.sum(grid_mask[:point_idx]).item()
         # masked_point_idx = np.searchsorted(np.where(grid_mask)[0], point_idx)
-        grid_sdf = grid_data_raw['grid_sdf'][idx]
-        grid_distance = grid_data_raw['grid_distance'][idx]
+        grid_sdf = grid_data_raw['grid_sdf'][raw_idx]
+        grid_distance = grid_data_raw['grid_distance'][raw_idx]
         ## TODO: do shape transformation for nn_face_idx and nn_point when saving data.
-        nn_face_idx = grid_data_raw['nn_face_idx'][idx].reshape(self.kernel_size**3)
-        nn_point = grid_data_raw['nn_point'][idx].reshape(self.kernel_size**3, 3)
+        nn_face_idx = grid_data_raw['nn_face_idx'][raw_idx].reshape(self.kernel_size**3)
+        nn_point = grid_data_raw['nn_point'][raw_idx].reshape(self.kernel_size**3, 3)
 
         fname_path = self.frame_names[sample_idx].split('/')
         sbj_id = fname_path[2]
