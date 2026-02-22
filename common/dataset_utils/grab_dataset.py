@@ -34,6 +34,7 @@ jointsMapManoToSimple = [0,
 
 
 test_objects = ['wineglass', 'fryingpan', 'mug', 'toothpaste', 'camera', 'binoculars']
+val_objects = ['hand', 'elephant', 'apple']
 train_objects_select = ['airplane', 'alarmclock', 'apple', 'cubemedium', 'mouse', 'watch']
 
 contact_ids={'Body': 1,
@@ -175,7 +176,12 @@ class GRABDataset(BaseHOIDataset):
             "transl": torch.as_tensor(self.ds['trans_obj'], dtype=torch.float32)
         }
         self.frame_names = np.array(frame_names, dtype=np.dtypes.StringDType())
-        self.test_objects = test_objects
+        if self.split == 'test':
+            self.test_objects = test_objects
+        elif self.split == 'val':
+            self.test_objects = val_objects
+        else:
+            self.test_objects = train_objects_select
         # self.test_objects = train_objects_select ## to see if overfitting happens
 
         with open(osp.join('data', 'preprocessed', 'grab', 'simplified_obj_mesh.pkl'), 'rb') as of:

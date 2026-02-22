@@ -28,6 +28,7 @@ class BaseHOIDataset(Dataset):
         self.preprocessed_dir = cfg.get('preprocessed_dir', 'data/preprocessed')
         self.downsample_rate = cfg.downsample_rate[split]
         self.split = split
+        self.object_only = cfg.object_only
         # self.n_obj_samples = cfg.object_sample
         self.mano_root = cfg.mano_root
         self.augment = cfg.augment and (split == 'train')
@@ -82,7 +83,7 @@ class BaseHOIDataset(Dataset):
 
     def __len__(self):
         # return 900
-        if self.split == 'test' and not self.test_gt:
+        if self.object_only:
             return len(self.test_objects)
         else:
             return len(self.frame_names)
@@ -92,7 +93,7 @@ class BaseHOIDataset(Dataset):
         if self.augment:
             reorder_id, Rot = grid_reorder_id_and_rot(self.msdf_kernel_size, np.random.randint(0, 12))
             sample['aug_rot'] = Rot
-        if self.split in ['train', 'val'] or self.test_gt:
+        if not self.object_only:
             fname_path = self.frame_names[idx].split('/')
             sbj_id = fname_path[2]
             obj_name = fname_path[3].split('_')[0]

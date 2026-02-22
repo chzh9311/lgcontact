@@ -146,8 +146,8 @@ def optimize_pose_contactopt(mano_layer, obj_verts, obj_normals, obj_contact_tar
 
 
 def optimize_pose_by_contact(mano_layer, grid_centers, target_pts, pred_contact, target_W_verts, dist2contact_fn,
-                            n_iter=1200, lr=0.01, grid_scale=0.01, w_repulsive=1.0,
-                            w_reg_loss=0.001, init_pose=None):
+                            n_iter=1000, lr=0.01, grid_scale=0.01, w_repulsive=1.0,
+                            w_reg_loss=0.001, init_pose=None, nms_mask=None):
     """
     A simpler version of pose optimization that only uses the repulsive loss from local grids.
     This is used in the ablation study to verify the effect of the contact loss.
@@ -161,9 +161,16 @@ def optimize_pose_by_contact(mano_layer, grid_centers, target_pts, pred_contact,
     mano_pose = torch.zeros((batch_size, mano_layer.ncomps), dtype=target_pts.dtype, device=target_pts.device)
     mano_shape = torch.zeros((batch_size, 10), dtype=target_pts.dtype, device=target_pts.device)
 
-    contact_grid_mask = (pred_contact.view(batch_size, num_grids, -1) > 0).any(dim=-1) # B x num_grids
-    contact_point_mask = contact_grid_mask.view(batch_size, num_grids, 1).repeat(1, 1, 512).view(batch_size, -1) # B x num_grids x 3 -> B x (num_grids * 3)
-    n_non_contact_grids = torch.sum(~contact_grid_mask).item()
+    # contact_grid_mask = (pred_contact.view(batch_size, num_grids, -1) > 0).any(dim=-1) # B x num_grids
+    # contact_point_mask = contact_grid_mask.view(batch_size, num_grids, 1).repeat(1, 1, 512).view(batch_size, -1) # B x num_grids x 3 -> B x (num_grids * 3)
+    # n_non_contact_grids = torch.sum(~contact_grid_mask).item()
+
+    zero_contact = torch.zeros_like(pred_contact).to(pred_contact.device).float()
+    w = pred_contact * 5 + 1
+
+    if nms_mask is not None:
+        target_W_verts[~nms_mask] = 0  # Zero out non-maximal contacts
+        w[~nms_mask] = 0  # Zero out non-maximal weights
 
     if init_pose is not None:
         # init_pose format: [trans(3), full_pose(48), betas(10)] = 61 dims
@@ -194,7 +201,6 @@ def optimize_pose_by_contact(mano_layer, grid_centers, target_pts, pred_contact,
 
     # Determine if regularization loss should be used
     use_reg_loss = init_pose is not None
-    zero_contact = torch.zeros_like(pred_contact).to(pred_contact.device).float()
 
     for it in range(n_iter):
         handV, handJ, _ = mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
@@ -205,7 +211,7 @@ def optimize_pose_by_contact(mano_layer, grid_centers, target_pts, pred_contact,
         corr_pts = target_W_verts @ handV # (B x N x 3)
         distance = torch.norm(corr_pts - target_pts, dim=-1)  # (B x N)
         contact = dist2contact_fn(distance)  # (B x N)
-        contact_diff = (contact - pred_contact) * contact_point_mask
+        contact_diff = (contact - pred_contact) * w
 
         ### option1: use all contact
         losses['contact'] = F.l1_loss(contact_diff, zero_contact)
@@ -231,7 +237,6 @@ def optimize_pose_by_contact(mano_layer, grid_centers, target_pts, pred_contact,
             print(f"Iter {it} | Loss: {loss.item():.6f} | {' | '.join(loss_strs)}")
     
     return [p.detach() for p in hand_opt_params]
-
 
 def optimize_pose_wrt_local_grids(mano_layer, grid_centers, target_pts, target_W_verts, weights,
                                   grid_sdfs, dist2contact_fn, recon_hand_verts=None, recon_verts_mask=None,

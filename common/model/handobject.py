@@ -48,6 +48,7 @@ class HandObject:
         self.hand_sides = None
         self.hand_models = []
         self.obj_models = []
+        self.vis_obj_models = []
         self.obj_hulls = []
         self.obj_names = []
         self.obj_rot = None
@@ -75,6 +76,7 @@ class HandObject:
         new_ho.hand_joints = copy(self.hand_joints)
         new_ho.hand_models = deepcopy(self.hand_models)
         new_ho.obj_models = deepcopy(self.obj_models)
+        new_ho.vis_obj_models = deepcopy(self.vis_obj_models)
         new_ho.obj_hulls = deepcopy(self.obj_hulls)
         new_ho.obj_rot = copy(self.obj_rot)
         new_ho.obj_trans = copy(self.obj_trans)
@@ -83,7 +85,7 @@ class HandObject:
         new_ho.batch_size = self.batch_size
         return new_ho
 
-    def load_from_batch(self, batch, obj_templates=None, obj_hulls=None, pool=None):
+    def load_from_batch(self, batch, obj_templates=None, vis_obj_template=None, obj_hulls=None, pool=None):
         """
         Load the sampled vertices of objects from batched data. Used for training & testing.
         Force labels are also loaded.
@@ -122,6 +124,13 @@ class HandObject:
             for b in range(self.batch_size):
                 obj_mesh = copy(obj_templates[b])
                 self.obj_models.append(obj_mesh)
+
+        # Load simplified visualization templates
+        if vis_obj_template is not None:
+            self.vis_obj_models = []
+            for b in range(self.batch_size):
+                vis_mesh = copy(vis_obj_template[b])
+                self.vis_obj_models.append(vis_mesh)
 
         # Load object hulls
         if obj_hulls is not None:
@@ -183,6 +192,11 @@ class HandObject:
                 T[:3, :3] = self.augR[i].detach().cpu().numpy()
                 T[:3, 3:4] = -T[:3, :3] @ self.obj_com[i].view(3, 1).detach().cpu().numpy()
                 self.obj_models[i] = transform_mesh(self.obj_models[i], T)
+            for i in range(len(self.vis_obj_models)):
+                T = np.eye(4)
+                T[:3, :3] = self.augR[i].detach().cpu().numpy()
+                T[:3, 3:4] = -T[:3, :3] @ self.obj_com[i].view(3, 1).detach().cpu().numpy()
+                self.vis_obj_models[i] = transform_mesh(self.vis_obj_models[i], T)
             for i in range(len(self.obj_hulls)):
                 T = np.eye(4)
                 T[:3, :3] = self.augR[i].detach().cpu().numpy()
@@ -198,6 +212,12 @@ class HandObject:
                 for i in range(len(self.obj_models)):
                     objT_np = objT[i].detach().cpu().numpy()
                     self.obj_models[i] = transform_mesh(self.obj_models[i], objT_np)
+
+            # Transform simplified visualization models
+            if vis_obj_template is not None:
+                for i in range(len(self.vis_obj_models)):
+                    objT_np = objT[i].detach().cpu().numpy()
+                    self.vis_obj_models[i] = transform_mesh(self.vis_obj_models[i], objT_np)
 
             # Transform object hulls
             if obj_hulls is not None:
@@ -341,15 +361,15 @@ class HandObject:
 
     ## ---- Visualization wrappers ---- ##
 
-    def vis_grid_contact(self, obj_templates, idx=0, w=500, h=500, bbox_alpha=0.2):
+    def vis_grid_contact(self, obj_templates=None, idx=0, w=500, h=500, bbox_alpha=0.2):
         """
         Visualize grid-level contact as coloured bounding boxes on the object.
 
-        :param obj_templates: list of trimesh objects (one per batch element)
+        :param obj_templates: list of trimesh objects (one per batch element); if None, uses stored vis_obj_models
         :param idx: batch index
         :return: (img, vis_geoms)
         """
-        _, obj_mesh, _ = self._load_templates(idx, obj_templates)
+        obj_mesh, _ = self._load_templates(idx, obj_templates)
         K = self.cfg.msdf.kernel_size
         scale = self.cfg.msdf.scale
         contact_pts = self.obj_msdf[idx, :, -3:].detach().cpu().numpy()  # (N, 3)
@@ -357,11 +377,11 @@ class HandObject:
         pt_contact = self.ml_contact[idx, :, :, :, :, 0].reshape(-1, K**3).max(dim=-1)[0].detach().cpu().numpy()
         return visualize_grid_contact(contact_pts, pt_contact, scale, obj_mesh, w, h, bbox_alpha)
 
-    def vis_all_grid_points(self, obj_templates, idx=0, w=500, h=500, hue='sdf'):
+    def vis_all_grid_points(self, obj_templates=None, idx=0, w=500, h=500, hue='sdf'):
         """
         Visualize all expanded grid points together with the object mesh.
 
-        :param obj_templates: list of trimesh objects (one per batch element)
+        :param obj_templates: list of trimesh objects (one per batch element); if None, uses stored vis_obj_models
         :param idx: batch index
         :param w: image width
         :param h: image height
@@ -369,7 +389,7 @@ class HandObject:
                     'overlap' — inferno colormap by n_adj_pt (grid overlap count)
         :return: (img, vis_geoms)
         """
-        _, obj_mesh, _ = self._load_templates(idx, obj_templates)
+        obj_mesh, _ = self._load_templates(idx, obj_templates)
 
         K = self.cfg.msdf.kernel_size
         K3 = K ** 3
@@ -431,13 +451,13 @@ class HandObject:
         # img = geom_to_img(vis_geoms, w, h)
         return None, vis_geoms
 
-    def vis_local_grid_with_hand(self, obj_templates, idx=0, pt_idx=0):
+    def vis_local_grid_with_hand(self, obj_templates=None, idx=0, pt_idx=0):
         """
         Visualize a single local grid (SDF + contact + CSE + SDF gradient arrows)
         together with the hand mesh.
         The object is normalized to align the center of mass
 
-        :param obj_templates: list of trimesh objects (one per batch element)
+        :param obj_templates: list of trimesh objects (one per batch element); if None, uses stored vis_obj_models
         :param idx: batch index
         :param pt_idx: MSDF centre index within the sample
         :return: list of Open3D geometries
@@ -488,13 +508,13 @@ class HandObject:
 
         return geoms
 
-    def vis_grid_detail(self, obj_templates, idx=0, pt_idx=0):
+    def vis_grid_detail(self, obj_templates=None, idx=0, pt_idx=0):
         """
         Two side-by-side panels for one MSDF grid cell:
           Left  — SDF-coloured grid points + object mesh fragment inside the bbox
           Right — contact-coloured grid points + hand mesh fragment inside the bbox
 
-        :param obj_templates: list of trimesh objects (one per batch element)
+        :param obj_templates: list of trimesh objects (one per batch element); if None, uses stored vis_obj_models
         :param idx: batch index
         :param pt_idx: MSDF centre index within the sample
         :return: list of Open3D geometries for draw_geometries
@@ -596,13 +616,13 @@ class HandObject:
 
         return left_geoms, right_geoms
 
-    def vis_all_grids_with_hand(self, obj_templates, idx=0, grid_idx=0):
+    def vis_all_grids_with_hand(self, obj_templates=None, idx=0, grid_idx=0):
         """
         Visualize all MSDF grid bounding boxes together with the hand mesh and object.
         Each grid is drawn as a semi-transparent axis-aligned cube (bbox = 2*scale per side).
         No per-grid features (contact/CSE) are encoded in the color.
 
-        :param obj_templates: list of trimesh objects (one per batch element)
+        :param obj_templates: list of trimesh objects (one per batch element); if None, uses stored vis_obj_models
         :param idx: batch index
         :param grid_idx: index of specific grid to highlight (default 0)
         :return: list of geometry dicts for o3d.visualization.draw (supports transparency)
@@ -661,13 +681,13 @@ class HandObject:
 
         return geom_list
 
-    def vis_recon_hand_w_object(self, obj_templates, handcse, idx=0, mask_th=0.02, h=500, w=500):
+    def vis_recon_hand_w_object(self, handcse, obj_templates=None, idx=0, mask_th=0.02, h=500, w=500):
         """
         Reconstruct hand vertices from ml_contact via recover_hand_verts_from_contact,
         then visualize the masked reconstructed hand with the object mesh.
 
-        :param obj_templates: list of trimesh objects (one per batch element)
         :param handcse: HandCSE module instance
+        :param obj_templates: list of trimesh objects (one per batch element); if None, uses stored vis_obj_models
         :param idx: batch index
         :param mask_th: threshold for vertex mask in recover_hand_verts_from_contact
         :return: (img, vis_geoms)
@@ -698,7 +718,7 @@ class HandObject:
             hand_verts, verts_mask, self.closed_hand_faces,
             obj_mesh, self.hand_part_ids, h=h, w=w)
 
-    def load_from_batch_obj_only(self, batch, n_samples, obj_template=None, obj_hulls=None):
+    def load_from_batch_obj_only(self, batch, n_samples, obj_template=None, vis_obj_template=None, obj_hulls=None):
         """
         Load only object-related data from batched data. Used for testing.
         No hand-related variables are loaded - those will be generated later.
@@ -718,6 +738,14 @@ class HandObject:
                 obj_mesh = copy(obj_template)
                 obj_mesh.apply_translation(-self.obj_com.detach().cpu().numpy())
                 self.obj_models.append(obj_mesh)
+
+        # Load simplified visualization templates
+        if vis_obj_template is not None:
+            self.vis_obj_models = []
+            for i in range(self.batch_size):
+                vis_mesh = copy(vis_obj_template)
+                vis_mesh.apply_translation(-self.obj_com.detach().cpu().numpy())
+                self.vis_obj_models.append(vis_mesh)
 
         # Load object hulls
         if obj_hulls is not None:
@@ -746,31 +774,34 @@ class HandObject:
         return torch.cat([translation, rot6d, pose6d], dim=-1)
 
 
-    def _load_templates(self, idx, obj_templates, obj_hull=None):
-
-        self.hand_models = []
-        self.obj_models = []
-        for i in range(len(obj_templates)):
-            if not self.normalize:
-                objR = axis_angle_to_matrix(self.obj_rot[i]).detach().cpu().numpy()
-                objt = self.obj_trans[i].detach().cpu().numpy()
+    def _load_templates(self, idx, obj_templates=None, obj_hull=None):
+        # Use pre-stored vis_obj_models if available, otherwise fall back to obj_templates arg
+        if self.vis_obj_models:
+            obj_mesh = self.vis_obj_models[idx]
+        elif self.obj_models:
+            obj_mesh = self.obj_models[idx]
+        elif obj_templates is not None:
+            self.hand_models = []
+            self.obj_models = []
+            for i in range(len(obj_templates)):
+                if not self.normalize:
+                    objR = axis_angle_to_matrix(self.obj_rot[i]).detach().cpu().numpy()
+                    objt = self.obj_trans[i].detach().cpu().numpy()
+                    T = np.eye(4)
+                    T[:3, :3] = objR
+                    T[:3, 3] = objt
+                    mesh = copy(obj_templates[i])
+                    mesh.apply_transform(T)
+                else:
+                    mesh = copy(obj_templates[i])
                 T = np.eye(4)
-                T[:3, :3] = objR
-                T[:3, 3] = objt
-                obj_mesh = copy(obj_templates[i])
-                # if self.hand_sides[idx] == 'left':
-                #     flip_x_axis(obj_mesh)
-                obj_mesh.apply_transform(T)
-            else:
-                obj_mesh = copy(obj_templates[i])
-
-            T = np.eye(4)
-            T[:3, :3] = self.augR[i].detach().cpu().numpy()
-            T[:3, 3:4] = -T[:3, :3] @ self.obj_com[i].view(3, 1).detach().cpu().numpy()
-            obj_mesh.apply_transform(T)
-            self.obj_models.append(obj_mesh)
-                
-        obj_mesh = self.obj_models[idx]
+                T[:3, :3] = self.augR[i].detach().cpu().numpy()
+                T[:3, 3:4] = -T[:3, :3] @ self.obj_com[i].view(3, 1).detach().cpu().numpy()
+                mesh.apply_transform(T)
+                self.obj_models.append(mesh)
+            obj_mesh = self.obj_models[idx]
+        else:
+            obj_mesh = None
 
         if obj_hull is not None:
             ohs = []
@@ -788,8 +819,12 @@ class HandObject:
     def get_vis_geoms(self, idx=0, draw_maps=False, draw_hand=True, draw_obj=True, **kwargs):
         if 'obj_templates' in kwargs:
             obj_mesh, _ = self._load_templates(idx=idx, obj_templates=kwargs['obj_templates'])
-        else:
+        elif self.vis_obj_models:
+            obj_mesh = self.vis_obj_models[idx]
+        elif self.obj_models:
             obj_mesh = self.obj_models[idx]
+        else:
+            obj_mesh = None
 
         if self.hand_verts is not None:
             hand_mesh = trimesh.Trimesh(self.hand_verts[idx].detach().cpu().numpy(), self.closed_hand_faces.copy())
@@ -874,7 +909,8 @@ class HandObject:
 
     def vis_recon_hand_with_object(self, recon_hand_verts, vis_idx=0, w=800, h=600):
         hand_geoms = self.get_masked_recon_hand_meshes(recon_hand_verts, vis_idx=vis_idx)
-        obj_geom = o3dmesh_from_trimesh(self.obj_models[vis_idx], (0.5, 0.5, 0.5))
+        vis_mesh = self.vis_obj_models[vis_idx] if self.vis_obj_models else self.obj_models[vis_idx]
+        obj_geom = o3dmesh_from_trimesh(vis_mesh, (0.5, 0.5, 0.5))
         img = geom_to_img(hand_geoms + [obj_geom], w=w, h=h, scale=0.6)
         return img
 
@@ -939,7 +975,7 @@ class HandObject:
     ## Grid contact visualizations
 
 
-def recover_hand_verts_from_contact(handcse, gt_face_idx, grid_contact, grid_cse, grid_coords, rel_mask_th=0.28, chunk_size=0):
+def recover_hand_verts_from_contact(handcse, gt_face_idx, grid_contact, grid_cse, grid_coords, mask_th=2, chunk_size=0):
     """
     :param grid_contact: (B, N) contact values
     :param grid_cse: (B, N, D) contact signature embeddings
@@ -955,9 +991,10 @@ def recover_hand_verts_from_contact(handcse, gt_face_idx, grid_contact, grid_cse
         weight = (targetWverts * grid_contact.unsqueeze(-1)).transpose(-1, -2)  # (B, 778, K^3)
         all_weight = torch.sum(weight, dim=-1)  # (B, 778)
         # Adaptive threshold: keep top rel_mask_th proportion of vertices
-        k = max(1, int(all_weight.shape[1] * (1 - rel_mask_th)))
-        threshold = all_weight.kthvalue(k, dim=1).values  # (B,)
-        verts_mask = all_weight > threshold.unsqueeze(1)  # (B, 778)
+        # k = max(1, int(all_weight.shape[1] * (1 - rel_mask_th)))
+        # threshold = all_weight.kthvalue(k, dim=1).values  # (B,)
+        # verts_mask = all_weight > threshold.unsqueeze(1)  # (B, 778)
+        verts_mask = all_weight > mask_th
         weight[verts_mask] = weight[verts_mask] / (torch.sum(weight[verts_mask], dim=-1, keepdim=True) + 1e-8)
         pred_verts = weight @ grid_coords  # (B, 778, 3)
         return pred_verts, verts_mask
@@ -975,9 +1012,10 @@ def recover_hand_verts_from_contact(handcse, gt_face_idx, grid_contact, grid_cse
         targetWverts = handcse.emb2Wvert(chunk_grid_cse, gt_face_idx)
         weight = (targetWverts * chunk_grid_contact.unsqueeze(-1)).transpose(-1, -2)  # (chunk, 778, K^3)
         chunk_all_weight = torch.sum(weight, dim=-1)  # (chunk, 778)
-        chunk_k = max(1, int(chunk_all_weight.shape[1] * (1 - rel_mask_th)))
-        chunk_threshold = chunk_all_weight.kthvalue(chunk_k, dim=1).values  # (chunk,)
-        chunk_verts_mask = chunk_all_weight > chunk_threshold.unsqueeze(1)  # (chunk, 778)
+        # chunk_k = max(1, int(chunk_all_weight.shape[1] * (1 - rel_mask_th)))
+        # chunk_threshold = chunk_all_weight.kthvalue(chunk_k, dim=1).values  # (chunk,)
+        # chunk_verts_mask = chunk_all_weight > chunk_threshold.unsqueeze(1)  # (chunk, 778)
+        chunk_verts_mask = chunk_all_weight > mask_th
         weight[chunk_verts_mask] = weight[chunk_verts_mask] / (torch.sum(weight[chunk_verts_mask], dim=-1, keepdim=True) + 1e-8)
         chunk_pred_verts = weight @ chunk_grid_coords  # (chunk, 778, 3)
 

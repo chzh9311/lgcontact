@@ -222,7 +222,7 @@ class GridDistanceToContact:
         self.scale = scale
         self.kernel_size = kernel_size
         self.method = method
-        # Normalization factor: distance of 1 grid cell
+        # Normalization factor: half distance of 1 grid cell
         self.norm_factor = scale / (kernel_size - 1)
 
     def __call__(self, dist, dot_normal=None):

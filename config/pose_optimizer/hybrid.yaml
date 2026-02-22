@@ -1,8 +1,9 @@
 name: hybrid
 use_pca: false
 ncomps: 45
-n_opt_iter: 1000
-opt_lr: 0.01
+n_opt_iter: 0
+opt_lr: 0.001
 rep_loss_type: "grid"
 w_repulsive: 0.05
 w_regularization: 0.1
+contact_th: 0.05
