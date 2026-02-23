@@ -189,6 +189,13 @@ class LocalGridDataset(Dataset):
         grid_contact = self.grid_dist_to_contact(grid_distance)
         grid_sdf = grid_sdf / self.grid_scale / np.sqrt(3)  # Normalize SDF
 
+        if not hand_vert_mask.any():
+            ## Mask out all grid data if no hand vertices are inside the grid, to allow latent space to cover zero cases.
+            grid_contact = torch.zeros_like(grid_contact)
+            if np.random.rand() < 0.5:
+                ## Randomly mask out the cse as well, to expand the zero-contact region in latent space and improve generalization.
+                grid_hand_cse = np.zeros_like(grid_hand_cse)
+
         sample = {
                   'gridSDF': grid_sdf,
                   'gridContact': grid_contact,
