@@ -10,6 +10,7 @@ test_gt: true
 n_sample_pts: 1024
 
 non_contact_rate: 0.1
+use_noncontact_grids: false
 
 downsample_rate: 
   train: 5

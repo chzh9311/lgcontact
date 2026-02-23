@@ -782,7 +782,7 @@ class HandObject:
             obj_mesh = self.obj_models[idx]
         elif obj_templates is not None:
             self.hand_models = []
-            self.obj_models = []
+            self.vis_obj_models = []
             for i in range(len(obj_templates)):
                 if not self.normalize:
                     objR = axis_angle_to_matrix(self.obj_rot[i]).detach().cpu().numpy()
@@ -798,8 +798,8 @@ class HandObject:
                 T[:3, :3] = self.augR[i].detach().cpu().numpy()
                 T[:3, 3:4] = -T[:3, :3] @ self.obj_com[i].view(3, 1).detach().cpu().numpy()
                 mesh.apply_transform(T)
-                self.obj_models.append(mesh)
-            obj_mesh = self.obj_models[idx]
+                self.vis_obj_models.append(mesh)
+            obj_mesh = self.vis_obj_models[idx]
         else:
             obj_mesh = None
 

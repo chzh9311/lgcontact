@@ -81,6 +81,7 @@ def main(cfg):
         trainer = L.Trainer(**cfg.trainer, logger=logger)
         trainer.validate(pl_trainer, datamodule=data_module)
     else:
+        cfg.trainer.enable_progress_bar = True
         pl_trainer = LGTrainer.load_from_checkpoint(cfg.ckpt_path, model=model, cfg=cfg)
         trainer = L.Trainer(**cfg.trainer, logger=logger)
         trainer.test(pl_trainer, datamodule=data_module)

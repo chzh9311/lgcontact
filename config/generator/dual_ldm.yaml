@@ -54,4 +54,4 @@ mdm:
   rescale_timesteps: false
 
 # checkpoint_path: logs/checkpoints/mlcdiff/with_hand_guide/v1/best.ckpt
-checkpoint_path: logs/checkpoints/mlcdiff/with_hand_guide/newae_v2/best.ckpt
+checkpoint_path: # logs/checkpoints/mlcdiff/with_hand_guide/newae_v2/best.ckpt

@@ -22,17 +22,16 @@ kinetree = {'Index': [0, 1, 2, 3, 17], 'Middle': [0, 4, 5, 6, 18], 'Little': [0,
     
 
 class BaseHOIDataset(Dataset):
-    def __init__(self, cfg, split, load_msdf=False, load_grid_contact=False, test_gt=False):
+    def __init__(self, cfg, split, load_msdf=False, load_grid_contact=False, object_only=False):
         super(BaseHOIDataset, self).__init__()
         self.data_dir = cfg.dataset_path
         self.preprocessed_dir = cfg.get('preprocessed_dir', 'data/preprocessed')
         self.downsample_rate = cfg.downsample_rate[split]
         self.split = split
-        self.object_only = cfg.object_only
+        self.object_only = object_only
         # self.n_obj_samples = cfg.object_sample
         self.mano_root = cfg.mano_root
         self.augment = cfg.augment and (split == 'train')
-        self.test_gt = test_gt
         self.hand_sides = None
         self.lh_data = None
         if load_msdf and 'msdf' in cfg:

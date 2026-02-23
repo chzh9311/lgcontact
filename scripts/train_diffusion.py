@@ -10,7 +10,7 @@ from common.dataset_utils.datamodules import HOIDatasetModule
 # from common.model.mlctrainer import MLCTrainer
 import common.model.diff.mdm.gaussian_diffusion as mdm_gd
 from common.model.diff.unet import UNetModel, DualUNetModel
-from common.model.gridae.gridae import GRIDAEResidual
+from common.model.gridae import gridae as gridae_module
 from common.model.gridae.old.gridae import GRIDAE as GRIDAEOld
 from common.model.vae.handvae import HandVAE
 # from common.model.hand_ipt_vae.hand_imputation import HandImputationVAE
@@ -39,7 +39,7 @@ def main(cfg):
     if cfg.ae.name == 'GRIDAEOld':
         gridae = GRIDAEOld(cfg.ae, obj_1d_feat=True)
     else:
-        gridae = GRIDAEResidual(cfg.ae)
+        gridae = getattr(gridae_module, cfg.ae.name)(cfg.ae)
     hand_ae = HandVAE(cfg.hand_ae)
     # sd = torch.load(cfg.hand_ae.pretrained_weight, map_location='cpu', weights_only=True)['state_dict']
     # load_pl_ckpt(hand_ae, sd, prefix='model.')

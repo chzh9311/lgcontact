@@ -59,7 +59,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
                 faces=hand_faces,
                 kernel_size=k,
                 grid_scale=self.cfg.msdf.scale,
-                apply_grid_mask=False
+                apply_grid_mask=not self.cfg.ae.use_noncontact_grids
             )
 
             if grid_mask.any():
@@ -103,7 +103,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
     def train_val_step(self, batch, batch_idx, stage):
         self.mano_layer.to(self.device)
         self.grid_coords = self.grid_coords.view(-1, 3).to(self.device)
-        handobject = HandObject(self.cfg.data, self.device, mano_layer=self.mano_layer, apply_grid_mask=self.cfg.ae.name == 'GRIDAEOld')
+        handobject = HandObject(self.cfg.data, self.device, mano_layer=self.mano_layer, apply_grid_mask=not self.cfg.ae.use_noncontact_grids)
         handobject.load_from_batch(batch, pool=self.pool)
 
         # mask = handobject.hand_vert_mask.any(dim=1) # B, H
@@ -160,10 +160,11 @@ class GraspDiffTrainer(LGCDiffTrainer):
         sdf_grad = handobject.msdf_grad.reshape(batch_size, n_grids * self.msdf_k**3, 3)
         n_adj_pt = handobject.n_adj_pt.view(batch_size, n_grids * self.msdf_k**3)
         all_pts = centres.unsqueeze(2) + handobject.normalized_coords[None, None, :, :] * self.msdf_scale
-        stable_loss = self.stable_loss(sdf_flat, all_pts.view(batch_size, -1, 3), lgc, sdf_grad, n_adj_pt,
-                                obj_mass=handobject.obj_mass, gravity_direction=torch.FloatTensor([[0, 0, -1]]).to(self.device),
-                                J=handobject.obj_inertia)
-        losses['stable_loss'] = stable_loss.mean()
+        if self.loss_weights.get('stable_loss', 0) > 0:
+            stable_loss = self.stable_loss(sdf_flat, all_pts.view(batch_size, -1, 3), lgc, sdf_grad, n_adj_pt,
+                                    obj_mass=handobject.obj_mass, gravity_direction=torch.FloatTensor([[0, 0, -1]]).to(self.device),
+                                    J=handobject.obj_inertia)
+            losses['stable_loss'] = stable_loss.mean()
 
         ## Debugging code:
         # if batch_idx % 10 == 0:
@@ -239,7 +240,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
         #     return {}
         self.grid_coords = self.grid_coords.to(self.device)
         self.mano_layer.to(self.device)
-        handobject = HandObject(self.cfg.data, self.device, mano_layer=self.mano_layer, normalize=True)
+        handobject = HandObject(self.cfg.data, self.device, mano_layer=self.mano_layer, normalize=True, apply_grid_mask=not self.cfg.ae.use_noncontact_grids)
         obj_hulls = getattr(self.trainer.datamodule, 'test_set').obj_hulls
         obj_name = batch['objName'][0]
         obj_hulls = obj_hulls[obj_name]

@@ -2,16 +2,13 @@ defaults:
   - _self_
   - msdf: sparse
   - data: grab_multi_contact
-  - ae: gridae_128latent_new
+  - ae: gridae_256latent_v2
   - hand_ae: handvae_16latent
   - generator: dual_ldm
   - pose_optimizer: hybrid
 
 training_stage: "generator"
 contact_unit: "grid"
-
-data:
-  object_only: true
 
 train:
   optimizer: "adamw"
@@ -23,13 +20,13 @@ train:
     latent_mse: 1.0
     difference_loss: 0.1
     hand_recon_loss: 0.1
-    stable_loss: 0.1
+    stable_loss: 0
     # contact_loss: 1.0
     # cse_value_loss: 1.0
     # consistency_contact_loss: 5.0
     # consistency_cse_loss: 1.0
   
-  resume_ckpt: logs/checkpoints/mlcdiff/with_hand_guide/newae_v2/last.ckpt
+  resume_ckpt: # logs/checkpoints/mlcdiff/with_hand_guide/newae_v2/last.ckpt
 
 val:
   batch_size: 32

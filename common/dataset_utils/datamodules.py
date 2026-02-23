@@ -50,7 +50,7 @@ class LocalGridDataModule(LightningDataModule):
             local_grid_file = osp.join(self.preprocessed_dir, self.dataset_name, split, f'local_grid_values_{self.cfg.msdf.scale*1000:.1f}mm.h5')
             if not osp.exists(local_grid_file):
                 os.makedirs(osp.join(self.preprocessed_dir, self.dataset_name, split), exist_ok=True)
-                self.base_dataset = getattr(self.module, self.cfg.dataset_name.upper() + 'Dataset')(data_cfg, split, load_msdf=False, test_gt=True)
+                self.base_dataset = getattr(self.module, self.cfg.dataset_name.upper() + 'Dataset')(data_cfg, split, load_msdf=False, object_only=False)
                 loader = DataLoader(self.base_dataset, batch_size=64, shuffle=False, num_workers=8)
                 device = 'cuda' if torch.cuda.is_available() else 'cpu'
                 kernel_size = self.cfg.msdf.kernel_size
@@ -579,7 +579,7 @@ class HOIDatasetModule(LightningDataModule):
         elif stage == 'validate':
             self.val_set = self.dataset_class(self.cfg, 'val', load_msdf=self.load_msdf, load_grid_contact=self.load_grid_contact)
         elif stage == 'test':
-            self.test_set = self.dataset_class(self.cfg, 'test', load_msdf=self.load_msdf, load_grid_contact=self.load_grid_contact, test_gt=self.test_gt)
+            self.test_set = self.dataset_class(self.cfg, 'test', load_msdf=self.load_msdf, load_grid_contact=self.load_grid_contact, object_only=True)
 
     @staticmethod
     def collate_fn(batch):

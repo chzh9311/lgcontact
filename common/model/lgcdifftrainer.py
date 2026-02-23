@@ -185,7 +185,7 @@ class LGCDiffTrainer(L.LightningModule):
 
     def training_step(self, batch, batch_idx):
         total_loss = self.train_val_step(batch, batch_idx, stage='train')
-        if self.global_step % 50 == 0:
+        if self.global_step % 50 == 0 and self.trainer.is_global_zero:
             logged = self.trainer.callback_metrics
             loss_str = ' | '.join(f'{k}: {v:.4f}' for k, v in logged.items() if 'train' in k)
             print(f'[step {self.global_step}] {loss_str}', flush=True)
@@ -397,23 +397,23 @@ class LGCDiffTrainer(L.LightningModule):
         pred_contact_img, _ = visualize_grid_contact(
             contact_pts=obj_msdf_center[vis_idx].detach().cpu().numpy(),
             pt_contact=pred_grid_contact[vis_idx].detach().cpu().numpy(),
-            grid_scale=self.cfg.msdf.scale, obj_mesh=handobject.obj_models[vis_idx], w=400, h=400)
+            grid_scale=self.cfg.msdf.scale, obj_mesh=handobject.vis_obj_models[vis_idx], w=400, h=400)
         gt_rec_contact_img, _ = visualize_grid_contact(
             contact_pts=obj_msdf_center[vis_idx].detach().cpu().numpy(),
             pt_contact=gt_rec_grid_contact[vis_idx].detach().cpu().numpy(),
-            grid_scale=self.cfg.msdf.scale, obj_mesh=handobject.obj_models[vis_idx], w=400, h=400)
+            grid_scale=self.cfg.msdf.scale, obj_mesh=handobject.vis_obj_models[vis_idx], w=400, h=400)
         gt_grid_contact = rearrange(handobject.ml_contact[vis_idx, ..., 0], 'n k1 k2 k3 -> n (k1 k2 k3)').max(dim=-1)[0]
         gt_contact_img, _ = visualize_grid_contact(
             contact_pts=obj_msdf_center[vis_idx].detach().cpu().numpy(),
             pt_contact=gt_grid_contact.detach().cpu().numpy(),
-            grid_scale=self.cfg.msdf.scale, obj_mesh=handobject.obj_models[vis_idx], w=400, h=400)
+            grid_scale=self.cfg.msdf.scale, obj_mesh=handobject.vis_obj_models[vis_idx], w=400, h=400)
         return np.concatenate([gt_contact_img, gt_rec_contact_img, pred_contact_img], axis=0)
 
     def _visualize_hand_comparison(self, pred_hand_verts, pred_verts_mask, gt_rec_hand_verts, gt_rec_verts_mask,
                                    handobject, obj_msdf_center, rot, vis_idx):
         common_kwargs = dict(
             hand_faces=self.mano_layer.th_faces.detach().cpu().numpy(),
-            obj_mesh=handobject.obj_models[vis_idx],
+            obj_mesh=handobject.vis_obj_models[vis_idx],
             msdf_center=obj_msdf_center[vis_idx].detach().cpu().numpy(),
             part_ids=handobject.hand_part_ids,
             grid_scale=self.cfg.msdf.scale, h=400, w=400)
@@ -497,9 +497,12 @@ class LGCDiffTrainer(L.LightningModule):
         obj_hulls = getattr(self.trainer.datamodule, 'test_set').obj_hulls
         obj_name = batch['objName'][0]
         obj_hulls = obj_hulls[obj_name]
-        obj_mesh_dict = getattr(self.trainer.datamodule, 'test_set').simp_obj_mesh
+        obj_mesh_dict = getattr(self.trainer.datamodule, 'test_set').obj_info[obj_name]
+        simp_obj_mesh_dict = getattr(self.trainer.datamodule, 'test_set').simp_obj_mesh[obj_name]
         n_grids = batch['objMsdf'].shape[1]
-        obj_mesh = trimesh.Trimesh(obj_mesh_dict[obj_name]['verts'], obj_mesh_dict[obj_name]['faces'])
+        obj_mesh = trimesh.Trimesh(obj_mesh_dict['verts'], obj_mesh_dict['faces'])
+        simp_obj_mesh = trimesh.Trimesh(simp_obj_mesh_dict['verts'], simp_obj_mesh_dict['faces'])
+
 
         if self.cfg.generator.model_type == 'gt':
             ## Test using gt contact grids.
@@ -510,7 +513,7 @@ class LGCDiffTrainer(L.LightningModule):
         else:
             ## Test the reconstrucion 
             n_samples = self.cfg.test.get('n_samples', 1)
-            handobject.load_from_batch_obj_only(batch, n_samples, obj_template=obj_mesh, obj_hulls=obj_hulls)
+            handobject.load_from_batch_obj_only(batch, n_samples, obj_template=obj_mesh, vis_obj_template=simp_obj_mesh, obj_hulls=obj_hulls)
             # lg_contact = handobject.ml_contact
             # obj_msdf = handobject.obj_msdf[:, :, :self.msdf_k**3].view(-1, self.msdf_k, self.msdf_k, self.msdf_k)
             # obj_msdf_center = handobject.obj_msdf[:, :, self.msdf_k**3:] # B x 3
@@ -525,7 +528,7 @@ class LGCDiffTrainer(L.LightningModule):
 
             def project_latent(latent):
                 """Closure that captures obj context to project latent through hand mesh."""
-                return self._project_latent(latent, n_grids, obj_msdf, obj_msdf_center, multi_scale_obj_cond, obj_mesh=handobject.obj_models[0], part_ids=handobject.hand_part_ids)
+                return self._project_latent(latent, n_grids, obj_msdf, obj_msdf_center, multi_scale_obj_cond, obj_mesh=handobject.vis_obj_models[0], part_ids=handobject.hand_part_ids)
 
             self.vis_geoms = []
             self._proj_step = 0
@@ -533,7 +536,7 @@ class LGCDiffTrainer(L.LightningModule):
 
             # Visualize hand geometries at every 100 steps along with object
             if self.vis_geoms:
-                obj_geom = o3dmesh_from_trimesh(handobject.obj_models[0], color=[0.7, 0.7, 0.7])
+                obj_geom = o3dmesh_from_trimesh(handobject.vis_obj_models[0], color=[0.7, 0.7, 0.7])
                 all_geoms = []
                 for i, hand_geom in enumerate(self.vis_geoms):
                     offset = np.array([i * 0.25, 0, 0])
@@ -647,7 +650,7 @@ class LGCDiffTrainer(L.LightningModule):
                 hand_verts=pred_hand_verts[vis_idx].detach().cpu().numpy(),
                 hand_verts_mask=pred_verts_mask[vis_idx].detach().cpu().numpy(),
                 hand_faces=self.mano_layer.th_faces.detach().cpu().numpy(),
-                obj_mesh=handobject.obj_models[vis_idx],
+                obj_mesh=handobject.vis_obj_models[vis_idx],
                 part_ids=handobject.hand_part_ids,
                 msdf_center=obj_msdf_center[vis_idx].detach().cpu().numpy(),
                 grid_scale=self.cfg.msdf.scale,

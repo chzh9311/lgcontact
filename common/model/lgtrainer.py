@@ -210,7 +210,7 @@ class LGTrainer(L.LightningModule):
         # zero_contact_rec_error = F.l1_loss(recon_cgrid[..., 0], gt_grid_contact[..., 0])
         # loss_dict['test/zero_contact_rec_error'] = zero_contact_rec_error
         # loss_dict['test/zero_contact_rec_max'] = torch.max(torch.abs(recon_cgrid[..., 0]))
-        print(loss_dict)
+        # print(loss_dict)
 
         self.log_dict(loss_dict, prog_bar=True, on_step=False, on_epoch=True)
 
