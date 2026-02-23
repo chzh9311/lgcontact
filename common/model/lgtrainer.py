@@ -5,6 +5,7 @@ import lightning as L
 import trimesh
 import open3d as o3d
 import numpy as np
+import matplotlib.pyplot as plt
 
 from common.manopth.manopth.manolayer import ManoLayer
 from common.model.losses import kl_div_normal, masked_rec_loss
@@ -73,8 +74,8 @@ class LGTrainer(L.LightningModule):
                 grid_coords=self.grid_coords.view(1, -1, 3).repeat(batch_size, 1, 1),
             )
             rec_loss = masked_rec_loss(pred_hand_verts, batch['nHandVerts'], batch['handVertMask']) * 10000
-            loss_dict[f'{stage}/rec_loss'] = rec_loss
-            loss_dict[f'{stage}/total_loss'] = rec_loss
+            loss_dict[f'{stage}/rec_loss'] = rec_loss.detach()
+            loss_dict[f'{stage}/total_loss'] = rec_loss.detach()
         
         # recon_loss = F.mse_loss(recon_grid_contact, gt_grid_contact.permute(0, 4, 1, 2, 3))
         # loss_dict = {f'{stage}/embedding_loss': loss, f'{stage}/recon_loss': recon_loss, f'{stage}/perplexity': perplexity}
@@ -245,14 +246,14 @@ class LGTrainer(L.LightningModule):
         kl_loss = posterior.kl().mean()
         # rec_loss = masked_rec_loss(pred_hand_verts, gt_hand_verts, gt_verts_mask)
         
+        total_loss = (self.loss_weights.w_contact * contact_loss + self.loss_weights.w_cse_rec * cse_rec_loss
+                      + self.loss_weights.w_cse_value * cse_value_loss + self.loss_weights.w_kl * kl_loss)
         loss_dict = {
-            f'{proc}/contact_loss': contact_loss,
-            f'{proc}/cse_rec_loss': cse_rec_loss,
-            f'{proc}/cse_value_loss': cse_value_loss,
-            f'{proc}/kl_loss': kl_loss,
-            # f'{proc}/rec_loss': rec_loss,
-            f'{proc}/total_loss': self.loss_weights.w_contact * contact_loss + self.loss_weights.w_cse_rec * cse_rec_loss\
-                + self.loss_weights.w_cse_value * cse_value_loss + self.loss_weights.w_kl * kl_loss
+            f'{proc}/contact_loss': contact_loss.detach(),
+            f'{proc}/cse_rec_loss': cse_rec_loss.detach(),
+            f'{proc}/cse_value_loss': cse_value_loss.detach(),
+            f'{proc}/kl_loss': kl_loss.detach(),
+            f'{proc}/total_loss': total_loss,
         }
         return loss_dict
     
@@ -309,7 +310,6 @@ class LGTrainer(L.LightningModule):
         grid_pcd.points = o3d.utility.Vector3dVector(grid_coords_np)
 
         # Apply inferno colormap to contact values
-        import matplotlib.pyplot as plt
         cmap = plt.get_cmap('inferno')
         grid_colors = np.array([cmap(val)[:3] for val in grid_contact_np])
         grid_pcd.colors = o3d.utility.Vector3dVector(grid_colors)

@@ -1,3 +1,5 @@
+import torch
+torch.multiprocessing.set_sharing_strategy('file_system')
 import lightning as L
 from lightning.pytorch.loggers import WandbLogger, TensorBoardLogger
 import hydra
@@ -40,9 +42,10 @@ def main(cfg):
     else:
         model_class = getattr(gridae, cfg.ae.name)
         model = model_class(cfg.ae)
+    ckpt_dir = logger.log_dir
     checkpoint_callback = ModelCheckpoint(
         monitor='val/total_loss',
-        dirpath=cfg.checkpoint.dirpath,
+        dirpath=ckpt_dir,
         filename=cfg.checkpoint.filename + '-{epoch:02d}-{val/total_loss:.4f}',
         save_top_k=cfg.checkpoint.save_top_k,
         mode='min',

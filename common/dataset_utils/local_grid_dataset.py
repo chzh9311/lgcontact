@@ -78,7 +78,10 @@ class LocalGridDataset(Dataset):
             self._grid_sample_idx = grid_sample_idx
         # Global validity mask: grid items where at least one hand vertex lies inside the grid.
         # Used to restrict training to meaningful contact examples.
-        self._valid_indices = np.where(self._hand_vert_mask.any(axis=-1))[0]
+        if cfg.use_noncontact_grids:
+            self._valid_indices = np.arange(self.n_grids)
+        else:
+            self._valid_indices = np.where(self._hand_vert_mask.any(axis=-1))[0]
         print(f"Valid grid items (hand inside grid): {len(self._valid_indices)} / {self.n_grids} "
               f"({100 * len(self._valid_indices) / self.n_grids:.1f}%)")
         # Per-worker H5 handle, initialized lazily in __getitem__ to avoid
