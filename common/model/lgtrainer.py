@@ -57,8 +57,8 @@ class LGTrainer(L.LightningModule):
         gt_grid_contact = torch.cat([batch['gridContact'], batch['gridHandCSE']], dim=-1)
         hand_in_mask = batch['handVertMask'].any(dim=1)
 
-        recon_cgrid, posterior, obj_feat = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
-        recon_cgrid = recon_cgrid.permute(0, 2, 3, 4, 1)
+        posterior, _, obj_cond = self.model.encode(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
+        recon_cgrid = self.model.decode(posterior.sample(), obj_cond=obj_cond).permute(0, 2, 3, 4, 1)
         contact, contact_hat = gt_grid_contact[..., 0], recon_cgrid[..., 0]
         cse, cse_hat = gt_grid_contact[..., 1:], recon_cgrid[..., 1:]
         # self.check_latents(posterior)
@@ -73,9 +73,16 @@ class LGTrainer(L.LightningModule):
                 cse_hat.reshape(batch_size, -1, cse.shape[-1]),
                 grid_coords=self.grid_coords.view(1, -1, 3).repeat(batch_size, 1, 1),
             )
-            rec_loss = masked_rec_loss(pred_hand_verts, batch['nHandVerts'], batch['handVertMask']) * 10000
+            rec_loss = masked_rec_loss(pred_hand_verts, batch['nHandVerts'], batch['handVertMask']) * 1000
             loss_dict[f'{stage}/rec_loss'] = rec_loss.detach()
             loss_dict[f'{stage}/total_loss'] = rec_loss.detach()
+            # Random latent sampling stats (mirrors test_step criteria)
+            random_z = torch.randn_like(posterior.mode())
+            random_recon_cgrid = self.model.decode(random_z, obj_cond=obj_cond)
+            contact_value = random_recon_cgrid[:, 0].reshape(batch_size, -1).max(dim=-1).values
+            loss_dict[f'{stage}/avg_contact_values'] = contact_value.mean().detach()
+            loss_dict[f'{stage}/contact_ratio'] = (contact_value > 0.03).float().mean().detach()
+            loss_dict[f'{stage}/in_ratio'] = (contact_value > 0.5).float().mean().detach()
         
         # recon_loss = F.mse_loss(recon_grid_contact, gt_grid_contact.permute(0, 4, 1, 2, 3))
         # loss_dict = {f'{stage}/embedding_loss': loss, f'{stage}/recon_loss': recon_loss, f'{stage}/perplexity': perplexity}

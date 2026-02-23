@@ -253,16 +253,13 @@ class LocalGridDataModule(LightningDataModule):
             self.test_set = self.dataset_class(self.cfg, 'test')
 
     def train_dataloader(self):
-        return DataLoader(self.train_set, batch_size=self.train_batch_size, shuffle=True, num_workers=self.cfg.num_workers,
-                          pin_memory=True)
+        return DataLoader(self.train_set, batch_size=self.train_batch_size, shuffle=True, num_workers=self.cfg.num_workers)
 
     def val_dataloader(self):
-        return DataLoader(self.val_set, batch_size=self.val_batch_size, shuffle=False, num_workers=self.cfg.num_workers,
-                          pin_memory=True)
+        return DataLoader(self.val_set, batch_size=self.val_batch_size, shuffle=False, num_workers=self.cfg.num_workers)
 
     def test_dataloader(self):
-        return DataLoader(self.test_set, batch_size=self.test_batch_size, shuffle=False, num_workers=self.cfg.num_workers,
-                          pin_memory=True)
+        return DataLoader(self.test_set, batch_size=self.test_batch_size, shuffle=False, num_workers=self.cfg.num_workers)
 
     def on_after_batch_transfer(self, batch, dataloader_idx):
         if isinstance(batch, dict):
