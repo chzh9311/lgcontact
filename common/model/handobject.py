@@ -20,7 +20,7 @@ from common.utils.geometry import (
         calculate_contact_capsule
     )
 
-from common.msdf.utils.msdf import msdf2mlcontact, get_grid, get_grid_points, calc_local_grid_all_pts_gpu
+from common.msdf.utils.msdf import msdf2mlcontact, get_grid, get_grid_points, calc_local_grid_all_pts_gpu, nn_dist_to_mesh_gpu
 from common.utils.geometry import GridDistanceToContact
 
 class HandObject:
@@ -57,6 +57,7 @@ class HandObject:
         self.obj_com = None
         self.obj_inertia = None
         self.contact_unit = cfg.contact_unit
+        self.correspondence_type = cfg.get('correspondence_type', 'cse')
         self.normalized_coords = get_grid(kernel_size=self.cfg.msdf.kernel_size, device=self.device).reshape(-1, 3).float()
 
     def __copy__(self):
@@ -314,16 +315,56 @@ class HandObject:
 
         elif self.contact_unit == 'point':
         ## Calculate contacts
+            self.obj_verts = []
+            self.obj_normals = []
+            for obj_mesh in self.obj_models:
+                points, fidx = trimesh.sample.sample_surface(obj_mesh, self.cfg.msdf.kernel_size ** 3 * self.cfg.msdf.num_grids)
+                self.obj_verts.append(points)
+                self.obj_normals.append(obj_mesh.face_normals[fidx])
+            self.obj_verts = torch.as_tensor(np.stack(self.obj_verts, axis=0), dtype=torch.float32, device=self.device)  # (B, N*K^3, 3)
+            self.obj_normals = torch.as_tensor(np.stack(self.obj_normals, axis=0), dtype=torch.float32, device=self.device)  # (B, N*K^3, 3)
 
-            self.obj_verts = batch['objSamplePts'].clone().to(self.device).float()
-            self.obj_normals = batch['objSampleNormals'].clone().to(self.device).float()
-            self.obj_normals = (objT_inv[:, :3, :3].unsqueeze(1) @ self.obj_normals.unsqueeze(-1)).squeeze(-1)
             obj_cmap, _, nn_idx = calculate_contact_capsule(self.hand_verts, self.hand_normals,
                                                             self.obj_verts, self.obj_normals)
             self.contact_map = obj_cmap.to(self.device).squeeze(-1)
-            self.pmap = torch.as_tensor(self.hand_part_ids).to(self.device)[nn_idx].squeeze(-1)
-            self.part_map = F.one_hot(self.pmap, 16).float().to(self.device)
-            self.obj2hand_nn_idx = nn_idx.to(self.device)
+            if self.correspondence_type == 'part':
+                self.pmap = torch.as_tensor(self.hand_part_ids).to(self.device)[nn_idx].squeeze(-1)
+                self.part_map = F.one_hot(self.pmap, 16).float().to(self.device)
+                self.obj2hand_nn_idx = nn_idx.to(self.device)
+
+            elif self.correspondence_type == 'cse':
+                grid_points_all = self.obj_verts.reshape(-1, 3)  # (M * K^3, 3)
+
+                # GPU nearest distance using Kaolin
+                cse_dim = self.hand_cse.shape[-1]
+                self.point_cse = torch.zeros(
+                    self.batch_size, self.obj_verts.shape[1], cse_dim,
+                    device=self.device, dtype=torch.float32)
+                mano_faces = self.mano_layer.th_faces.to(self.device)
+                for b in range(self.batch_size):
+                    grid_points_all = self.obj_verts[b].reshape(-1, 3)  # (M * K^3, 3)
+                    nn_dist, nn_face_idx, nn_point = nn_dist_to_mesh_gpu(
+                        grid_points_all, self.hand_verts[b], mano_faces
+                    )
+
+                    nn_face_flat = nn_face_idx.reshape(-1)  # (M * K^3,)
+                    nn_point_flat = nn_point.reshape(-1, 3)  # (M * K^3, 3)
+
+                    nn_vert_idx = mano_faces[nn_face_flat]  # (M*K^3, 3)
+                    face_verts = self.hand_verts[b][nn_vert_idx]  # (M*K^3, 3, 3)
+                    face_cse = self.hand_cse[nn_vert_idx]  # (M*K^3, 3, cse_dim)
+
+                    # Barycentric weights via matrix inversion
+                    face_verts_T = face_verts.transpose(-1, -2)  # (M*K^3, 3, 3)
+                    A = face_verts_T + 1e-6 * torch.eye(3, device=face_verts_T.device).unsqueeze(0)
+                    w = torch.linalg.solve(A, nn_point_flat.unsqueeze(-1))  # (M*K^3, 3, 1)
+                    w = torch.clamp(w, 0, 1)
+                    w = w / (w.sum(dim=1, keepdim=True) + 1e-8)  # (M*K^3, 3, 1)
+
+                    grid_hand_cse = (face_cse * w).sum(dim=1)  # (M*K^3, cse_dim)
+                    grid_hand_cse = grid_hand_cse.reshape(-1, cse_dim)
+                    self.point_cse[b] = grid_hand_cse
+
 
     @property
     def nhandV(self):
@@ -819,8 +860,8 @@ class HandObject:
     def get_vis_geoms(self, idx=0, draw_maps=False, draw_hand=True, draw_obj=True, **kwargs):
         if 'obj_templates' in kwargs:
             obj_mesh, _ = self._load_templates(idx=idx, obj_templates=kwargs['obj_templates'])
-        elif self.vis_obj_models:
-            obj_mesh = self.vis_obj_models[idx]
+        # elif self.vis_obj_models:
+        #     obj_mesh = self.vis_obj_models[idx]
         elif self.obj_models:
             obj_mesh = self.obj_models[idx]
         else:
@@ -862,7 +903,7 @@ class HandObject:
             vis_geoms.append({'name': 'object', 'geometry': obj0, 'material': obj_mat})
 
         if draw_maps:
-            offset = np.array([0.0, 0, 0])
+            offset = np.array([0.25, 0, 0])
             comesh = copy(obj_mesh)
             comesh.apply_translation(offset)
             ## contact upscale

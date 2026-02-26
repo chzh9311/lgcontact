@@ -507,7 +507,7 @@ class HOIDatasetModule(LightningDataModule):
         adj_i, adj_j = np.where(adj_mask)  # pairs of adjacent grid indices
 
         if len(adj_i) == 0:
-            return np.zeros((0, 2), dtype=np.int64), np.zeros((0,), dtype=np.float32)
+            return np.zeros((0, 2), dtype=np.int64), np.zeros(0, dtype=np.float32), np.zeros((0,), dtype=np.int64)
 
         # Step 2: Compute absolute coordinates of all grid points
         # grid_pt_coords: N x K^3 x 3
@@ -558,7 +558,7 @@ class HOIDatasetModule(LightningDataModule):
             all_distances.append(distances)
 
         if len(all_indices) == 0:
-            return np.zeros((0, 2), dtype=np.int64), np.zeros((0,), dtype=np.float32)
+            return np.zeros((0, 2), dtype=np.int64), np.zeros(0, dtype=np.float32), np.zeros((0,), dtype=np.int64)
 
         indices = np.concatenate(all_indices, axis=0).astype(np.int64)  # M x 2
         distances = np.concatenate(all_distances, axis=0).astype(np.float32)  # M

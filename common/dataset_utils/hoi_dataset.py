@@ -180,7 +180,7 @@ class BaseHOIDataset(Dataset):
                 'handTrans': hand_trans,
                 'handVerts': handV,
                 'handJoints': handJ,
-                # 'handPartT': part_T,
+                'handPartT': part_T,
                 'handPartIds': hand_part_ids,
                 'handNormals': np.stack(handN, axis=0),
                 'canoJoints': canoJ,

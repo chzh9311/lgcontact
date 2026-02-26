@@ -5,7 +5,7 @@ from copy import copy
 
 from pytorch3d.structures import Meshes
 from pytorch3d.transforms import matrix_to_axis_angle
-# from manotorch.anchorlayer import AnchorLayer
+from manotorch.anchorlayer import AnchorLayer
 from common.utils.geometry import (
         cp_match,
         cp_match_Ronly,
@@ -35,20 +35,24 @@ def optimize_pose_contactopt(mano_layer, obj_verts, obj_normals, obj_contact_tar
     hand_verts, hand_joints, _ = mano_layer(torch.cat([global_pose, mano_pose], dim=1),
                                             th_betas=mano_shape, th_trans=mano_trans)
     root = hand_joints[:, 0:1]
-    # if partition_type == 'part':
-    #     anchor_layer = AnchorLayer("/home/zxc417/Downloads/Lib/manotorch/assets/anchor").to(device)
-    #     part_anchor_idx = [19, 7, 8, 9, 13, 14, 15, 27, 28, 29, 20, 21, 22, 0, 1, 2]
-    #     init_anchors = anchor_layer(hand_verts)[:, part_anchor_idx, :]  # (B, 16, 3)
-    #     part_weight = torch.stack([torch.sum(obj_contact_target * (obj_partition == i).float(), dim=1) for i in range(16)], dim=1) # (B, 16)
-    #     part_weight[:, 0] = 0
-    #     part_centers = [torch.sum(obj_verts * obj_contact_target.unsqueeze(-1) * (obj_partition == i).float().unsqueeze(-1), dim=1)
-    #                     / (torch.sum(obj_contact_target * (obj_partition == i).float(), dim=1, keepdim=True) + 1e-8) for i in range(16)]
-    #     part_centers = torch.stack(part_centers, dim=1)  # (B, 16, 3)
-    #     Rs, ts = cp_match(init_anchors - root, part_centers - root, part_weight.unsqueeze(-1))
-    # elif partition_type == 'cse':
-    Wverts = hand_cse.emb2Wvert(obj_partition) # (B, N, 778)
-    target_hand_pts0 = Wverts @ hand_verts # (B, N, 3)
-    Rs, ts = cp_match(target_hand_pts0 - root, obj_verts - root, obj_contact_target.unsqueeze(-1))
+    if partition_type == 'part':
+        anchor_layer = AnchorLayer("/home/zxc417/Downloads/Lib/manotorch/assets/anchor").to(device)
+        part_anchor_idx = [19, 7, 8, 9, 13, 14, 15, 27, 28, 29, 20, 21, 22, 0, 1, 2]
+        init_anchors = anchor_layer(hand_verts)[:, part_anchor_idx, :]  # (B, 16, 3)
+        part_weight = torch.stack([torch.sum(obj_contact_target * (obj_partition == i).float(), dim=1) for i in range(16)], dim=1) # (B, 16)
+        part_weight[:, 0] = 0
+        part_centers = [torch.sum(obj_verts * obj_contact_target.unsqueeze(-1) * (obj_partition == i).float().unsqueeze(-1), dim=1)
+                        / (torch.sum(obj_contact_target * (obj_partition == i).float(), dim=1, keepdim=True) + 1e-8) for i in range(16)]
+        part_centers = torch.stack(part_centers, dim=1)  # (B, 16, 3)
+        Rs, ts = cp_match(init_anchors - root, part_centers - root, part_weight.unsqueeze(-1))
+    elif partition_type == 'cse':
+        Wverts = hand_cse.emb2Wvert(obj_partition) # (B, N, 778)
+        target_hand_pts0 = Wverts @ hand_verts # (B, N, 3)
+        Rs, ts = cp_match(target_hand_pts0 - root, obj_verts - root, obj_contact_target.unsqueeze(-1))
+    else:
+        ## No initialization, start from mean pose
+        Rs = torch.eye(3, device=device).unsqueeze(0).repeat(batch_size, 1, 1)
+        ts = torch.zeros((batch_size, 3), device=device)
 
     global_pose = matrix_to_axis_angle(Rs).detach()
     mano_trans = ts.detach()
@@ -97,8 +101,6 @@ def optimize_pose_contactopt(mano_layer, obj_verts, obj_normals, obj_contact_tar
                 contact_obj[obj_mask] = c_full.squeeze(-1)[obj_mask]
         
         elif partition_type == 'cse':
-            assert hand_cse is not None, "hand_cse model must be provided for cse-based contact optimization"
-            Wverts = hand_cse.emb2Wvert(obj_partition) # (B, N, 778)
             target_hand_pts = Wverts @ hand_verts # (B, N, 3)
             capsule_tops = obj_verts + obj_normals * caps_top  # Coordinates of the top focii of the capsules (batch, V, 3)
             capsule_bots = obj_verts + obj_normals * caps_bot
@@ -111,6 +113,17 @@ def optimize_pose_contactopt(mano_layer, obj_verts, obj_normals, obj_contact_tar
             dist_to_axis = torch.norm(delta_top - bot_to_top * h.unsqueeze(2), dim=2)   # Distance to capsule centerline
             dist = dist_to_axis / caps_rad
             contact_obj = sdf_to_contact(dist, None, method=contact_norm_method)# * (dot_obj/2+0.5) # TODO dotting contact normal
+        else:
+            c_full, _, _ = calculate_contact_capsule(
+                hand_verts,
+                hand_normals,
+                obj_verts,
+                obj_normals,
+                caps_top=caps_top, caps_bot=caps_bot, caps_rad=caps_rad,
+                caps_on_hand=caps_on_hand, contact_norm_method=contact_norm_method
+            )
+            contact_obj = c_full.squeeze(-1)
+
 
         contact_obj_sub = obj_contact_target - contact_obj
         contact_obj_weighted = contact_obj_sub + torch.nn.functional.relu(contact_obj_sub) * w_cont_asym  # Loss for 'missing' contact higher
@@ -239,7 +252,7 @@ def optimize_pose_by_contact(mano_layer, grid_centers, target_pts, pred_contact,
     return [p.detach() for p in hand_opt_params]
 
 def optimize_pose_wrt_local_grids(mano_layer, grid_centers, target_pts, target_W_verts, weights,
-                                  grid_sdfs, dist2contact_fn, recon_hand_verts=None, recon_verts_mask=None,
+                                  grid_sdfs=None, dist2contact_fn=None, recon_hand_verts=None, recon_verts_mask=None,
                                   n_iter=1200, lr=0.01, grid_scale=0.01, w_repulsive=1.0,
                                   w_reg_loss=0.001, init_pose=None):
     """
@@ -259,13 +272,14 @@ def optimize_pose_wrt_local_grids(mano_layer, grid_centers, target_pts, target_W
     mano_shape = torch.zeros((batch_size, 10), dtype=target_pts.dtype, device=target_pts.device)
 
     contact_grid_mask = (weights.view(batch_size, num_grids, -1) > 0).any(dim=-1) # B x num_grids
-    ## Supress the non contact with a reconstructed vertices ie
-    recon_grid_dist = torch.cdist(grid_centers.view(batch_size, num_grids, 3), recon_hand_verts)  # B x num_grids x num_recon_verts
-    recon_grid_dist = recon_grid_dist.masked_fill(~recon_verts_mask.view(batch_size, 1, -1), grid_scale + 1)  # Mask out non-reconstructed verts
-    recon_contact_mask = (recon_grid_dist < grid_scale).any(dim=-1)  # B x num_grids
-    contact_grid_mask = contact_grid_mask | recon_contact_mask  # Consider grids close to reconstructed verts as contact
+    if w_repulsive > 0:
+        ## Supress the non contact with a reconstructed vertices ie
+        recon_grid_dist = torch.cdist(grid_centers.view(batch_size, num_grids, 3), recon_hand_verts)  # B x num_grids x num_recon_verts
+        recon_grid_dist = recon_grid_dist.masked_fill(~recon_verts_mask.view(batch_size, 1, -1), grid_scale + 1)  # Mask out non-reconstructed verts
+        recon_contact_mask = (recon_grid_dist < grid_scale).any(dim=-1)  # B x num_grids
+        contact_grid_mask = contact_grid_mask | recon_contact_mask  # Consider grids close to reconstructed verts as contact
 
-    n_non_contact_grids = torch.sum(~contact_grid_mask).item()
+        n_non_contact_grids = torch.sum(~contact_grid_mask).item()
 
     if init_pose is not None:
         # init_pose format: [trans(3), full_pose(48), betas(10)] = 61 dims
@@ -306,31 +320,36 @@ def optimize_pose_wrt_local_grids(mano_layer, grid_centers, target_pts, target_W
 
         # Repulsive loss: penalize hand vertices near non-contact grids
         # grid_dist = torch.cdist(grid_centers, handV)  # B x num_grids x num_hand_verts
-        repul_loss = torch.tensor(0.0, device=target_pts.device)
-        if n_non_contact_grids > 0:
-            # non_contact_grid_dist = grid_dist[~contact_grid_mask].min(-1)[0]
-            # correct_mask = non_contact_grid_dist > grid_scale
-            # increate the effect distance quickly beyond the grid scale
-            # non_contact_grid_dist[correct_mask] = (non_contact_grid_dist[correct_mask] - grid_scale + 0.5)**2 + grid_scale - 0.25
-            # n_non_contact_grid_dist = non_contact_grid_dist / grid_scale * 2 + 1
-            # n_non_contact_c = sdf_to_contact(n_non_contact_grid_dist, None, method=2)
-            # losses['repulsive'] = torch.sum(n_non_contact_c) / n_non_contact_grids
+        if w_repulsive > 0:
+            if n_non_contact_grids > 0:
+                # non_contact_grid_dist = grid_dist[~contact_grid_mask].min(-1)[0]
+                # correct_mask = non_contact_grid_dist > grid_scale
+                # increate the effect distance quickly beyond the grid scale
+                # non_contact_grid_dist[correct_mask] = (non_contact_grid_dist[correct_mask] - grid_scale + 0.5)**2 + grid_scale - 0.25
+                # n_non_contact_grid_dist = non_contact_grid_dist / grid_scale * 2 + 1
+                # n_non_contact_c = sdf_to_contact(n_non_contact_grid_dist, None, method=2)
+                # losses['repulsive'] = torch.sum(n_non_contact_c) / n_non_contact_grids
 
-            ## Option2: use SDF values to indicate penetrations directly
-            for b in range(batch_size):
-                contact_grid_mask_b = contact_grid_mask[b]
-                non_contact_grid_points = target_pts[b].view(num_grids, -1, 3)[~contact_grid_mask_b].view(-1, 3)  # num_non_contact_grids x 3
-                non_contact_grid_sdfs = grid_sdfs.view(num_grids, -1)[~contact_grid_mask_b].clone().view(-1)  # num_non_contact_grids
-                dist_mat = torch.cdist(non_contact_grid_points, handV[b])  # num_non_contact_grids
-                nn_pt_idx = dist_mat.argmin(dim=0) # num_hand_verts
-                outside_hand_mask = non_contact_grid_sdfs[nn_pt_idx] > 0
-                dist, nn_hand_idx = dist_mat.min(dim=-1)  # num_non_contact_grids
-                pred_contact = dist2contact_fn(dist)  # num_non_contact_grids
-                pred_contact[outside_hand_mask[nn_hand_idx]] = 0  # If the closest point is outside the hand, we don't consider it as penetration even if it's close
-                non_contact_grid_sdfs[non_contact_grid_sdfs > 0] = 0  # Only consider negative SDF values (penetrations)
-                repul_loss += - torch.sum(pred_contact * non_contact_grid_sdfs) / (n_non_contact_grids + 1e-8)
+                ## Option2: use SDF values to indicate penetrations directly
+                for b in range(batch_size):
+                    contact_grid_mask_b = contact_grid_mask[b]
+                    non_contact_grid_points = target_pts[b].view(num_grids, -1, 3)[~contact_grid_mask_b].view(-1, 3)  # num_non_contact_grids x 3
+                    non_contact_grid_sdfs = grid_sdfs.view(num_grids, -1)[~contact_grid_mask_b].clone().view(-1)  # num_non_contact_grids
+                    dist_mat = torch.cdist(non_contact_grid_points, handV[b])  # num_non_contact_grids
+                    nn_pt_idx = dist_mat.argmin(dim=0) # num_hand_verts
+                    outside_hand_mask = non_contact_grid_sdfs[nn_pt_idx] > 0
+                    dist, nn_hand_idx = dist_mat.min(dim=-1)  # num_non_contact_grids
+                    pred_contact = dist2contact_fn(dist)  # num_non_contact_grids
+                    pred_contact[outside_hand_mask[nn_hand_idx]] = 0  # If the closest point is outside the hand, we don't consider it as penetration even if it's close
+                    non_contact_grid_sdfs[non_contact_grid_sdfs > 0] = 0  # Only consider negative SDF values (penetrations)
+                    repul_loss += - torch.sum(pred_contact * non_contact_grid_sdfs) / (n_non_contact_grids + 1e-8)
+            else:
+                repul_loss = torch.tensor(0.0, device=target_pts.device)
 
-        losses['repulsive'] = repul_loss
+            losses['repulsive'] = repul_loss
+            loss = losses['contact'] + w_repulsive * losses['repulsive']
+        else:
+            loss = losses['contact']
 
         # Regularization loss: only when init_pose is provided
         if use_reg_loss:
@@ -339,7 +358,6 @@ def optimize_pose_wrt_local_grids(mano_layer, grid_centers, target_pts, target_W
             losses['reg'] = torch.mean(pose_diff**2)
 
         # Total loss
-        loss = losses['contact'] + w_repulsive * losses['repulsive']
         if use_reg_loss:
             loss += w_reg_loss * losses['reg']
 

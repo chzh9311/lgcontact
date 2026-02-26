@@ -199,25 +199,35 @@ class LGTrainer(L.LightningModule):
                      'test/pred_rec_error': pred_rec_error.item()}
         
         ## Test random sampling from latent space
-        random_z = torch.randn_like(posterior.mode())
+        # random_z = torch.randn_like(posterior.mode())
+        # random_recon_cgrid = self.model.decode(random_z, obj_cond=obj_cond)
+        # random_c = random_recon_cgrid[:, 0].reshape(batch_size, -1)
+        # contact_value = random_c.max(dim=-1).values
+        # loss_dict.update({
+        #     'test/avg_contact_values': contact_value.mean().item(),
+        #     'test/contact_ratio': (contact_value > 0.05).float().mean().item(),
+        #     'test/in_ratio': (contact_value > 0.5).float().mean().item()
+        # })
+
+        ## Test zero-contact grid reconstruction
+        gt_grid_contact[..., 0] = 0.0
+        gt_grid_contact[:] = 0
+        recon_cgrid, posterior, obj_feat = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
+        zero_center = posterior.mode()
+        random_z = torch.randn_like(zero_center) * 0.1 + zero_center
         random_recon_cgrid = self.model.decode(random_z, obj_cond=obj_cond)
         random_c = random_recon_cgrid[:, 0].reshape(batch_size, -1)
         contact_value = random_c.max(dim=-1).values
         loss_dict.update({
             'test/avg_contact_values': contact_value.mean().item(),
-            'test/contact_ratio': (contact_value > 0.03).float().mean().item(),
+            'test/contact_ratio': (contact_value > 0.05).float().mean().item(),
             'test/in_ratio': (contact_value > 0.5).float().mean().item()
         })
-
-        ## Test zero-contact grid reconstruction
-        # gt_grid_contact[..., 0] = 0.0
-        # gt_grid_contact[:] = 0
-        # recon_cgrid, posterior, obj_feat = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
         # recon_cgrid = recon_cgrid.permute(0, 2, 3, 4, 1)
         # zero_contact_rec_error = F.l1_loss(recon_cgrid[..., 0], gt_grid_contact[..., 0])
         # loss_dict['test/zero_contact_rec_error'] = zero_contact_rec_error
         # loss_dict['test/zero_contact_rec_max'] = torch.max(torch.abs(recon_cgrid[..., 0]))
-        # print(loss_dict)
+        print(loss_dict)
 
         self.log_dict(loss_dict, prog_bar=True, on_step=False, on_epoch=True)
 
