@@ -364,6 +364,8 @@ class GraspDiffTrainer(LGCDiffTrainer):
 
             handV, handJ, _ = self.mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
             # handV, handJ = init_handV, init_handJ
+        else:
+            recon_params, handV, handJ = self.hand_ae.decode(hand_latent)
 
         handV, handJ = handV.detach().cpu().numpy(), handJ.detach().cpu().numpy()
 
@@ -414,7 +416,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
         # Visualize all samples
         recon_imgs = []
         pred_imgs = []
-        # contact_mask_imgs = []
+        contact_mask_imgs = []
         for vis_idx in range(n_samples):
             recon_img, pred_geoms = visualize_recon_hand_w_object(
                 hand_verts=pred_hand_verts[vis_idx].detach().cpu().numpy(),
@@ -428,26 +430,26 @@ class GraspDiffTrainer(LGCDiffTrainer):
             recon_imgs.append(recon_img)
 
             # Visualize contact mask
-            # contact_img, contact_geoms = visualize_grid_contact(
-            #     contact_pts=obj_msdf_center[vis_idx].detach().cpu().numpy(),
-            #     pt_contact=contact_mask[vis_idx].detach().cpu().numpy().astype(float),
-            #     grid_scale=self.cfg.msdf.scale,
-            #     obj_mesh=handobject.vis_obj_models[vis_idx],
-            #     w=400, h=400)
-            # contact_mask_imgs.append(contact_img)
+            contact_img, contact_geoms = visualize_grid_contact(
+                contact_pts=obj_msdf_center[vis_idx].detach().cpu().numpy(),
+                pt_contact=contact_mask[vis_idx].detach().cpu().numpy().astype(float),
+                grid_scale=self.cfg.msdf.scale,
+                obj_mesh=handobject.vis_obj_models[vis_idx],
+                w=400, h=400)
+            contact_mask_imgs.append(contact_img)
 
             if self.debug:
                 # print(result)
                 ho_geoms = pred_ho.get_vis_geoms(idx=vis_idx)
-                # contact_geoms_offset = [g['geometry'].translate((0, 0.5, 0)) if isinstance(g, dict) else g.translate((0, 0.5, 0)) for g in contact_geoms]
-                o3d.visualization.draw_geometries(pred_geoms + [g['geometry'].translate((0, 0.25, 0)) if isinstance(g, dict) else g.translate((0, 0.25, 0)) for g in ho_geoms], window_name='Predicted Hand-Object')
+                contact_geoms_offset = [g['geometry'].translate((0, 0.5, 0)) if isinstance(g, dict) else g.translate((0, 0.5, 0)) for g in contact_geoms]
+                o3d.visualization.draw_geometries(pred_geoms + [g['geometry'].translate((0, 0.25, 0)) if isinstance(g, dict) else g.translate((0, 0.25, 0)) for g in ho_geoms] + contact_geoms_offset, window_name='Predicted Hand-Object')
             else:
                 pred_img = pred_ho.vis_img(idx=vis_idx, h=400, w=400)
                 pred_imgs.append(pred_img)
 
         # Concatenate all sample images vertically
         recon_img_grid = np.concatenate(recon_imgs, axis=0)
-        # contact_mask_img_grid = np.concatenate(contact_mask_imgs, axis=0)
+        contact_mask_img_grid = np.concatenate(contact_mask_imgs, axis=0)
         if not self.debug:
             pred_img_grid = np.concatenate(pred_imgs, axis=0)
 
@@ -464,7 +466,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
                     obj_name,
                     wandb.Image(recon_img_grid),
                     wandb.Image(pred_img_grid),
-                    # wandb.Image(contact_mask_img_grid),
+                    wandb.Image(contact_mask_img_grid),
                     float(np.mean(result.get("Simulation Displacement", [0]))),
                     float(np.mean(result.get("Penetration Depth", [0]))),
                     float(np.mean(result.get("Intersection Volume", [0])))

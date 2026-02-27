@@ -321,6 +321,7 @@ def optimize_pose_wrt_local_grids(mano_layer, grid_centers, target_pts, target_W
         # Repulsive loss: penalize hand vertices near non-contact grids
         # grid_dist = torch.cdist(grid_centers, handV)  # B x num_grids x num_hand_verts
         if w_repulsive > 0:
+            repul_loss = torch.tensor(0.0, device=target_pts.device)
             if n_non_contact_grids > 0:
                 # non_contact_grid_dist = grid_dist[~contact_grid_mask].min(-1)[0]
                 # correct_mask = non_contact_grid_dist > grid_scale
@@ -343,8 +344,6 @@ def optimize_pose_wrt_local_grids(mano_layer, grid_centers, target_pts, target_W
                     pred_contact[outside_hand_mask[nn_hand_idx]] = 0  # If the closest point is outside the hand, we don't consider it as penetration even if it's close
                     non_contact_grid_sdfs[non_contact_grid_sdfs > 0] = 0  # Only consider negative SDF values (penetrations)
                     repul_loss += - torch.sum(pred_contact * non_contact_grid_sdfs) / (n_non_contact_grids + 1e-8)
-            else:
-                repul_loss = torch.tensor(0.0, device=target_pts.device)
 
             losses['repulsive'] = repul_loss
             loss = losses['contact'] + w_repulsive * losses['repulsive']

@@ -1,3 +1,4 @@
+import os
 import torch
 from torch.utils.data import DataLoader
 import trimesh
@@ -7,9 +8,10 @@ from matplotlib import pyplot as plt
 from common.manopth.manopth.manolayer import ManoLayer
 from common.dataset_utils.grab_dataset import GRABDataset
 from common.dataset_utils.datamodules import HOIDatasetModule, LocalGridDataModule
-from common.utils.vis import visualize_local_grid, visualize_local_grid_with_hand, o3dmesh
+from common.utils.vis import visualize_local_grid, visualize_local_grid_with_hand, o3dmesh, parse_hex_color
 from common.msdf.utils.msdf import get_grid
 from common.dataset_utils.hoi4d_dataset import HOI4DHandDataModule
+from common.utils.geometry import GridDistanceToContact
 from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
 from common.model.handobject import HandObject
 # from common.model.vae.grid_vae import MLCVAE
@@ -128,24 +130,36 @@ def vis_msdf_data_sample(cfg):
 
     print("\nVisualizing contact grids with hand...")
     for batch_idx, batch in enumerate(tqdm(train_loader, desc="Processing batches")):
+        # if 'train' not in batch['objName'][0] and batch_idx % 20 != 0:
+        #     continue  # Only visualize cube samples for now
+        if batch_idx % 100 != 0:
+            continue  # Only visualize every 20th batch to reduce load
         handobject = HandObject(cfg.data, device='cpu', mano_layer=mano_layer)
         obj_templates = [trimesh.Trimesh(obj_info[name]['verts'], obj_info[name]['faces'], process=False)
                          for name in batch['objName']]
-        handobject.load_from_batch(batch, obj_templates=obj_templates)
+        handobject.load_from_batch(batch, obj_templates=obj_templates, vis_obj_template=obj_templates)
+        index_verts = handobject.hand_verts[:, handobject.hand_part_ids == 3]
+        index_centre = index_verts.mean(dim=1)
+        grid_dist = torch.norm(handobject.obj_msdf[:, :, -3:] - index_centre[:, None, :], dim=-1)  # (B, N) distance from each grid center to index fingertip center
+        grid_indices = torch.argmin(grid_dist, dim=-1)  # (B,) indices of closest grid to index fingertip
 
         batch_size = handobject.batch_size
         n_grids = handobject.obj_msdf.shape[1]
         for b in range(batch_size):
             obj_name = batch['objName'][b]
             print(f"  Batch {batch_idx}, sample {b} ({obj_name}), {n_grids} grids")
-            grid_idx = 21
-            left_geoms, right_geoms = handobject.vis_grid_detail(obj_templates, idx=b, pt_idx=grid_idx)
-            o3d.visualization.draw_geometries(
-                left_geoms,
-                window_name=f"Batch {batch_idx} | Sample {b} ({obj_name}) | Grid {grid_idx} — SDF")
-            o3d.visualization.draw_geometries(
-                right_geoms,
-                window_name=f"Batch {batch_idx} | Sample {b} ({obj_name}) | Grid {grid_idx} — Contact")
+            grid_idx = grid_indices[b].item()
+
+            geoms = handobject.vis_all_grids_with_hand(obj_templates=obj_templates, idx=0, grid_idx=grid_idx)
+            o3d.visualization.draw_geometries(geoms)
+
+            # left_geoms, right_geoms = handobject.vis_grid_detail(obj_templates, idx=b, pt_idx=grid_idx)
+            # o3d.visualization.draw_geometries(
+            #     left_geoms,
+            #     window_name=f"Batch {batch_idx} | Sample {b} ({obj_name}) | Grid {grid_idx} — SDF")
+            # o3d.visualization.draw_geometries(
+            #     right_geoms,
+            #     window_name=f"Batch {batch_idx} | Sample {b} ({obj_name}) | Grid {grid_idx} — Contact")
 
 
 @hydra.main(config_path="../config", config_name="gridae")
@@ -300,6 +314,244 @@ def fit_mano_beta(cfg):
     train_set = GRABDataset(cfg.data, 'train', load_msdf=cfg.load_msdf, load_grid_contact=cfg.load_grid_contact)
 
 
+def clip_mesh_to_aabb(verts: np.ndarray, faces: np.ndarray, aabb_min: np.ndarray, aabb_max: np.ndarray):
+    """
+    Clip a triangle mesh to an axis-aligned bounding box using Sutherland-Hodgman.
+    Triangles straddling the boundary are split; only the inside portions are kept.
+    Returns (clipped_verts, clipped_faces) with remapped indices.
+    """
+    def clip_poly_by_plane(poly, axis, sign, bound):
+        # sign=+1: keep where pts[:,axis] <= bound  (max plane)
+        # sign=-1: keep where pts[:,axis] >= bound  (min plane)
+        # i.e. inside condition: sign * pts[:,axis] <= sign * bound
+        if len(poly) == 0:
+            return poly
+        out = []
+        n = len(poly)
+        for i in range(n):
+            a, b = poly[i], poly[(i + 1) % n]
+            a_in = sign * a[axis] <= sign * bound
+            b_in = sign * b[axis] <= sign * bound
+            if a_in:
+                out.append(a)
+            if a_in != b_in:
+                t = (bound - a[axis]) / (b[axis] - a[axis])
+                out.append(a + t * (b - a))
+        return out
+
+    new_verts = []
+    new_faces = []
+
+    for tri_idx in faces:
+        poly = [verts[i].copy() for i in tri_idx]
+
+        # Clip against each of the 6 AABB planes
+        for axis in range(3):
+            poly = clip_poly_by_plane(poly, axis, +1, aabb_max[axis])  # upper bound
+            if not poly:
+                break
+            poly = clip_poly_by_plane(poly, axis, -1, aabb_min[axis])  # lower bound
+            if not poly:
+                break
+
+        if len(poly) < 3:
+            continue
+
+        # Triangulate the clipped polygon (fan triangulation)
+        base_idx = len(new_verts)
+        new_verts.extend(poly)
+        for k in range(1, len(poly) - 1):
+            new_faces.append([base_idx, base_idx + k, base_idx + k + 1])
+
+    if not new_verts:
+        return np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.int64)
+
+    return np.array(new_verts, dtype=np.float32), np.array(new_faces, dtype=np.int64)
+
+
+def pts_to_contact(pts: np.array, mesh: trimesh.Trimesh, dist_to_contact_fn: GridDistanceToContact):
+    """
+    pts: (N, 3) in world coordinates
+    obj_mesh: trimesh of the object
+    dist_to_contact_fn: function that takes points and returns distance to contact
+    """
+    _, dist, _ = trimesh.proximity.closest_point(mesh, pts)  # (N,) unsigned distances
+    dist_t = torch.as_tensor(dist, dtype=torch.float32)
+    # contact = dist_to_contact_fn(dist_t).detach().cpu().numpy()                     # (N,) contact values in [0, 1]
+    contact = dist_t.detach().cpu().numpy()                     # (N,) contact values in [0, 1]
+    return contact
+
+
+def vis_part_contact():
+    """
+    For teaser visualization test
+    """
+    mano_layer = ManoLayer(mano_root = "data/misc/mano_v1_2/models", use_pca=False, side='right', flat_hand_mean=True, ncomps=45)
+    hand_part_ids = torch.argmax(mano_layer.th_weights, dim=-1).detach().cpu().numpy()
+    canoV, canoJ, _ = mano_layer(torch.zeros(1, 48))
+    canoV = canoV[0].detach().cpu().numpy()
+    dist_to_contact2d = GridDistanceToContact(kernel_size=8, scale=0.01, method=2)
+    dist_to_contact3d = GridDistanceToContact(kernel_size=4, scale=0.01, method=2)
+
+    # Build submesh for the fingertip part
+    tip_mask = (hand_part_ids == 3) | (hand_part_ids == 2)                             # (778,) bool
+    tip_verts = canoV[tip_mask] # N x 3
+    tip_vert_indices = np.where(tip_mask)[0]                  # original vertex indices
+    faces = mano_layer.th_faces.cpu().numpy()                 # (F, 3)
+    tip_face_mask = tip_mask[faces].all(axis=-1)              # keep faces where all 3 verts are in part
+    tip_faces = faces[tip_face_mask]                          # (F', 3) in original index space
+    # Remap to local index space
+    remap = np.full(778, -1, dtype=np.int64)
+    remap[tip_vert_indices] = np.arange(len(tip_vert_indices))
+    tip_faces_local = remap[tip_faces]                        # (F', 3) in [0, N)
+
+    # Rotate -30 degrees around Y axis
+    angle = np.radians(-30)
+    Rx = np.array([[1, 0,  0],
+                   [0, 0, -1],
+                   [0, 1, 0]])
+    Ry = np.array([[np.cos(angle), 0, np.sin(angle)],
+                   [0,             1, 0            ],
+                   [-np.sin(angle),0, np.cos(angle)]])
+    tip_verts = (Ry @ Rx @ tip_verts.T).T
+
+    # Translate so the lowest-z vertex aligns with the origin
+    tip_verts -= tip_verts[np.argmin(tip_verts[:, 2])]
+    tip_verts[:, 2] -= 0.003
+
+    tip_mesh = trimesh.Trimesh(vertices=tip_verts, faces=tip_faces_local)
+
+    ## points to calculate contact
+    reso_2d = 8
+    reso_3d = 4
+    xy = np.stack(np.meshgrid(np.linspace(-0.01, 0.01, reso_2d), np.linspace(-0.01, 0.01, reso_2d)), axis=-1).reshape(-1, 2)  # (N, 2)
+    pts2d = np.concatenate([xy, np.zeros((reso_2d**2, 1))], axis=-1)  # (N, 3)
+    pts3d = np.stack(np.meshgrid(np.linspace(-0.01, 0.01, reso_3d), np.linspace(-0.01, 0.01, reso_3d), np.linspace(-0.01, 0.01, reso_3d)), axis=-1).reshape(-1, 3)  # (M, 3)
+
+    hm_cmap = plt.colormaps['inferno']
+    gt_contact2d = pts_to_contact(pts2d, tip_mesh, dist_to_contact2d)
+    gt_contact3d = pts_to_contact(pts3d, tip_mesh, dist_to_contact3d)
+
+    # tx, tz = np.meshgrid(np.linspace(-0.01, 0.01, 16), np.linspace(-0.01, 0.01, 16))
+    # trans = np.stack([tx.flatten(), np.zeros_like(tx.flatten()), tz.flatten()], axis=-1)  # (256, 3)
+    ts = np.linspace(0, 0.01, 16)
+    rots = np.linspace(0, np.pi, 16)
+
+    cache_path = 'tmp/vis_part_contact_error_grids.npz'
+    if os.path.exists(cache_path):
+        print(f"Loading cached error grids from {cache_path}")
+        cache = np.load(cache_path)
+        error2d_grid = cache['error2d_grid']
+        error3d_grid = cache['error3d_grid']
+    else:
+        all_axes = np.concatenate((np.eye(3), -np.eye(3)))
+        error2d_grid = np.zeros((16, 16))
+        error3d_grid = np.zeros((16, 16))
+        for i, j in tqdm([(i, j) for i in range(16) for j in range(16)], total=16*16):
+            for axx in all_axes:
+                R = axis_angle_to_matrix(torch.from_numpy(axx * rots[i])).numpy()
+                rotated_verts = (R @ tip_verts.T).T
+                for axx in all_axes:
+                    t = axx * ts[j]
+                    transformed_verts = rotated_verts + t
+                    transformed_mesh = trimesh.Trimesh(vertices=transformed_verts, faces=tip_faces_local)
+                    contact2d = pts_to_contact(pts2d, transformed_mesh, dist_to_contact2d)
+                    error2d = np.mean(np.abs(contact2d - gt_contact2d))
+                    error2d_grid[i, j] += error2d
+                    contact3d = pts_to_contact(pts3d, transformed_mesh, dist_to_contact3d)
+                    error3d = np.mean(np.abs(contact3d - gt_contact3d))
+                    error3d_grid[i, j] += error3d
+            error2d_grid[i, j] /= len(all_axes) ** 2
+            error3d_grid[i, j] /= len(all_axes) ** 2
+        os.makedirs('tmp', exist_ok=True)
+        np.savez(cache_path, error2d_grid=error2d_grid, error3d_grid=error3d_grid)
+        print(f"Saved error grids to {cache_path}")
+
+    use_3d_plot = True
+    if use_3d_plot:
+        rot_grid, t_grid = np.meshgrid(rots, ts * 1000)  # t_grid in mm
+
+        from matplotlib.colors import LinearSegmentedColormap
+        cmap_2d = LinearSegmentedColormap.from_list('blue_solid', ['#2A5E8C', '#2A5E8C'])
+        cmap_3d = LinearSegmentedColormap.from_list('red_solid', ['#D9564A', '#D9564A'])
+
+        fig = plt.figure(figsize=(9, 6))
+        ax = fig.add_subplot(1, 1, 1, projection='3d')
+        ax.plot_surface(rot_grid, t_grid, error2d_grid * 1000, cmap=cmap_2d, edgecolor='#2A5E8C', linewidth=0.3, alpha=0.7)
+        ax.plot_surface(rot_grid, t_grid, error3d_grid * 1000, cmap=cmap_3d, edgecolor='#D9564A', linewidth=0.3, alpha=0.7)
+        ax.view_init(elev=20, azim=140, roll=0)
+        ax.xaxis.pane.fill = False
+        ax.yaxis.pane.fill = False
+        ax.zaxis.pane.fill = False
+        ax.xaxis.pane.set_edgecolor('none')
+        ax.yaxis.pane.set_edgecolor('none')
+        ax.zaxis.pane.set_edgecolor('none')
+        ax.grid(False)
+        ax.set_xlabel('Rotation error (rad)')
+        ax.set_ylabel('Translation error (mm)')
+        ax.set_zlabel('Avg. distance error (mm)')
+        ax.set_title('Contact map error: 2D vs 3D')
+        from matplotlib.patches import Patch
+        legend_handles = [Patch(facecolor='#2A5E8C', label='2D'), Patch(facecolor='#D9564A', label='3D')]
+        ax.legend(handles=legend_handles)
+    else:
+        rot_ticks = [f'{r:.1f}' for r in rots[::3]]
+        t_ticks = [f'{t*1000:.1f}' for t in ts[::3]]
+
+        vmin = min(error2d_grid.min(), error3d_grid.min()) * 1000
+        vmax = max(error2d_grid.max(), error3d_grid.max()) * 1000
+
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
+        im0 = axes[0].imshow(error2d_grid * 1000, origin='lower', aspect='auto',
+                             cmap='Blues', vmin=vmin, vmax=vmax,
+                             extent=[rots[0], rots[-1], ts[0]*1000, ts[-1]*1000])
+        axes[0].set_xlabel('Rotation error (rad)')
+        axes[0].set_ylabel('Translation error (mm)')
+        axes[0].set_title('2D contact map')
+        fig.colorbar(im0, ax=axes[0], label='Avg. distance error (mm)')
+
+        im1 = axes[1].imshow(error3d_grid * 1000, origin='lower', aspect='auto',
+                             cmap='Reds', vmin=vmin, vmax=vmax,
+                             extent=[rots[0], rots[-1], ts[0]*1000, ts[-1]*1000])
+        axes[1].set_xlabel('Rotation error (rad)')
+        axes[1].set_title('3D contact map')
+        fig.colorbar(im1, ax=axes[1], label='Avg. distance error (mm)')
+
+    # plt.tight_layout()
+    # plt.show()
+
+    o3d_pts2d = o3d.geometry.PointCloud()
+    o3d_pts2d.points = o3d.utility.Vector3dVector(pts2d)
+    o3d_pts2d.colors = o3d.utility.Vector3dVector(hm_cmap(dist_to_contact3d(gt_contact2d))[:,:3])  # color by contact value
+
+    o3d_pts3d = o3d.geometry.PointCloud()
+    o3d_pts3d.points = o3d.utility.Vector3dVector(pts3d)
+    o3d_pts3d.colors = o3d.utility.Vector3dVector(hm_cmap(dist_to_contact3d(gt_contact3d))[:,:3])  # color by contact value
+
+    tip_o3dmesh = o3dmesh(tip_verts, tip_faces_local, color="#F27141")
+    # frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.05)
+    obj_mesh = o3d.geometry.TriangleMesh.create_box(0.02, 0.02, 0.01)
+    obj_mesh.paint_uniform_color(parse_hex_color("#2A5E8C"))
+    obj_mesh.compute_vertex_normals()
+    obj_mesh.translate([-0.01, -0.01, -0.01])
+
+    bbox = o3d.geometry.AxisAlignedBoundingBox(
+        min_bound=np.array([-0.01, -0.01, -0.01]),
+        max_bound=np.array([ 0.01,  0.01,  0.01]),
+    )
+
+    bbox.color = parse_hex_color("#102540")
+    # clipped_verts, clipped_faces = clip_mesh_to_aabb(
+    #     tip_verts, tip_faces_local,
+    #     np.array([-0.01, -0.01, -0.01]),
+    #     np.array([ 0.01,  0.01,  0.01]),
+    # )
+    # tip_o3dmesh_cropped = o3dmesh(clipped_verts, clipped_faces, color="#F27141")
+
+    o3d.visualization.draw_geometries([tip_o3dmesh, obj_mesh, o3d_pts2d, bbox],
+                                      window_name="Fingertip Part Contact Visualization")
+
+
 if __name__ == "__main__":
     vis_msdf_data_sample()
     # test_obj()
@@ -308,3 +560,4 @@ if __name__ == "__main__":
     # compare_ckpt()
     # test_hoi4d_datamodule()
     # test_manolayer()
+    # vis_part_contact()

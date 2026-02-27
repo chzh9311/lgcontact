@@ -860,8 +860,8 @@ class HandObject:
     def get_vis_geoms(self, idx=0, draw_maps=False, draw_hand=True, draw_obj=True, **kwargs):
         if 'obj_templates' in kwargs:
             obj_mesh, _ = self._load_templates(idx=idx, obj_templates=kwargs['obj_templates'])
-        # elif self.vis_obj_models:
-        #     obj_mesh = self.vis_obj_models[idx]
+        elif self.vis_obj_models:
+            obj_mesh = self.vis_obj_models[idx]
         elif self.obj_models:
             obj_mesh = self.obj_models[idx]
         else:
