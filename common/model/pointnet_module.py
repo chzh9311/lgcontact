@@ -110,11 +110,11 @@ class PointNet2cls(nn.Module):
 
 
 class PointNet2seg(nn.Module):
-    def __init__(self, in_dim=6, in_point=256, hidden_dim=128, out_dim=3):
+    def __init__(self, in_dim=6, hidden_dim=128, out_dim=3):
         super(PointNet2seg, self).__init__()
-        self.sa1 = PointNetSetAbstraction(npoint=int(in_point//2), radius=0.2, nsample=32, in_channel=in_dim,
+        self.sa1 = PointNetSetAbstraction(npoint=512, radius=0.2, nsample=32, in_channel=in_dim,
                                           mlp=[hidden_dim, hidden_dim * 2], group_all=False)
-        self.sa2 = PointNetSetAbstraction(npoint=int(in_point//4), radius=0.4, nsample=64, in_channel=hidden_dim * 2 + 3,
+        self.sa2 = PointNetSetAbstraction(npoint=128, radius=0.4, nsample=64, in_channel=hidden_dim * 2 + 3,
                                           mlp=[hidden_dim * 2, hidden_dim * 4], group_all=False)
         self.sa3 = PointNetSetAbstraction(npoint=None, radius=None, nsample=None, in_channel=hidden_dim * 4 + 3,
                                           mlp=[hidden_dim * 4, hidden_dim * 8], group_all=True)
@@ -125,8 +125,10 @@ class PointNet2seg(nn.Module):
                                               mlp=[hidden_dim * 4, hidden_dim * 2])
         self.fp1 = PointNetFeaturePropagation(in_channel=hidden_dim * 2 + in_dim,
                                               mlp=[hidden_dim * 2, hidden_dim])
-        self.conv1 = nn.Conv1d(hidden_dim, out_dim, 1)
-        self.bn1 = nn.BatchNorm1d(out_dim)
+        self.conv1 = nn.Conv1d(hidden_dim, hidden_dim, 1)
+        self.bn1 = nn.BatchNorm1d(hidden_dim)
+        self.drop1 = nn.Dropout(0.2)
+        self.conv2 = nn.Conv1d(hidden_dim, out_dim, 1)
 
     def forward(self, xyz):
         B, C, N = xyz.shape
@@ -141,7 +143,10 @@ class PointNet2seg(nn.Module):
         l1_points = self.fp2(l1_xyz, l2_xyz, l1_points, l2_points) # B x 128 x 512
         l0_points = self.fp1(l0_xyz, l1_xyz, torch.cat([l0_xyz, l0_points], 1), l1_points) # B x 64 x N
         feat = F.relu(self.bn1(self.conv1(l0_points))) # B x 64 x N
-        return None, feat
+        x = self.drop1(feat)
+        x = self.conv2(x)
+        # x = F.log_softmax(x, dim=1)
+        return x, l3_points
 
 class LatentEncoder(nn.Module):
     def __init__(self, in_dim, dim, out_dim):

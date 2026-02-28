@@ -21,6 +21,11 @@ msdf:
   scale: ${msdf.scale}
   contact_method: ${msdf.contact_method}
 
+point_contact: ## Only for ablation using point contact
+  scale: 0.001
+  kernel_size: 2
+  method: 1
+
 object_sample: 1024
 
 num_workers: 8

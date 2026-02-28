@@ -92,8 +92,8 @@ class HandObject:
         Force labels are also loaded.
         Used in training and validating
         """
-        # self.obj_verts = batch['objSamplePts'].clone()
-        # self.obj_normals = batch['objSampleNormals'].clone()
+        self.obj_verts = batch['objSamplePts'].clone().float().to(self.device)
+        self.obj_normals = batch['objSampleNormals'].clone().float().to(self.device)
         self.obj_rot = batch['objRot'].clone().to(self.device).float()
         self.obj_trans = batch['objTrans'].clone().to(self.device).float()
         self.obj_com = batch['objCoM'].clone().to(self.device).float()
@@ -181,8 +181,9 @@ class HandObject:
 
             # Apply inverse transformation objT^-1 to object vertices and normals
             # (they are already transformed when loaded from batch)
-            # homo_obj_verts = F.pad(self.obj_verts, (0, 1), 'constant', 1)
-            # self.obj_verts = (objT_inv.unsqueeze(1) @ homo_obj_verts.unsqueeze(-1))[:, :, :3, 0]
+            homo_obj_verts = F.pad(self.obj_verts, (0, 1), 'constant', 1)
+            self.obj_verts = (objT_inv.unsqueeze(1) @ homo_obj_verts.unsqueeze(-1))[:, :, :3, 0]
+            self.obj_normals = (objT_inv[:, :3, :3].unsqueeze(1) @ self.obj_normals.unsqueeze(-1)).squeeze(-1) 
 
             # Transform object normals with inverse transformation
             # self.obj_normals = (objT_inv[:, :3, :3].unsqueeze(1) @ self.obj_normals.unsqueeze(-1)).squeeze(-1)
@@ -315,19 +316,20 @@ class HandObject:
 
         elif self.contact_unit == 'point':
         ## Calculate contacts
-            self.obj_verts = []
-            self.obj_normals = []
-            for obj_mesh in self.obj_models:
-                points, fidx = trimesh.sample.sample_surface(obj_mesh, self.cfg.msdf.kernel_size ** 3 * self.cfg.msdf.num_grids)
-                self.obj_verts.append(points)
-                self.obj_normals.append(obj_mesh.face_normals[fidx])
-            self.obj_verts = torch.as_tensor(np.stack(self.obj_verts, axis=0), dtype=torch.float32, device=self.device)  # (B, N*K^3, 3)
-            self.obj_normals = torch.as_tensor(np.stack(self.obj_normals, axis=0), dtype=torch.float32, device=self.device)  # (B, N*K^3, 3)
+            # self.obj_verts = []
+            # self.obj_normals = []
+            # for obj_mesh in self.obj_models:
+            #     points, fidx = trimesh.sample.sample_surface(obj_mesh, self.cfg.msdf.kernel_size ** 3 * self.cfg.msdf.num_grids)
+            #     self.obj_verts.append(points)
+            #     self.obj_normals.append(obj_mesh.face_normals[fidx])
+            # self.obj_verts = torch.as_tensor(np.stack(self.obj_verts, axis=0), dtype=torch.float32, device=self.device)  # (B, N*K^3, 3)
+            # self.obj_normals = torch.as_tensor(np.stack(self.obj_normals, axis=0), dtype=torch.float32, device=self.device)  # (B, N*K^3, 3)
+            grid_dist_to_contact = GridDistanceToContact(**self.cfg.point_contact)
 
-            obj_cmap, _, nn_idx = calculate_contact_capsule(self.hand_verts, self.hand_normals,
-                                                            self.obj_verts, self.obj_normals)
-            self.contact_map = obj_cmap.to(self.device).squeeze(-1)
             if self.correspondence_type == 'part':
+                obj_cmap, _, nn_idx = calculate_contact_capsule(self.hand_verts, self.hand_normals,
+                                                                self.obj_verts, self.obj_normals)
+                self.contact_map = obj_cmap.to(self.device).squeeze(-1)
                 self.pmap = torch.as_tensor(self.hand_part_ids).to(self.device)[nn_idx].squeeze(-1)
                 self.part_map = F.one_hot(self.pmap, 16).float().to(self.device)
                 self.obj2hand_nn_idx = nn_idx.to(self.device)
@@ -337,12 +339,12 @@ class HandObject:
 
                 # GPU nearest distance using Kaolin
                 cse_dim = self.hand_cse.shape[-1]
-                self.point_cse = torch.zeros(
-                    self.batch_size, self.obj_verts.shape[1], cse_dim,
-                    device=self.device, dtype=torch.float32)
+                self.point_cse = []
+                self.contact_map = []
+                self.pmap = []
                 mano_faces = self.mano_layer.th_faces.to(self.device)
                 for b in range(self.batch_size):
-                    grid_points_all = self.obj_verts[b].reshape(-1, 3)  # (M * K^3, 3)
+                    grid_points_all = self.obj_verts[b].reshape(-1, 3).contiguous()  # (M * K^3, 3)
                     nn_dist, nn_face_idx, nn_point = nn_dist_to_mesh_gpu(
                         grid_points_all, self.hand_verts[b], mano_faces
                     )
@@ -363,7 +365,13 @@ class HandObject:
 
                     grid_hand_cse = (face_cse * w).sum(dim=1)  # (M*K^3, cse_dim)
                     grid_hand_cse = grid_hand_cse.reshape(-1, cse_dim)
-                    self.point_cse[b] = grid_hand_cse
+                    self.point_cse.append(grid_hand_cse)
+                    self.contact_map.append(grid_dist_to_contact(nn_dist))  # (N, 1)
+                    face_part = torch.as_tensor(self.hand_part_ids).to(self.device)[nn_vert_idx]
+                    self.pmap.append(face_part[torch.arange(len(face_part), device=face_part.device), w.squeeze(-1).argmax(dim=1)])  # (M*K^3,)
+                self.point_cse = torch.stack(self.point_cse, dim=0)  # (B, M*K^3, cse_dim)
+                self.contact_map = torch.stack(self.contact_map, dim=0).unsqueeze(-1)  # (B, M*K^3, 1)
+                self.pmap = torch.stack(self.pmap, dim=0).long()
 
 
     @property
@@ -930,6 +938,38 @@ class HandObject:
                               {'name': 'obj_parts', 'geometry': pomesh, 'material': default_mat}])
 
         return vis_geoms
+    
+    
+    def vis_maps(self, idx=0, w=500, h=500):
+        heat_cmap = plt.colormaps['inferno']
+        part_cmap = plt.colormaps['hsv']
+        comesh = copy(self.vis_obj_models[idx])
+        ## contact upscale
+        dists = np.linalg.norm(self.obj_verts[idx].view(1, -1, 3).detach().cpu().numpy()
+                                - comesh.vertices.reshape(-1, 1, 3), axis=-1)
+        nn_idx = np.argmin(dists, axis=1)
+        up_contact = self.contact_map.squeeze(-1)[idx, nn_idx]
+        up_contact = linear_normalize(up_contact, 0, 1).detach().cpu().numpy()
+        vertex_colors = heat_cmap(up_contact)[:, :3]
+        vertex_colors[up_contact <= 0.1] = 0.1
+        comesh = o3dmesh_from_trimesh(comesh, (0.5, 0.5, 0.5))
+        comesh.vertex_colors = o3d.utility.Vector3dVector(vertex_colors)
+        c_img = geom_to_img([comesh], w=w, h=h, scale=0.6)
+
+        pomesh = copy(self.vis_obj_models[idx])
+        dists = np.linalg.norm(self.obj_verts[idx].view(1, -1, 3).detach().cpu().numpy()
+                                - pomesh.vertices.reshape(-1, 1, 3), axis=-1)
+        nn_idx = np.argmin(dists, axis=1)
+        up_part_ids = self.pmap[idx, nn_idx].detach().cpu().numpy() / 16
+        vertex_colors = part_cmap(up_part_ids)[:, :3]
+        vertex_colors *= up_contact.reshape(-1, 1) # Regularize by the contact maps
+        pomesh = o3dmesh_from_trimesh(pomesh)
+        pomesh.vertex_colors = o3d.utility.Vector3dVector(vertex_colors)
+        p_img = geom_to_img([pomesh], w=w, h=h, scale=0.6)
+        # img = np.concatenate([c_img, p_img], axis=0)
+
+        return c_img, p_img
+
 
     def vis_frame(self, idx=0, **kwargs):
         vis_geoms = self.get_vis_geoms(idx, **kwargs)
