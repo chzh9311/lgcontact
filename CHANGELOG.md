@@ -2,6 +2,31 @@
 ## [Unreleased]
 
 
+<a name="v1.1.1"></a>
+## [v1.1.1] - 2026-02-27
+### Bug Fixes
+- Enable training on lower version cuda.
+- Minor fixes on to make the diffusion training pipeline work with the new ae.
+- (Partly) fixes the memory leakage problem.
+- Fix the training latency in loading data and calculating unnecessary losses.
+- Fix inconsistency in v2 VAE implementation.
+- Update hand_cse implementation.
+- Unified gridAE APIs
+- Fix the abnormal time consumption of the training pass.
+- Remove unnecessary reconstruction code.
+- New training pipeline that fixes the NaN issue.
+
+### Features
+- Experiment code testing GT reconstruction capability.
+- Explicitly add zero-contact to the training data.
+- Evaluating with finer object models.
+- New version of GridAE
+- New pipeline for integrating multiple losses
+- New optimization pipeline.
+- New preprocessing & training pipeline for gridVAE
+- Implement test script for hybrid method for dual diffusion.
+
+
 <a name="v1.1.0"></a>
 ## [v1.1.0] - 2026-02-12
 ### Bug Fixes
@@ -100,7 +125,8 @@
 - Enable dumping local grids first.
 
 
-[Unreleased]: /compare/v1.1.0...HEAD
+[Unreleased]: /compare/v1.1.1...HEAD
+[v1.1.1]: /compare/v1.1.0...v1.1.1
 [v1.1.0]: /compare/v1.0.1...v1.1.0
 [v1.0.1]: /compare/v1.0.0...v1.0.1
 [v1.0.0]: /compare/v0.2.0...v1.0.0
