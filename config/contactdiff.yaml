@@ -31,7 +31,7 @@ seed: 1987
 
 val:
   batch_size: 32
-  vis_every_n_batches: 99999
+  vis_every_n_batches: 50
 
 checkpoint:
   filename: best

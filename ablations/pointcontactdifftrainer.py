@@ -31,8 +31,9 @@ class PointContactDiffTrainer(L.LightningModule):
     """
     def __init__(self, model, diffusion, cfg):
         super().__init__()
-        self.mano_layer = ManoLayer(mano_root=cfg.data.mano_root, side='right',
-                                    use_pca=cfg.pose_optimizer.use_pca, ncomps=cfg.pose_optimizer.ncomps, flat_hand_mean=True).eval().requires_grad_(False)
+        mano_layer = ManoLayer(mano_root=cfg.data.mano_root, side='right',
+                               use_pca=cfg.pose_optimizer.use_pca, ncomps=cfg.pose_optimizer.ncomps, flat_hand_mean=True)
+        object.__setattr__(self, 'mano_layer', mano_layer.eval().requires_grad_(False))
         self.automatic_optimization = cfg.train.optimizer != 'asam'
         # if cfg.pose_optimizer.name == 'hand_ae':
         #     self.hand_ae = kwargs.get('hand_ae', None)
@@ -52,7 +53,7 @@ class PointContactDiffTrainer(L.LightningModule):
         self.hand_cse = HandCSE(n_verts=778, emb_dim=self.cse_dim, cano_faces=handF.cpu().numpy()).to(self.device)
         self.hand_cse.load_state_dict(cse_ckpt['state_dict'])
         self.hand_cse.eval().requires_grad_(False)
-        self.pool = None
+        self.pool = None # Pool(processes=16)
 
         def global2local(hand_latent, grid_centers):
             return self._global2local(hand_latent, grid_centers)
@@ -148,11 +149,11 @@ class PointContactDiffTrainer(L.LightningModule):
         pred_c, pred_cse = pred_x0.split([1, self.cse_dim], dim=-1)
         contact_loss = F.mse_loss(pred_c, gt_contact[:, :, :1], reduction='mean')
         cse_loss = F.mse_loss(gt_contact[:, :, :1] * (pred_cse - gt_contact[:, :, 1:]),
-                              torch.zeros_like(pred_cse).to(self.device).float(), reduction='mean')
+                              torch.zeros_like(pred_cse).to(self.device).float(), reduction='sum') / (torch.sum(gt_contact[:, :, :1]) + 1e-8)
         losses = {}
         losses[f'{stage}/contact_loss'] = contact_loss
         losses[f'{stage}/cse_loss'] = cse_loss
-        losses[f'{stage}/total_loss'] = contact_loss + cse_loss
+        losses[f'{stage}/total_loss'] = contact_loss + cse_loss * 0.05
 
         loss_dict = {f'{stage}/{k}': v for k, v in losses.items()}
         if stage == 'val':
@@ -178,7 +179,7 @@ class PointContactDiffTrainer(L.LightningModule):
             vert_idx = Wverts.argmax(dim=-1)
             handobject.pmap[vis_idx] = torch.as_tensor(handobject.hand_part_ids).to(self.device)[vert_idx.squeeze(0)]
 
-            hand_img = handobject.vis_img(idx=vis_idx, h=400, w=400, draw_maps=False)
+            # hand_img = handobject.vis_img(idx=vis_idx, h=400, w=400, draw_maps=False)
             pred_cmap_img, pred_pmap_img = handobject.vis_maps(idx=vis_idx, w=400, h=400)
 
             # contact_img = np.concatenate([gt_cmap_img, pred_cmap_img], axis=0)
@@ -194,7 +195,7 @@ class PointContactDiffTrainer(L.LightningModule):
                 return img
             Image.fromarray(_to_uint8(pred_cmap_img)).save(f'tmp/{stage}_contact_e{self.current_epoch}_b{batch_idx}.png')
             Image.fromarray(_to_uint8(pred_pmap_img)).save(f'tmp/{stage}_part_e{self.current_epoch}_b{batch_idx}.png')
-            Image.fromarray(_to_uint8(hand_img)).save(f'tmp/{stage}_hand_e{self.current_epoch}_b{batch_idx}.png')
+            # Image.fromarray(_to_uint8(hand_img)).save(f'tmp/{stage}_hand_e{self.current_epoch}_b{batch_idx}.png')
 
             if hasattr(self.logger, 'experiment'):
                 if hasattr(self.logger.experiment, 'add_image'):
